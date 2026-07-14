@@ -89,6 +89,34 @@ const enum_specs = [_]EnumSpec{
         .raw_name = "VkCommandBufferLevel",
         .constant_prefix = "VK_COMMAND_BUFFER_LEVEL_",
     },
+    .{
+        .registry_name = "VkValidationFeatureEnableEXT",
+        .zig_name = "ValidationFeature",
+        .raw_name = "VkValidationFeatureEnableEXT",
+        .constant_prefix = "VK_VALIDATION_FEATURE_ENABLE_",
+        .terminal_token = "EXT",
+    },
+    .{
+        .registry_name = "VkValidationFeatureDisableEXT",
+        .zig_name = "DisabledValidationFeature",
+        .raw_name = "VkValidationFeatureDisableEXT",
+        .constant_prefix = "VK_VALIDATION_FEATURE_DISABLE_",
+        .terminal_token = "EXT",
+    },
+    .{
+        .registry_name = "VkValidationCheckEXT",
+        .zig_name = "DisabledValidationCheck",
+        .raw_name = "VkValidationCheckEXT",
+        .constant_prefix = "VK_VALIDATION_CHECK_",
+        .terminal_token = "EXT",
+    },
+    .{
+        .registry_name = "VkLayerSettingTypeEXT",
+        .zig_name = "LayerSettingType",
+        .raw_name = "VkLayerSettingTypeEXT",
+        .constant_prefix = "VK_LAYER_SETTING_TYPE_",
+        .terminal_token = "EXT",
+    },
 };
 
 const flag_specs = [_]FlagSpec{
@@ -324,10 +352,13 @@ pub fn main(init: std.process.Init) !void {
     for (enum_specs) |spec| {
         try writeEnum(gpa, &output.writer, registry, &binding_constants, spec);
     }
+    try writeRegistryEnums(gpa, &output.writer, registry, bindings, &binding_constants);
     for (flag_specs) |spec| {
         try writeFlags(gpa, &output.writer, registry, &binding_constants, spec);
     }
+    try writeRegistryFlags(gpa, &output.writer, registry, bindings, &binding_constants);
     try writeFeatures(gpa, &output.writer, bindings);
+    try writeExtensionFeatures(gpa, &output.writer, registry, bindings);
     try writeValueTypes(&output.writer);
 
     try std.Io.Dir.cwd().writeFile(io, .{
@@ -491,6 +522,141 @@ fn writeFeatures(gpa: std.mem.Allocator, writer: *std.Io.Writer, bindings: []con
     );
 }
 
+fn writeExtensionFeatures(
+    gpa: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    registry: []const u8,
+    bindings: []const u8,
+) !void {
+    var generated_names: std.StringHashMapUnmanaged(void) = .empty;
+    defer generated_names.deinit(gpa);
+    try writer.writeAll("\npub const extension_features = struct {\n");
+    var generated_count: usize = 0;
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<type category=\"struct\"")) |start| {
+        const opening_end = std.mem.indexOfScalarPos(u8, registry, start, '>') orelse return error.InvalidRegistry;
+        const opening = registry[start .. opening_end + 1];
+        cursor = opening_end + 1;
+        const raw_name = attribute(opening, "name") orelse continue;
+        const parents = attribute(opening, "structextends") orelse continue;
+        if (std.mem.indexOf(u8, parents, "VkPhysicalDeviceFeatures2") == null or
+            std.mem.indexOf(u8, parents, "VkDeviceCreateInfo") == null or
+            !std.mem.startsWith(u8, raw_name, "VkPhysicalDevice") or
+            attribute(opening, "alias") != null)
+        {
+            continue;
+        }
+        const close_line = std.mem.indexOfPos(u8, registry, opening_end, "\n        </type>") orelse continue;
+        const close = close_line + "\n        ".len;
+        const body = registry[opening_end + 1 .. close];
+        cursor = close + "</type>".len;
+
+        var raw_marker_buffer: [generated_name_size_max]u8 = undefined;
+        const raw_marker = try std.fmt.bufPrint(&raw_marker_buffer, "pub const struct_{s} = extern struct {{", .{raw_name});
+        if (std.mem.indexOf(u8, bindings, raw_marker) == null) continue;
+
+        const structure_type = memberStructureType(body) orelse continue;
+        var constant_marker_buffer: [generated_name_size_max]u8 = undefined;
+        const constant_marker = try std.fmt.bufPrint(&constant_marker_buffer, "pub const {s}:", .{structure_type});
+        if (std.mem.indexOf(u8, bindings, constant_marker) == null) continue;
+
+        const zig_name = raw_name["VkPhysicalDevice".len..];
+        if (zig_name.len == 0 or std.mem.startsWith(u8, zig_name, "Vulkan1")) continue;
+        try writer.print("    pub const @\"{s}\" = struct {{\n", .{zig_name});
+
+        var member_cursor: usize = 0;
+        var field_count: usize = 0;
+        while (std.mem.indexOfPos(u8, body, member_cursor, "<member")) |member_start| {
+            const member_end = std.mem.indexOfPos(u8, body, member_start, "</member>") orelse break;
+            const member = body[member_start .. member_end + "</member>".len];
+            member_cursor = member_end + "</member>".len;
+            if (std.mem.indexOf(u8, member, "<type>VkBool32</type>") == null) continue;
+            const raw_field = elementText(member, "name") orelse continue;
+            var field_buffer: [generated_name_size_max]u8 = undefined;
+            const field = try camelToSnake(raw_field, &field_buffer);
+            try writer.print("        {s}: bool = false,\n", .{field});
+            field_count += 1;
+        }
+        if (field_count == 0) {
+            try writer.writeAll("        _unused: bool = false,\n");
+        }
+        try writer.print(
+            "        pub const Raw = raw.{s};\n        pub const structure_type: raw.VkStructureType = @intCast(raw.{s});\n",
+            .{ raw_name, structure_type },
+        );
+        try writer.writeAll("        pub fn toRaw(value: @This(), next: ?*anyopaque) Raw {\n            return .{ .sType = structure_type, .pNext = next");
+        member_cursor = 0;
+        while (std.mem.indexOfPos(u8, body, member_cursor, "<member")) |member_start| {
+            const member_end = std.mem.indexOfPos(u8, body, member_start, "</member>") orelse break;
+            const member = body[member_start .. member_end + "</member>".len];
+            member_cursor = member_end + "</member>".len;
+            if (std.mem.indexOf(u8, member, "<type>VkBool32</type>") == null) continue;
+            const raw_field = elementText(member, "name") orelse continue;
+            var field_buffer: [generated_name_size_max]u8 = undefined;
+            const field = try camelToSnake(raw_field, &field_buffer);
+            try writer.print(", .{s} = if (value.{s}) raw.VK_TRUE else raw.VK_FALSE", .{ raw_field, field });
+        }
+        try writer.writeAll(" };\n        }\n        pub fn fromRaw(value: *const Raw) @This() {\n            return .{");
+        member_cursor = 0;
+        while (std.mem.indexOfPos(u8, body, member_cursor, "<member")) |member_start| {
+            const member_end = std.mem.indexOfPos(u8, body, member_start, "</member>") orelse break;
+            const member = body[member_start .. member_end + "</member>".len];
+            member_cursor = member_end + "</member>".len;
+            if (std.mem.indexOf(u8, member, "<type>VkBool32</type>") == null) continue;
+            const raw_field = elementText(member, "name") orelse continue;
+            var field_buffer: [generated_name_size_max]u8 = undefined;
+            const field = try camelToSnake(raw_field, &field_buffer);
+            try writer.print(" .{s} = value.{s} != raw.VK_FALSE,", .{ field, raw_field });
+        }
+        try writer.writeAll(" };\n        }\n    };\n");
+        try generated_names.put(gpa, raw_name, {});
+        generated_count += 1;
+    }
+    if (generated_count == 0) return error.MissingExtensionFeatureStructs;
+
+    cursor = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<type category=\"struct\"")) |start| {
+        const opening_end = std.mem.indexOfScalarPos(u8, registry, start, '>') orelse return error.InvalidRegistry;
+        const opening = registry[start .. opening_end + 1];
+        cursor = opening_end + 1;
+        const alias_name = attribute(opening, "name") orelse continue;
+        const canonical_name = attribute(opening, "alias") orelse continue;
+        if (!std.mem.startsWith(u8, alias_name, "VkPhysicalDevice") or
+            !generated_names.contains(canonical_name)) continue;
+        var alias_marker_buffer: [generated_name_size_max * 2]u8 = undefined;
+        const alias_marker = try std.fmt.bufPrint(
+            &alias_marker_buffer,
+            "pub const {s} = {s};",
+            .{ alias_name, canonical_name },
+        );
+        if (std.mem.indexOf(u8, bindings, alias_marker) == null) continue;
+        try writer.print(
+            "    pub const @\"{s}\" = @\"{s}\";\n",
+            .{ alias_name["VkPhysicalDevice".len..], canonical_name["VkPhysicalDevice".len..] },
+        );
+    }
+    try writer.writeAll("};\n");
+}
+
+fn memberStructureType(body: []const u8) ?[]const u8 {
+    const marker = "values=\"VK_STRUCTURE_TYPE_";
+    const start = std.mem.indexOf(u8, body, marker) orelse return null;
+    const value_start = start + "values=\"".len;
+    const end = std.mem.indexOfScalarPos(u8, body, value_start, '"') orelse return null;
+    return body[value_start..end];
+}
+
+fn elementText(xml: []const u8, element: []const u8) ?[]const u8 {
+    var opening_buffer: [64]u8 = undefined;
+    var closing_buffer: [64]u8 = undefined;
+    const opening = std.fmt.bufPrint(&opening_buffer, "<{s}>", .{element}) catch return null;
+    const closing = std.fmt.bufPrint(&closing_buffer, "</{s}>", .{element}) catch return null;
+    const start = std.mem.indexOf(u8, xml, opening) orelse return null;
+    const value_start = start + opening.len;
+    const end = std.mem.indexOfPos(u8, xml, value_start, closing) orelse return null;
+    return xml[value_start..end];
+}
+
 fn camelToSnake(source: []const u8, buffer: []u8) ![]const u8 {
     const Override = struct { raw: []const u8, zig: []const u8 };
     const overrides = [_]Override{
@@ -563,6 +729,47 @@ fn writeEnum(
     try writeEnumFooter(writer, spec.raw_name);
 }
 
+fn writeRegistryEnums(
+    gpa: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    registry: []const u8,
+    bindings: []const u8,
+    binding_constants: *const std.StringHashMapUnmanaged(void),
+) !void {
+    try writer.writeAll("\n/// Complete registry enum vocabulary; concise common aliases remain at module root.\npub const registry_enums = struct {\n");
+    var cursor: usize = 0;
+    var count: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<enums ")) |start| {
+        const opening_end = std.mem.indexOfScalarPos(u8, registry, start, '>') orelse return error.InvalidRegistry;
+        const opening = registry[start .. opening_end + 1];
+        cursor = opening_end + 1;
+        const raw_name = attribute(opening, "name") orelse continue;
+        const group_type = attribute(opening, "type") orelse continue;
+        if (!std.mem.eql(u8, group_type, "enum") or !std.mem.startsWith(u8, raw_name, "Vk")) continue;
+        var type_marker_buffer: [generated_name_size_max]u8 = undefined;
+        const type_marker = try std.fmt.bufPrint(&type_marker_buffer, "pub const {s} =", .{raw_name});
+        if (std.mem.indexOf(u8, bindings, type_marker) == null) continue;
+
+        try writer.print("    pub const @\"{s}\" = enum(raw.{s}) {{\n", .{ raw_name[2..], raw_name });
+        var generated_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+        defer freeKeys(gpa, &generated_names);
+        try writeGroupEntries(
+            gpa,
+            writer,
+            registry,
+            binding_constants,
+            raw_name,
+            "VK_",
+            null,
+            &generated_names,
+        );
+        try writeEnumFooter(writer, raw_name);
+        count += 1;
+    }
+    if (count == 0) return error.MissingRegistryEnums;
+    try writer.writeAll("};\n");
+}
+
 fn writeFlags(
     gpa: std.mem.Allocator,
     writer: *std.Io.Writer,
@@ -591,6 +798,64 @@ fn writeFlags(
         "pub const {s} = Flags(raw.{s}, {s});\n",
         .{ spec.flags_name, spec.raw_flags_name, spec.bit_name },
     );
+}
+
+fn writeRegistryFlags(
+    gpa: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    registry: []const u8,
+    bindings: []const u8,
+    binding_constants: *const std.StringHashMapUnmanaged(void),
+) !void {
+    try writer.writeAll("\n/// Complete registry bitmask vocabulary with domain-specific sets.\npub const registry_flags = struct {\n");
+    var cursor: usize = 0;
+    var count: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<enums ")) |start| {
+        const opening_end = std.mem.indexOfScalarPos(u8, registry, start, '>') orelse return error.InvalidRegistry;
+        const opening = registry[start .. opening_end + 1];
+        cursor = opening_end + 1;
+        const bit_name = attribute(opening, "name") orelse continue;
+        const group_type = attribute(opening, "type") orelse continue;
+        if (!std.mem.eql(u8, group_type, "bitmask") or !std.mem.startsWith(u8, bit_name, "Vk")) continue;
+        var flags_name_buffer: [generated_name_size_max]u8 = undefined;
+        const flags_name = try deriveFlagsName(bit_name, &flags_name_buffer) orelse continue;
+        var type_marker_buffer: [generated_name_size_max]u8 = undefined;
+        const type_marker = try std.fmt.bufPrint(&type_marker_buffer, "pub const {s} =", .{flags_name});
+        if (std.mem.indexOf(u8, bindings, type_marker) == null) continue;
+
+        try writer.print("    pub const @\"{s}\" = struct {{\n        pub const Bit = enum(raw.{s}) {{\n", .{ bit_name[2..], flags_name });
+        var generated_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+        defer freeKeys(gpa, &generated_names);
+        try writeGroupEntries(
+            gpa,
+            writer,
+            registry,
+            binding_constants,
+            bit_name,
+            "VK_",
+            null,
+            &generated_names,
+        );
+        try writeEnumFooter(writer, flags_name);
+        try writer.print("        pub const Set = Flags(raw.{s}, Bit);\n    }};\n", .{flags_name});
+        count += 1;
+    }
+    if (count == 0) return error.MissingRegistryFlags;
+    try writer.writeAll("};\n");
+}
+
+fn deriveFlagsName(bit_name: []const u8, buffer: []u8) !?[]const u8 {
+    const bit_suffix, const flags_suffix = if (std.mem.endsWith(u8, bit_name, "FlagBits2"))
+        .{ "FlagBits2", "Flags2" }
+    else if (std.mem.endsWith(u8, bit_name, "FlagBits"))
+        .{ "FlagBits", "Flags" }
+    else
+        return null;
+    const prefix = bit_name[0 .. bit_name.len - bit_suffix.len];
+    if (prefix.len + flags_suffix.len > buffer.len) return error.NameTooLong;
+    @memcpy(buffer[0..prefix.len], prefix);
+    @memcpy(buffer[prefix.len..][0..flags_suffix.len], flags_suffix);
+    return buffer[0 .. prefix.len + flags_suffix.len];
 }
 
 fn writeGroupEntries(
@@ -1015,11 +1280,13 @@ fn writeValueTypes(writer: *std.Io.Writer) !void {
         \\pub const MipLevelCount = union(enum) {
         \\    count: u32,
         \\    remaining,
+        \\    pub fn fromRaw(value: u32) MipLevelCount { return if (value == raw.VK_REMAINING_MIP_LEVELS) .remaining else .{ .count = value }; }
         \\    pub fn toRaw(value: MipLevelCount) u32 { return switch (value) { .count => |count| count, .remaining => raw.VK_REMAINING_MIP_LEVELS }; }
         \\};
         \\pub const ArrayLayerCount = union(enum) {
         \\    count: u32,
         \\    remaining,
+        \\    pub fn fromRaw(value: u32) ArrayLayerCount { return if (value == raw.VK_REMAINING_ARRAY_LAYERS) .remaining else .{ .count = value }; }
         \\    pub fn toRaw(value: ArrayLayerCount) u32 { return switch (value) { .count => |count| count, .remaining => raw.VK_REMAINING_ARRAY_LAYERS }; }
         \\};
         \\

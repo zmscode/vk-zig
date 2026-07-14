@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     for (extensions) |extension| {
         std.log.info(
             "  {s} (revision {d})",
-            .{ vk.extensionName(&extension), extension.specVersion },
+            .{ extension.name(), extension.revision },
         );
     }
 }

@@ -11,15 +11,14 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("{d} instance layers:", .{layers.len});
     for (layers) |layer| {
-        const version = vk.Version.decode(layer.specVersion);
         std.log.info(
             "  {s} (Vulkan {d}.{d}.{d}): {s}",
             .{
-                vk.layerName(&layer),
-                version.major,
-                version.minor,
-                version.patch,
-                vk.layerDescription(&layer),
+                layer.name(),
+                layer.spec_version.major,
+                layer.spec_version.minor,
+                layer.spec_version.patch,
+                layer.description(),
             },
         );
     }

@@ -330,7 +330,20 @@ fn addExampleSteps(
     vulkan: *std.Build.Module,
 ) void {
     const examples_step = b.step("examples", "Build every Vulkan example");
+    const checker = b.addExecutable(.{
+        .name = "check-vulkan-examples",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_examples.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const check_examples = b.addRunArtifact(checker);
+    check_examples.addFileArg(b.path("examples/support.zig"));
     for (examples) |example| {
+        if (!std.mem.eql(u8, example.name, "raw-create-info")) {
+            check_examples.addFileArg(b.path(example.path));
+        }
         const executable = b.addExecutable(.{
             .name = b.fmt("vulkan-{s}", .{example.name}),
             .root_module = b.createModule(.{
@@ -360,6 +373,7 @@ fn addExampleSteps(
             run_example_step.dependOn(&run.step);
         }
     }
+    examples_step.dependOn(&check_examples.step);
 }
 
 const Example = struct {
@@ -386,6 +400,10 @@ const examples = [_]Example{
     .{ .name = "legacy-render-pass", .path = "examples/legacy_render_pass.zig" },
     .{ .name = "timeline-submit", .path = "examples/timeline_submit.zig" },
     .{ .name = "buffer-setup", .path = "examples/buffer_setup.zig" },
+    .{ .name = "compute-dispatch", .path = "examples/compute_dispatch.zig" },
+    .{ .name = "resize-triangle", .path = "examples/resize_triangle.zig" },
+    .{ .name = "textured-triangle", .path = "examples/textured_triangle.zig" },
+    .{ .name = "swapchain-recreation", .path = "examples/swapchain_recreation.zig" },
 };
 
 fn addUpdateStep(

@@ -114,6 +114,26 @@ const queue = try device.queue(graphics_family, .first);
 std.debug.assert(device.supportsFeature(.dynamic_rendering));
 ```
 
+Extension-only feature structures are generated from the registry and composed in stable,
+caller-owned chains. The same typed values are queried, checked, and reused for device creation:
+
+```zig
+const MeshFeatures = vk.ExtensionFeature.MeshShaderFeaturesEXT;
+const MeshChain = vk.ExtensionFeatureChain(&.{MeshFeatures});
+var requested_mesh = MeshChain.init(.{MeshFeatures{
+    .mesh_shader = true,
+    .task_shader = true,
+}});
+
+var device = try physical_device.createDeviceWithExtensionFeatures(.{
+    .queues = &queues,
+    .extensions = &.{vk.extension.ext_mesh_shader},
+}, &requested_mesh);
+```
+
+The chain rejects duplicate/aliased node types at compile time, queries support before dispatch,
+and returns `error.FeatureNotPresent` rather than silently enabling an unsupported feature.
+
 Generated names remove repeated string literals, while `ExtensionSet` combines platform/windowing
 requirements without duplicates:
 
@@ -128,6 +148,20 @@ var instance = try entry.createInstance(.{
     .extensions = extensions.slice(),
     .enumerate_portability = vk.platform == .metal,
 });
+```
+
+Instance and device discovery return typed properties. Names and descriptions are bounded views
+into each returned record, and caller-storage/count forms are available when allocation is not
+appropriate:
+
+```zig
+const available_extensions = try entry.instanceExtensions(gpa, null);
+defer gpa.free(available_extensions);
+if (vk.supportsExtension(available_extensions, vk.extension.ext_debug_utils.name)) {
+    for (available_extensions) |*property| {
+        std.log.info("{s} revision {d}", .{ property.name(), property.revision });
+    }
+}
 ```
 
 Use `queueFamilies` and the typed memory snapshot instead of repeating flag and bit-index
@@ -531,6 +565,14 @@ const debug_messenger: ?vk.debug_utils.Config =
 
 var instance = try entry.createInstance(.{
     .layers = layers,
+    .validation = .{
+        .enabled = &.{ .best_practices, .synchronization_validation },
+    },
+    .layer_settings = &.{.{
+        .layer_name = vk.layer.khronos_validation.name,
+        .name = "validate_sync",
+        .values = .{ .bools = &.{true} },
+    }},
     .debug_messenger = debug_messenger,
     .enumerate_portability = vk.platform == .metal,
 });
@@ -677,6 +719,18 @@ const create_info: vk.raw.VkBufferCreateInfo = .{
     .usage = vk.raw.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
     .sharingMode = vk.raw.VK_SHARING_MODE_EXCLUSIVE,
 };
+```
+
+Raw instance flags, application/instance chains, and allocation callbacks are intentionally kept
+out of `InstanceOptions`. Interop code passes them through the explicitly advanced entry point:
+
+```zig
+var instance = try entry.createInstanceAdvanced(.{
+    .application_name = "ffi-app",
+}, .{
+    .next = custom_instance_chain,
+    .allocation_callbacks = custom_callbacks,
+});
 ```
 
 The raw file is generated for the selected target because Vulkan handle representation and

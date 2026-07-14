@@ -37,6 +37,10 @@ pub const raw = @import("vulkan_raw");
 pub const command = @import("vulkan_commands");
 /// Generated, strongly typed Vulkan enums, flag sets, and common value structures.
 pub const types = @import("vulkan_types");
+/// Complete generated enum domains; common domains also have concise root aliases.
+pub const enums = types.registry_enums;
+/// Complete generated bit/flag domains with unknown-bit-preserving `Set` types.
+pub const flag_domains = types.registry_flags;
 /// Converts a translated optional `PFN_vk*` type into its storable function-pointer type.
 pub const CommandFunction = command.FunctionType;
 /// Generated Vulkan extension descriptors with stable sentinel-terminated names.
@@ -46,10 +50,18 @@ pub const DeviceFeature = device_configuration.Feature;
 pub const DeviceFeatureSet = device_configuration.FeatureSet;
 pub const DeviceFeatureProfile = feature_chains.Profile;
 pub const deviceFeatureProfileRequirements = feature_chains.profileRequirements;
+pub const ExtensionFeature = feature_chains.ExtensionFeature;
+pub const ExtensionFeatureChain = feature_chains.ExtensionChain;
 pub const DeviceRequirements = device_configuration.Requirements;
 pub const DeviceEvaluation = device_configuration.Evaluation;
 pub const DeviceRejection = device_configuration.Rejection;
 pub const DeviceGlobalPriority = device_configuration.GlobalPriority;
+pub const ValidationFeature = configuration.ValidationFeature;
+pub const DisabledValidationFeature = configuration.DisabledValidationFeature;
+pub const DisabledValidationCheck = configuration.DisabledValidationCheck;
+pub const ValidationOptions = configuration.ValidationOptions;
+pub const LayerSetting = configuration.LayerSetting;
+pub const LayerSettingValues = configuration.LayerSettingValues;
 
 pub const Flags = types.Flags;
 pub const PhysicalDeviceType = types.PhysicalDeviceType;
@@ -182,12 +194,16 @@ pub const Portability = configuration.Portability;
 pub const SurfaceConfiguration = configuration.SurfaceConfiguration;
 pub const ExtensionSet = registry.NameSet;
 pub const boundedCString = registry.boundedCString;
+pub const ExtensionProperty = registry.ExtensionProperty;
+pub const LayerProperty = registry.LayerProperty;
 pub const extensionName = registry.extensionName;
 pub const layerName = registry.layerName;
 pub const layerDescription = registry.layerDescription;
 pub const physicalDeviceName = registry.physicalDeviceName;
 pub const supportsExtension = registry.supportsExtension;
 pub const supportsLayer = registry.supportsLayer;
+pub const supportsExtensionRaw = registry.supportsExtensionRaw;
+pub const supportsLayerRaw = registry.supportsLayerRaw;
 pub const diagnostics = configuration.diagnostics;
 
 pub const Loader = struct {
@@ -270,7 +286,109 @@ pub const Entry = struct {
         return Version.decode(encoded);
     }
 
+    pub fn instanceExtensionCount(entry: *const Entry, layer_name: ?[:0]const u8) Error!u32 {
+        var count: u32 = 0;
+        try checkSuccess(entry.enumerate_instance_extension_properties(
+            optionalStringPointer(layer_name),
+            &count,
+            null,
+        ));
+        try validateEnumerationCount(count);
+        return count;
+    }
+
+    pub fn instanceExtensionsInto(
+        entry: *const Entry,
+        layer_name: ?[:0]const u8,
+        storage: []ExtensionProperty,
+    ) Error![]ExtensionProperty {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const required = try entry.instanceExtensionCount(layer_name);
+        if (required > storage.len) return error.BufferTooSmall;
+        var raw_properties: [enumeration_item_count_max]raw.VkExtensionProperties = undefined;
+        var written: u32 = @intCast(storage.len);
+        const result = entry.enumerate_instance_extension_properties(
+            optionalStringPointer(layer_name),
+            &written,
+            if (storage.len == 0) null else raw_properties[0..storage.len].ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or written > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        for (storage[0..written], raw_properties[0..written]) |*property, raw_property| {
+            property.* = .fromRaw(raw_property);
+        }
+        return storage[0..written];
+    }
+
     pub fn instanceExtensions(
+        entry: *const Entry,
+        gpa: std.mem.Allocator,
+        layer_name: ?[:0]const u8,
+    ) (Error || std.mem.Allocator.Error)![]ExtensionProperty {
+        var output = try gpa.alloc(ExtensionProperty, try entry.instanceExtensionCount(layer_name));
+        errdefer gpa.free(output);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = entry.instanceExtensionsInto(layer_name, output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try entry.instanceExtensionCount(layer_name);
+                    const next = if (required > output.len) required else try nextEnumerationCapacity(required, output.len);
+                    output = try gpa.realloc(output, next);
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(output, written.len);
+        }
+        return error.EnumerationUnstable;
+    }
+
+    pub fn instanceLayerCount(entry: *const Entry) Error!u32 {
+        var count: u32 = 0;
+        try checkSuccess(entry.enumerate_instance_layer_properties(&count, null));
+        try validateEnumerationCount(count);
+        return count;
+    }
+
+    pub fn instanceLayersInto(entry: *const Entry, storage: []LayerProperty) Error![]LayerProperty {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const required = try entry.instanceLayerCount();
+        if (required > storage.len) return error.BufferTooSmall;
+        var raw_properties: [enumeration_item_count_max]raw.VkLayerProperties = undefined;
+        var written: u32 = @intCast(storage.len);
+        const result = entry.enumerate_instance_layer_properties(
+            &written,
+            if (storage.len == 0) null else raw_properties[0..storage.len].ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or written > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        for (storage[0..written], raw_properties[0..written]) |*property, raw_property| {
+            property.* = .fromRaw(raw_property);
+        }
+        return storage[0..written];
+    }
+
+    pub fn instanceLayers(
+        entry: *const Entry,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]LayerProperty {
+        var output = try gpa.alloc(LayerProperty, try entry.instanceLayerCount());
+        errdefer gpa.free(output);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = entry.instanceLayersInto(output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try entry.instanceLayerCount();
+                    const next = if (required > output.len) required else try nextEnumerationCapacity(required, output.len);
+                    output = try gpa.realloc(output, next);
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(output, written.len);
+        }
+        return error.EnumerationUnstable;
+    }
+
+    pub fn instanceExtensionsRaw(
         entry: *const Entry,
         gpa: std.mem.Allocator,
         layer_name: ?[:0]const u8,
@@ -310,7 +428,7 @@ pub const Entry = struct {
         return error.EnumerationUnstable;
     }
 
-    pub fn instanceLayers(
+    pub fn instanceLayersRaw(
         entry: *const Entry,
         gpa: std.mem.Allocator,
     ) (Error || std.mem.Allocator.Error)![]raw.VkLayerProperties {
@@ -372,6 +490,14 @@ pub const Entry = struct {
         entry: *const Entry,
         options: InstanceOptions,
     ) Error!Instance {
+        return entry.createInstanceAdvanced(options, .{});
+    }
+
+    pub fn createInstanceAdvanced(
+        entry: *const Entry,
+        options: InstanceOptions,
+        advanced: AdvancedInstanceOptions,
+    ) Error!Instance {
         var layer_pointers: [name_count_max][*c]const u8 = undefined;
         const layer_count = try fillNamePointers(options.layers, &layer_pointers);
 
@@ -385,7 +511,29 @@ pub const Entry = struct {
                 extension_count += 1;
             }
         }
-        var flags = options.flags;
+        const typed_chain_extensions = [_]?[:0]const u8{
+            if (options.validation.enabled.len != 0 or options.validation.disabled.len != 0)
+                extension.ext_validation_features.name
+            else
+                null,
+            if (options.validation.disabled_checks.len != 0)
+                extension.ext_validation_flags.name
+            else
+                null,
+            if (options.layer_settings.len != 0)
+                extension.ext_layer_settings.name
+            else
+                null,
+        };
+        for (typed_chain_extensions) |maybe_name| {
+            const name = maybe_name orelse continue;
+            if (!containsName(options.extensions, name)) {
+                if (extension_count == extension_pointers.len) return error.CountOverflow;
+                extension_pointers[extension_count] = name.ptr;
+                extension_count += 1;
+            }
+        }
+        var flags = advanced.flags;
         if (options.enumerate_portability) {
             if (platform != .metal) return error.PortabilityNotSupported;
             const portability_extension = Portability.instanceExtensions()[0];
@@ -399,18 +547,24 @@ pub const Entry = struct {
 
         const application_info: raw.VkApplicationInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_APPLICATION_INFO,
-            .pNext = options.application_next,
+            .pNext = advanced.application_next,
             .pApplicationName = optionalStringPointer(options.application_name),
             .applicationVersion = options.application_version.encode(),
             .pEngineName = optionalStringPointer(options.engine_name),
             .engineVersion = options.engine_version.encode(),
             .apiVersion = options.api_version.encode(),
         };
+        var chain_storage: configuration.InstanceChainStorage = .{};
+        var instance_next = try chain_storage.link(
+            options.validation,
+            options.layer_settings,
+            advanced.next,
+        );
         var debug_create_info: raw.VkDebugUtilsMessengerCreateInfoEXT = undefined;
-        const instance_next: ?*const anyopaque = if (options.debug_messenger) |config| next: {
-            debug_create_info = config.createInfoRaw(options.next);
-            break :next @ptrCast(&debug_create_info);
-        } else options.next;
+        if (options.debug_messenger) |config| {
+            debug_create_info = config.createInfoRaw(instance_next);
+            instance_next = @ptrCast(&debug_create_info);
+        }
         const create_info: raw.VkInstanceCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
             .pNext = instance_next,
@@ -421,12 +575,12 @@ pub const Entry = struct {
             .enabledExtensionCount = @intCast(extension_count),
             .ppEnabledExtensionNames = pointerArray(extension_pointers[0..extension_count]),
         };
-        var instance = try entry.createInstanceRaw(&create_info, options.allocation_callbacks);
+        var instance = try entry.createInstanceRaw(&create_info, advanced.allocation_callbacks);
         errdefer instance.deinit();
         if (options.debug_messenger) |config| {
             instance._debug_messenger = try instance.createDebugMessenger(
                 config,
-                options.allocation_callbacks,
+                advanced.allocation_callbacks,
             );
         }
         return instance;
@@ -473,12 +627,18 @@ pub const InstanceOptions = struct {
     api_version: Version = .{ .major = 1, .minor = 0, .patch = 0 },
     layers: []const [:0]const u8 = &.{},
     extensions: []const [:0]const u8 = &.{},
-    flags: InstanceCreateFlags = .empty,
     enumerate_portability: bool = false,
+    validation: configuration.ValidationOptions = .{},
+    layer_settings: []const configuration.LayerSetting = &.{},
+    debug_messenger: ?debug_utils.Config = null,
+};
+
+/// Explicit escape hatch for raw instance flags, chains, and host allocation callbacks.
+pub const AdvancedInstanceOptions = struct {
+    flags: InstanceCreateFlags = .empty,
     application_next: ?*const anyopaque = null,
     next: ?*const anyopaque = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
-    debug_messenger: ?debug_utils.Config = null,
 };
 
 pub const Instance = struct {
@@ -1192,6 +1352,19 @@ pub const PhysicalDevice = struct {
         return value;
     }
 
+    /// Queries a caller-owned chain of registry-generated extension feature nodes.
+    pub fn extensionFeatures(device: *const PhysicalDevice, chain: anytype) Error!void {
+        const get_features = device.dispatch.get_physical_device_features2 orelse {
+            return error.MissingCommand;
+        };
+        var root: raw.VkPhysicalDeviceFeatures2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = chain.prepareQuery(),
+        };
+        get_features(device._handle, &root);
+        chain.finishQuery();
+    }
+
     /// Deprecated raw escape hatch. Prefer `features`; use `features2Raw` only
     /// when interoperating with a feature structure not yet wrapped by vk-zig.
     pub const features2 = features2Raw;
@@ -1383,6 +1556,20 @@ pub const PhysicalDevice = struct {
     }
 
     pub fn deviceExtensions(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+        layer_name: ?[:0]const u8,
+    ) (Error || std.mem.Allocator.Error)![]ExtensionProperty {
+        const raw_properties = try device.deviceExtensionsRaw(gpa, layer_name);
+        defer gpa.free(raw_properties);
+        const output = try gpa.alloc(ExtensionProperty, raw_properties.len);
+        for (output, raw_properties) |*property, raw_property| {
+            property.* = .fromRaw(raw_property);
+        }
+        return output;
+    }
+
+    pub fn deviceExtensionsRaw(
         device: *const PhysicalDevice,
         gpa: std.mem.Allocator,
         layer_name: ?[:0]const u8,
@@ -1604,6 +1791,26 @@ pub const PhysicalDevice = struct {
         physical_device: *const PhysicalDevice,
         options: DeviceOptions,
     ) Error!Device {
+        return physical_device.createDeviceWithExtensionTail(options, null);
+    }
+
+    /// Validates and enables a caller-owned registry-generated extension feature chain.
+    pub fn createDeviceWithExtensionFeatures(
+        physical_device: *const PhysicalDevice,
+        options: DeviceOptions,
+        requested: anytype,
+    ) Error!Device {
+        var supported = @TypeOf(requested.*).empty();
+        try physical_device.extensionFeatures(&supported);
+        if (!requested.supportedBy(&supported)) return error.FeatureNotPresent;
+        return physical_device.createDeviceWithExtensionTail(options, requested.prepareEnable());
+    }
+
+    fn createDeviceWithExtensionTail(
+        physical_device: *const PhysicalDevice,
+        options: DeviceOptions,
+        extension_feature_tail: ?*anyopaque,
+    ) Error!Device {
         if (options.enable_portability_subset and platform != .metal) {
             return error.PortabilityNotSupported;
         }
@@ -1660,8 +1867,12 @@ pub const PhysicalDevice = struct {
         const api_version = physical_device.properties().api_version;
         const generated_features = options.features.generated();
         var feature_storage = feature_chains.FeatureStorage.init(generated_features);
-        const feature_root = feature_storage.link(api_version);
+        const feature_root = feature_storage.linkWithTail(api_version, extension_feature_tail);
         const has_promoted_features = generated_features.hasPromoted();
+        const feature_chain_head: ?*anyopaque = if (has_promoted_features)
+            @ptrCast(feature_root)
+        else
+            extension_feature_tail;
 
         var group_handles: [device_configuration.group_device_count_max]raw.VkPhysicalDevice = undefined;
         var group_info: raw.VkDeviceGroupDeviceCreateInfo = .{
@@ -1678,12 +1889,12 @@ pub const PhysicalDevice = struct {
             if (!contains_primary) return error.InvalidHandle;
             group_info.physicalDeviceCount = @intCast(options.device_group.len);
             group_info.pPhysicalDevices = group_handles[0..options.device_group.len].ptr;
-            group_info.pNext = if (has_promoted_features) feature_root else null;
+            group_info.pNext = feature_chain_head;
         }
 
         const create_info: raw.VkDeviceCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = if (options.device_group.len != 0) &group_info else if (has_promoted_features) feature_root else null,
+            .pNext = if (options.device_group.len != 0) &group_info else feature_chain_head,
             .queueCreateInfoCount = @intCast(options.queues.len),
             .pQueueCreateInfos = queue_infos[0..options.queues.len].ptr,
             .enabledExtensionCount = @intCast(extension_count),

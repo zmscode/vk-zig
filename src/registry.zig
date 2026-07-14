@@ -4,6 +4,43 @@ const core = @import("core.zig");
 
 pub const name_count_max = 256;
 
+pub const ExtensionProperty = struct {
+    _name: [raw.VK_MAX_EXTENSION_NAME_SIZE]u8,
+    revision: u32,
+
+    pub fn fromRaw(property: raw.VkExtensionProperties) ExtensionProperty {
+        return .{ ._name = property.extensionName, .revision = property.specVersion };
+    }
+
+    pub fn name(property: *const ExtensionProperty) []const u8 {
+        return boundedCString(&property._name);
+    }
+};
+
+pub const LayerProperty = struct {
+    _name: [raw.VK_MAX_EXTENSION_NAME_SIZE]u8,
+    spec_version: core.Version,
+    implementation_version: core.Version,
+    _description: [raw.VK_MAX_DESCRIPTION_SIZE]u8,
+
+    pub fn fromRaw(property: raw.VkLayerProperties) LayerProperty {
+        return .{
+            ._name = property.layerName,
+            .spec_version = .decode(property.specVersion),
+            .implementation_version = .decode(property.implementationVersion),
+            ._description = property.description,
+        };
+    }
+
+    pub fn name(property: *const LayerProperty) []const u8 {
+        return boundedCString(&property._name);
+    }
+
+    pub fn description(property: *const LayerProperty) []const u8 {
+        return boundedCString(&property._description);
+    }
+};
+
 /// A fixed-capacity, allocation-free set of unique extension or layer names.
 pub fn NameSet(comptime capacity: usize) type {
     if (capacity > name_count_max) {
@@ -61,7 +98,7 @@ pub fn physicalDeviceName(property: *const raw.VkPhysicalDeviceProperties) []con
     return boundedCString(&property.deviceName);
 }
 
-pub fn supportsExtension(
+pub fn supportsExtensionRaw(
     properties: []const raw.VkExtensionProperties,
     expected: []const u8,
 ) bool {
@@ -71,9 +108,23 @@ pub fn supportsExtension(
     return false;
 }
 
-pub fn supportsLayer(properties: []const raw.VkLayerProperties, expected: []const u8) bool {
+pub fn supportsLayerRaw(properties: []const raw.VkLayerProperties, expected: []const u8) bool {
     for (properties) |*property| {
         if (std.mem.eql(u8, layerName(property), expected)) return true;
+    }
+    return false;
+}
+
+pub fn supportsExtension(properties: []const ExtensionProperty, expected: []const u8) bool {
+    for (properties) |*property| {
+        if (std.mem.eql(u8, property.name(), expected)) return true;
+    }
+    return false;
+}
+
+pub fn supportsLayer(properties: []const LayerProperty, expected: []const u8) bool {
+    for (properties) |*property| {
+        if (std.mem.eql(u8, property.name(), expected)) return true;
     }
     return false;
 }

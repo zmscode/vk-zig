@@ -142,6 +142,15 @@ test "raw bindings contain core Vulkan declarations" {
     try std.testing.expect(@hasDecl(vk.raw, "VK_API_VERSION_1_4"));
 }
 
+test "complete registry enum and flag domains preserve future values and bits" {
+    const future_present = vk.enums.PresentModeKHR.fromRaw(0x7fff_0000);
+    try std.testing.expectEqual(@as(vk.raw.VkPresentModeKHR, 0x7fff_0000), future_present.toRaw());
+
+    const unknown_color_bit: vk.raw.VkColorComponentFlags = 0x8000_0000;
+    const colors = vk.flag_domains.ColorComponentFlagBits.Set.fromRaw(unknown_color_bit);
+    try std.testing.expectEqual(unknown_color_bit, colors.toRaw());
+}
+
 test "default Apple builds include Metal surface declarations" {
     if (vk.platform != .metal) return;
     try std.testing.expect(@hasDecl(vk.raw, "VkMetalSurfaceCreateInfoEXT"));
@@ -400,11 +409,13 @@ test "diagnostic availability recognizes names and resolves independent requests
         vk.extension.ext_debug_utils.name,
     );
 
+    const typed_validation_layer = vk.LayerProperty.fromRaw(validation_layer);
+    const typed_debug_extension = vk.ExtensionProperty.fromRaw(debug_extension);
     const available = vk.diagnostics.detect(.{
         .validation = true,
         .debug_messenger = true,
         .gpu_labels = true,
-    }, &.{validation_layer}, &.{debug_extension});
+    }, &.{typed_validation_layer}, &.{typed_debug_extension});
     try std.testing.expect(available.validation_enabled);
     try std.testing.expect(available.debug_utils_enabled);
     try std.testing.expect(available.debug_messenger_enabled);
@@ -720,13 +731,13 @@ test "bounded property names and support checks do not allocate" {
     var extension: vk.raw.VkExtensionProperties = .{};
     @memcpy(extension.extensionName[0..6], "VK_EXT");
     try std.testing.expectEqualStrings("VK_EXT", vk.extensionName(&extension));
-    try std.testing.expect(vk.supportsExtension(&.{extension}, "VK_EXT"));
-    try std.testing.expect(!vk.supportsExtension(&.{extension}, "VK_EX"));
-    try std.testing.expect(!vk.supportsExtension(&.{extension}, ""));
+    try std.testing.expect(vk.supportsExtensionRaw(&.{extension}, "VK_EXT"));
+    try std.testing.expect(!vk.supportsExtensionRaw(&.{extension}, "VK_EX"));
+    try std.testing.expect(!vk.supportsExtensionRaw(&.{extension}, ""));
 
     var empty: vk.raw.VkExtensionProperties = .{};
     try std.testing.expectEqualStrings("", vk.extensionName(&empty));
-    try std.testing.expect(vk.supportsExtension(&.{empty}, ""));
+    try std.testing.expect(vk.supportsExtensionRaw(&.{empty}, ""));
 
     var full: vk.raw.VkExtensionProperties = .{};
     @memset(&full.extensionName, 'x');
@@ -734,8 +745,13 @@ test "bounded property names and support checks do not allocate" {
 
     var layer: vk.raw.VkLayerProperties = .{};
     @memcpy(layer.layerName[0..8], "VK_LAYER");
-    try std.testing.expect(vk.supportsLayer(&.{layer}, "VK_LAYER"));
-    try std.testing.expect(!vk.supportsLayer(&.{layer}, "VK_LAY"));
+    try std.testing.expect(vk.supportsLayerRaw(&.{layer}, "VK_LAYER"));
+    try std.testing.expect(!vk.supportsLayerRaw(&.{layer}, "VK_LAY"));
+
+    const typed_extension = vk.ExtensionProperty.fromRaw(extension);
+    const typed_layer = vk.LayerProperty.fromRaw(layer);
+    try std.testing.expect(vk.supportsExtension(&.{typed_extension}, "VK_EXT"));
+    try std.testing.expect(vk.supportsLayer(&.{typed_layer}, "VK_LAYER"));
 }
 
 test "typed device options reject invalid input before dispatch" {
@@ -854,6 +870,7 @@ test "all public wrapper declarations compile" {
     _ = &vk.Entry.require;
     _ = &vk.Entry.loadUnchecked;
     _ = &vk.Entry.createInstance;
+    _ = &vk.Entry.createInstanceAdvanced;
     _ = &vk.Entry.createInstanceRaw;
     _ = &vk.Instance.deinit;
     _ = &vk.Instance.rawHandle;
@@ -876,12 +893,14 @@ test "all public wrapper declarations compile" {
     _ = &vk.PhysicalDevice.sparseImageFormatProperties;
     _ = &vk.PhysicalDevice.features;
     _ = &vk.PhysicalDevice.features2;
+    _ = &vk.PhysicalDevice.extensionFeatures;
     _ = &vk.PhysicalDevice.memoryProperties;
     _ = &vk.PhysicalDevice.memoryPropertiesInto;
     _ = &vk.PhysicalDevice.memoryPropertiesRaw;
     _ = &vk.PhysicalDevice.queueFamilyProperties;
     _ = &vk.PhysicalDevice.queueFamilies;
     _ = &vk.PhysicalDevice.deviceExtensions;
+    _ = &vk.PhysicalDevice.deviceExtensionsRaw;
     _ = &vk.PhysicalDevice.surfaceSupport;
     _ = &vk.PhysicalDevice.surfaceCapabilities;
     _ = &vk.PhysicalDevice.surfaceFormats;
@@ -906,6 +925,7 @@ test "all public wrapper declarations compile" {
     _ = &vk.selectMemoryTypeIndex;
     _ = &vk.selectMemoryTypeIndexRaw;
     _ = &vk.PhysicalDevice.createDevice;
+    _ = &vk.PhysicalDevice.createDeviceWithExtensionFeatures;
     _ = &vk.PhysicalDevice.createDeviceRaw;
     _ = &vk.Device.deinit;
     _ = &vk.Device.load;

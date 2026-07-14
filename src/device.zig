@@ -334,7 +334,7 @@ pub fn extensionSupported(
     api_version: core.Version,
     available: []const raw.VkExtensionProperties,
 ) bool {
-    if (registry.supportsExtension(available, requested.name)) return true;
+    if (registry.supportsExtensionRaw(available, requested.name)) return true;
     const promoted = requested.promoted_to orelse return false;
     return versionTokenSatisfied(promoted, api_version);
 }
