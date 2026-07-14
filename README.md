@@ -438,6 +438,11 @@ zig build update
 zig build update -Dvulkan-ref=v1.4.356
 ```
 
+The generated command module records dispatch scope, core promotion version, extension provenance,
+and every equivalent core/extension spelling. Its `core_command_coverage` table accounts for every
+Vulkan 1.0–1.4 registry command as `.wrapped` or `.raw_only`; generation fails if a core command is
+missing. Typed wrapper dispatch uses this metadata to resolve promoted aliases automatically.
+
 Running the example requires an installed Vulkan loader; on macOS that normally means a Vulkan
 SDK or MoltenVK installation discoverable as `libvulkan` or `libMoltenVK`.
 See `examples/README.md` for the complete example matrix and named run commands.

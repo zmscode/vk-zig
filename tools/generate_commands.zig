@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 4) return error.InvalidArguments;
+    if (args.len != 5) return error.InvalidArguments;
 
     const bindings = try std.Io.Dir.cwd().readFileAlloc(
         io,
@@ -40,6 +40,13 @@ pub fn main(init: std.process.Init) !void {
         .limited(file_size_max),
     );
     defer gpa.free(registry);
+    const wrapper_source = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        args[3],
+        gpa,
+        .limited(file_size_max),
+    );
+    defer gpa.free(wrapper_source);
 
     var registry_commands: std.StringHashMapUnmanaged(void) = .empty;
     defer registry_commands.deinit(gpa);
@@ -134,14 +141,14 @@ pub fn main(init: std.process.Init) !void {
     var key_iterator = generated_names.keyIterator();
     while (key_iterator.next()) |key| gpa.free(key.*);
 
-    try writeCoreCoverage(&output.writer, commands.items, &core_versions);
+    try writeCoreCoverage(&output.writer, commands.items, &core_versions, wrapper_source);
 
     try writeExtensions(&output.writer, registry_extensions.items);
 
     if (commands.items.len < 100) return error.IncompleteCommandGeneration;
     if (registry_extensions.items.len < 100) return error.IncompleteExtensionGeneration;
     try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = args[3],
+        .sub_path = args[4],
         .data = output.written(),
     });
 }
@@ -426,13 +433,17 @@ fn writeCoreCoverage(
     writer: *std.Io.Writer,
     commands: []const Command,
     versions: *const std.StringHashMapUnmanaged(ApiVersion),
+    wrapper_source: []const u8,
 ) !void {
     try writer.writeAll(
+        \\
+        \\pub const WrapperStatus = enum { wrapped, raw_only };
         \\
         \\pub const CoreCommandCoverage = struct {
         \\    name: [:0]const u8,
         \\    scope: Scope,
         \\    version: ApiVersion,
+        \\    status: WrapperStatus,
         \\};
         \\
         \\pub const core_command_coverage = [_]CoreCommandCoverage{
@@ -443,11 +454,17 @@ fn writeCoreCoverage(
     while (iterator.next()) |entry| {
         const name = entry.key_ptr.*;
         const version = entry.value_ptr.*;
+        var pfn_buffer: [256]u8 = undefined;
+        const pfn_name = try std.fmt.bufPrint(&pfn_buffer, "PFN_{s}", .{name});
+        const status: []const u8 = if (std.mem.indexOf(u8, wrapper_source, pfn_name) != null)
+            "wrapped"
+        else
+            "raw_only";
         for (commands) |command| {
             if (!std.mem.eql(u8, command.command_name, name)) continue;
             try writer.print(
-                "    .{{ .name = \"{s}\", .scope = .{s}, .version = .{{ .major = {d}, .minor = {d} }} }},\n",
-                .{ name, @tagName(command.scope.?), version.major, version.minor },
+                "    .{{ .name = \"{s}\", .scope = .{s}, .version = .{{ .major = {d}, .minor = {d} }}, .status = .{s} }},\n",
+                .{ name, @tagName(command.scope.?), version.major, version.minor, status },
             );
             covered += 1;
             break;

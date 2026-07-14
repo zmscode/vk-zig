@@ -207,6 +207,7 @@ fn generateCommands(
     const run_generator = b.addRunArtifact(generator);
     run_generator.addFileArg(bindings);
     run_generator.addFileArg(registry);
+    run_generator.addFileArg(b.path("src/vulkan.zig"));
     return run_generator.addOutputFileArg(output_name);
 }
 

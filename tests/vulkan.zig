@@ -206,6 +206,21 @@ test "generated commands bind scope, name, and function type" {
         @TypeOf(vk.command.get_physical_device_features2_khr).scope,
     );
     try std.testing.expect(vk.command.core_command_coverage.len > 200);
+    var wrapped_count: usize = 0;
+    var raw_only_count: usize = 0;
+    var queue_submit_wrapped = false;
+    for (vk.command.core_command_coverage) |coverage| {
+        switch (coverage.status) {
+            .wrapped => wrapped_count += 1,
+            .raw_only => raw_only_count += 1,
+        }
+        if (std.mem.eql(u8, coverage.name, "vkQueueSubmit")) {
+            queue_submit_wrapped = coverage.status == .wrapped;
+        }
+    }
+    try std.testing.expect(wrapped_count > 0);
+    try std.testing.expect(raw_only_count > 0);
+    try std.testing.expect(queue_submit_wrapped);
 }
 
 test "generated extension names compose without duplicates" {
