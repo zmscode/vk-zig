@@ -301,6 +301,26 @@ fn addTestStep(
         "Vulkan command descriptor has the wrong dispatch scope",
     );
     test_step.dependOn(&wrong_scope.step);
+
+    const instance_extension_as_device = addCompileFailureTest(
+        b,
+        target,
+        optimize,
+        vulkan,
+        "tests/compile_fail/instance_extension_as_device.zig",
+        "expected type 'vulkan_commands.ExtensionMetadata(.device)', found 'vulkan_commands.ExtensionMetadata(.instance)'",
+    );
+    test_step.dependOn(&instance_extension_as_device.step);
+
+    const device_extension_as_instance = addCompileFailureTest(
+        b,
+        target,
+        optimize,
+        vulkan,
+        "tests/compile_fail/device_extension_as_instance.zig",
+        "expected type 'vulkan_commands.ExtensionMetadata(.instance)', found 'vulkan_commands.ExtensionMetadata(.device)'",
+    );
+    test_step.dependOn(&device_extension_as_instance.step);
 }
 
 fn addCompileFailureTest(

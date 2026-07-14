@@ -580,6 +580,12 @@ fn writeExtensionFeatures(
         if (field_count == 0) {
             try writer.writeAll("        _unused: bool = false,\n");
         }
+        try writer.writeAll("        pub const required_extension: ?[:0]const u8 = ");
+        if (extensionForType(registry, raw_name)) |extension_name| {
+            try writer.print("\"{s}\";\n", .{extension_name});
+        } else {
+            try writer.writeAll("null;\n");
+        }
         try writer.print(
             "        pub const Raw = raw.{s};\n        pub const structure_type: raw.VkStructureType = @intCast(raw.{s});\n",
             .{ raw_name, structure_type },
@@ -636,6 +642,24 @@ fn writeExtensionFeatures(
         );
     }
     try writer.writeAll("};\n");
+}
+
+fn extensionForType(registry: []const u8, type_name: []const u8) ?[]const u8 {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<extension ")) |start| {
+        const opening_end = std.mem.indexOfScalarPos(u8, registry, start, '>') orelse return null;
+        const opening = registry[start .. opening_end + 1];
+        const extension_end = std.mem.indexOfPos(u8, registry, opening_end, "</extension>") orelse return null;
+        cursor = extension_end + "</extension>".len;
+        const extension_name = attribute(opening, "name") orelse continue;
+        if (!std.mem.startsWith(u8, extension_name, "VK_")) continue;
+        var marker_buffer: [generated_name_size_max]u8 = undefined;
+        const marker = std.fmt.bufPrint(&marker_buffer, "<type name=\"{s}\"", .{type_name}) catch return null;
+        if (std.mem.indexOf(u8, registry[opening_end + 1 .. extension_end], marker) != null) {
+            return extension_name;
+        }
+    }
+    return null;
 }
 
 fn memberStructureType(body: []const u8) ?[]const u8 {

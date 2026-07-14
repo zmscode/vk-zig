@@ -228,18 +228,76 @@ test "generated extension names compose without duplicates" {
     try std.testing.expectEqualStrings("VK_KHR_swapchain", vk.extension.khr_swapchain.name);
     try std.testing.expectEqualStrings("VK_EXT_debug_utils", vk.extension.ext_debug_utils.name);
 
-    var extensions: vk.ExtensionSet(4) = .{};
-    try extensions.append(vk.extension.khr_surface.name);
-    try extensions.append(vk.extension.khr_surface.name);
+    var extensions: vk.InstanceExtensionSet(4) = .{};
+    try extensions.append(vk.extension.khr_surface);
+    try extensions.append(vk.extension.khr_surface);
     try extensions.appendAll(&.{
-        vk.extension.ext_debug_utils.name,
-        vk.extension.khr_swapchain.name,
+        vk.extension.ext_debug_utils,
+        vk.extension.khr_xcb_surface,
     });
     try std.testing.expectEqual(@as(usize, 3), extensions.slice().len);
     try std.testing.expect(extensions.contains("VK_EXT_debug_utils"));
     try std.testing.expect(!extensions.contains("VK_EXT_missing"));
-    try extensions.append("VK_EXT_fourth");
-    try std.testing.expectError(error.CountOverflow, extensions.append("VK_EXT_fifth"));
+    try extensions.append(vk.extension.ext_headless_surface);
+    try std.testing.expectError(error.CountOverflow, extensions.append(vk.extension.ext_metal_surface));
+}
+
+test "generated extension metadata conforms to registry scope and relationships" {
+    try std.testing.expect(@TypeOf(vk.extension.khr_surface) == vk.InstanceExtension);
+    try std.testing.expect(@TypeOf(vk.extension.khr_swapchain) == vk.DeviceExtension);
+    try std.testing.expectEqualStrings("xcb", vk.extension.khr_xcb_surface.platform.?);
+    try std.testing.expectEqualStrings(
+        "VK_KHR_surface",
+        vk.extension.khr_swapchain.depends.?,
+    );
+    try std.testing.expectEqualStrings(
+        "VK_EXT_debug_utils",
+        vk.extension.ext_debug_report.deprecated_by.?,
+    );
+    try std.testing.expectEqualStrings(
+        "VK_VERSION_1_3",
+        vk.extension.khr_dynamic_rendering.promoted_to.?,
+    );
+    const mesh_commands = [_][:0]const u8{
+        "vkCmdDrawMeshTasksEXT",
+        "vkCmdDrawMeshTasksIndirectEXT",
+        "vkCmdDrawMeshTasksIndirectCountEXT",
+    };
+    try std.testing.expectEqual(mesh_commands.len, vk.extension.ext_mesh_shader.commands.len);
+    for (mesh_commands, vk.extension.ext_mesh_shader.commands) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    try std.testing.expectEqualStrings(
+        "VkPhysicalDeviceMeshShaderFeaturesEXT",
+        vk.extension.ext_mesh_shader.feature_structures[0],
+    );
+    try std.testing.expectEqualStrings(
+        "VkPhysicalDeviceMeshShaderPropertiesEXT",
+        vk.extension.ext_mesh_shader.property_structures[0],
+    );
+    try std.testing.expect(vk.instance_extensions.len > 20);
+    try std.testing.expect(vk.device_extensions.len > 100);
+    try std.testing.expectEqualStrings(
+        vk.extension.khr_surface.name,
+        vk.findInstanceExtension("VK_KHR_surface").?.name,
+    );
+    try std.testing.expectEqualStrings(
+        vk.extension.khr_swapchain.name,
+        vk.findDeviceExtension("VK_KHR_swapchain").?.name,
+    );
+    try std.testing.expect(vk.findInstanceExtension("VK_VENDOR_unknown") == null);
+}
+
+test "instance extension dependencies are validated before creation" {
+    try std.testing.expectError(error.ExtensionNotPresent, (vk.InstanceOptions{
+        .extensions = &.{vk.extension.khr_xcb_surface},
+    }).validate());
+    try (vk.InstanceOptions{
+        .extensions = &.{ vk.extension.khr_surface, vk.extension.khr_xcb_surface },
+    }).validate();
+    try (vk.InstanceOptions{
+        .raw_extension_names = &.{"VK_VENDOR_future_instance_extension"},
+    }).validate();
 }
 
 test "generated enums preserve known and unknown Vulkan values" {
@@ -865,7 +923,13 @@ test "all public wrapper declarations compile" {
     std.testing.refAllDecls(vk);
     _ = &vk.Entry.apiVersion;
     _ = &vk.Entry.instanceExtensions;
+    _ = &vk.Entry.instanceExtensionCount;
+    _ = &vk.Entry.instanceExtensionsInto;
+    _ = &vk.Entry.instanceExtensionsRawInto;
     _ = &vk.Entry.instanceLayers;
+    _ = &vk.Entry.instanceLayerCount;
+    _ = &vk.Entry.instanceLayersInto;
+    _ = &vk.Entry.instanceLayersRawInto;
     _ = &vk.Entry.load;
     _ = &vk.Entry.require;
     _ = &vk.Entry.loadUnchecked;
@@ -879,6 +943,8 @@ test "all public wrapper declarations compile" {
     _ = &vk.Instance.loadUnchecked;
     _ = &vk.Instance.adoptSurface;
     _ = &vk.Instance.physicalDevices;
+    _ = &vk.Instance.physicalDeviceCount;
+    _ = &vk.Instance.physicalDevicesInto;
     _ = &vk.PhysicalDevice.properties;
     _ = &vk.PhysicalDevice.propertiesRaw;
     _ = &vk.PhysicalDevice.formatProperties;
@@ -898,8 +964,14 @@ test "all public wrapper declarations compile" {
     _ = &vk.PhysicalDevice.memoryPropertiesInto;
     _ = &vk.PhysicalDevice.memoryPropertiesRaw;
     _ = &vk.PhysicalDevice.queueFamilyProperties;
+    _ = &vk.PhysicalDevice.queueFamilyPropertiesInto;
+    _ = &vk.PhysicalDevice.queueFamilyCount;
+    _ = &vk.PhysicalDevice.queueFamiliesInto;
     _ = &vk.PhysicalDevice.queueFamilies;
+    _ = &vk.PhysicalDevice.deviceExtensionCount;
+    _ = &vk.PhysicalDevice.deviceExtensionsInto;
     _ = &vk.PhysicalDevice.deviceExtensions;
+    _ = &vk.PhysicalDevice.deviceExtensionsRawInto;
     _ = &vk.PhysicalDevice.deviceExtensionsRaw;
     _ = &vk.PhysicalDevice.surfaceSupport;
     _ = &vk.PhysicalDevice.surfaceCapabilities;

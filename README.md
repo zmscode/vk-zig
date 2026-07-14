@@ -134,13 +134,13 @@ var device = try physical_device.createDeviceWithExtensionFeatures(.{
 The chain rejects duplicate/aliased node types at compile time, queries support before dispatch,
 and returns `error.FeatureNotPresent` rather than silently enabling an unsupported feature.
 
-Generated names remove repeated string literals, while `ExtensionSet` combines platform/windowing
-requirements without duplicates:
+Generated descriptors prevent mixing instance and device scopes. `InstanceExtensionSet` combines
+platform/windowing requirements without duplicates:
 
 ```zig
-var extensions: vk.ExtensionSet(8) = .{};
-try extensions.append(vk.extension.khr_surface.name);
-try extensions.append(vk.extension.ext_debug_utils.name);
+var extensions: vk.InstanceExtensionSet(8) = .{};
+try extensions.append(vk.extension.khr_surface);
+try extensions.append(vk.extension.ext_debug_utils);
 try extensions.appendAll(vk.Portability.instanceExtensions());
 try extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
 
@@ -326,7 +326,7 @@ The configured platform constructor owns the native create-info and uses the ins
 policy. Add its required extensions before creating the instance:
 
 ```zig
-try extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
+try instance_extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
 
 // Metal build (`-Dplatform=metal`): `layer` is a stable CAMetalLayer pointer.
 var surface = try instance.createMetalSurface(.{ .layer = layer });
@@ -618,10 +618,10 @@ general/validation/performance message types; customize `ConfigOptions.severity`
 `ConfigOptions.message_types` with the typed flag sets.
 
 GPU labels use the same extension, but configuring labels without a messenger still requires
-adding `vk.extension.ext_debug_utils.name` to `InstanceOptions.extensions`:
+adding `vk.extension.ext_debug_utils` to `InstanceOptions.extensions`:
 
 ```zig
-try enabled_extensions.append(vk.extension.ext_debug_utils.name);
+try enabled_extensions.append(vk.extension.ext_debug_utils);
 
 try device.setObjectName(&device, "main-device");
 try device.setObjectName(&image, "scene-color");

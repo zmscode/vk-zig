@@ -24,7 +24,11 @@ const RegistryExtension = struct {
     name: []const u8,
     scope: Scope,
     promoted_to: ?[]const u8,
+    deprecated_by: ?[]const u8,
+    obsoleted_by: ?[]const u8,
     depends: ?[]const u8,
+    platform: ?[]const u8,
+    block: []const u8,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -75,7 +79,10 @@ pub fn main(init: std.process.Init) !void {
         for (registry_extensions.items) |item| {
             gpa.free(item.name);
             if (item.promoted_to) |value| gpa.free(value);
+            if (item.deprecated_by) |value| gpa.free(value);
+            if (item.obsoleted_by) |value| gpa.free(value);
             if (item.depends) |value| gpa.free(value);
+            if (item.platform) |value| gpa.free(value);
         }
         registry_extensions.deinit(gpa);
     }
@@ -175,6 +182,9 @@ fn collectRegistryExtensions(
             return error.InvalidCoreRegistry;
         };
         const opening_tag = registry[extension_start .. tag_end + 1];
+        const extension_end = std.mem.indexOfPos(u8, registry, tag_end, "</extension>") orelse {
+            return error.InvalidCoreRegistry;
+        };
         const name = attribute(opening_tag, "name") orelse return error.InvalidRegistry;
         const extension_type = attribute(opening_tag, "type") orelse {
             cursor = tag_end + 1;
@@ -195,12 +205,25 @@ fn collectRegistryExtensions(
                 try gpa.dupe(u8, value)
             else
                 null,
+            .deprecated_by = if (attribute(opening_tag, "deprecatedby")) |value|
+                try gpa.dupe(u8, value)
+            else
+                null,
+            .obsoleted_by = if (attribute(opening_tag, "obsoletedby")) |value|
+                try gpa.dupe(u8, value)
+            else
+                null,
             .depends = if (attribute(opening_tag, "depends")) |value|
                 try gpa.dupe(u8, value)
             else
                 null,
+            .platform = if (attribute(opening_tag, "platform")) |value|
+                try gpa.dupe(u8, value)
+            else
+                null,
+            .block = registry[tag_end + 1 .. extension_end],
         });
-        cursor = tag_end + 1;
+        cursor = extension_end + "</extension>".len;
     }
 }
 
@@ -543,12 +566,23 @@ fn extensionSnakeName(extension_name: []const u8, buffer: []u8) ![]const u8 {
 fn writeExtensions(writer: *std.Io.Writer, extensions: []const RegistryExtension) !void {
     try writer.writeAll(
         \\
-        \\pub const Extension = struct {
+        \\pub fn ExtensionMetadata(comptime extension_scope: Scope) type {
+        \\    return struct {
         \\    name: [:0]const u8,
-        \\    scope: Scope,
         \\    promoted_to: ?[:0]const u8 = null,
+        \\    deprecated_by: ?[:0]const u8 = null,
+        \\    obsoleted_by: ?[:0]const u8 = null,
         \\    depends: ?[:0]const u8 = null,
-        \\};
+        \\    platform: ?[:0]const u8 = null,
+        \\    commands: []const [:0]const u8 = &.{},
+        \\    feature_structures: []const [:0]const u8 = &.{},
+        \\    property_structures: []const [:0]const u8 = &.{},
+        \\
+        \\        pub const scope = extension_scope;
+        \\    };
+        \\}
+        \\pub const InstanceExtension = ExtensionMetadata(.instance);
+        \\pub const DeviceExtension = ExtensionMetadata(.device);
         \\
         \\pub const extension = struct {
         \\
@@ -556,21 +590,92 @@ fn writeExtensions(writer: *std.Io.Writer, extensions: []const RegistryExtension
     for (extensions) |item| {
         var name_buffer: [256]u8 = undefined;
         const generated_name = try extensionSnakeName(item.name, &name_buffer);
+        const extension_type = switch (item.scope) {
+            .instance => "InstanceExtension",
+            .device => "DeviceExtension",
+            .global => unreachable,
+        };
         try writer.print(
-            "    pub const {s}: Extension = .{{ .name = \"{s}\", .scope = .{s}, .promoted_to = ",
-            .{ generated_name, item.name, @tagName(item.scope) },
+            "    pub const {s}: {s} = .{{ .name = \"{s}\", .promoted_to = ",
+            .{ generated_name, extension_type, item.name },
         );
         if (item.promoted_to) |value| try writer.print("\"{s}\"", .{value}) else try writer.writeAll("null");
+        try writer.writeAll(", .deprecated_by = ");
+        if (item.deprecated_by) |value| try writer.print("\"{s}\"", .{value}) else try writer.writeAll("null");
+        try writer.writeAll(", .obsoleted_by = ");
+        if (item.obsoleted_by) |value| try writer.print("\"{s}\"", .{value}) else try writer.writeAll("null");
         try writer.writeAll(", .depends = ");
         if (item.depends) |value| try writer.print("\"{s}\"", .{value}) else try writer.writeAll("null");
+        try writer.writeAll(", .platform = ");
+        if (item.platform) |value| try writer.print("\"{s}\"", .{value}) else try writer.writeAll("null");
+        try writer.writeAll(", .commands = ");
+        try writeRequiredNames(writer, item.block, "command", null);
+        try writer.writeAll(", .feature_structures = ");
+        try writeRequiredNames(writer, item.block, "type", "Features");
+        try writer.writeAll(", .property_structures = ");
+        try writeRequiredNames(writer, item.block, "type", "Properties");
         try writer.writeAll(" };\n");
     }
-    try writer.writeAll("};\n");
+    try writer.writeAll("};\n\npub const instance_extensions = [_]InstanceExtension{\n");
+    for (extensions) |item| {
+        if (item.scope != .instance) continue;
+        var name_buffer: [256]u8 = undefined;
+        const generated_name = try extensionSnakeName(item.name, &name_buffer);
+        try writer.print("    extension.{s},\n", .{generated_name});
+    }
+    try writer.writeAll("};\n\npub const device_extensions = [_]DeviceExtension{\n");
+    for (extensions) |item| {
+        if (item.scope != .device) continue;
+        var name_buffer: [256]u8 = undefined;
+        const generated_name = try extensionSnakeName(item.name, &name_buffer);
+        try writer.print("    extension.{s},\n", .{generated_name});
+    }
+    try writer.writeAll(
+        \\};
+        \\
+        \\pub fn findInstanceExtension(name: []const u8) ?InstanceExtension {
+        \\    for (instance_extensions) |item| if (std.mem.eql(u8, item.name, name)) return item;
+        \\    return null;
+        \\}
+        \\
+        \\pub fn findDeviceExtension(name: []const u8) ?DeviceExtension {
+        \\    for (device_extensions) |item| if (std.mem.eql(u8, item.name, name)) return item;
+        \\    return null;
+        \\}
+        \\
+    );
+}
+
+fn writeRequiredNames(
+    writer: *std.Io.Writer,
+    block: []const u8,
+    element: []const u8,
+    required_name_fragment: ?[]const u8,
+) !void {
+    try writer.writeAll("&.{");
+    var cursor: usize = 0;
+    var marker_buffer: [32]u8 = undefined;
+    const marker = try std.fmt.bufPrint(&marker_buffer, "<{s} ", .{element});
+    while (std.mem.indexOfPos(u8, block, cursor, marker)) |start| {
+        const end = std.mem.indexOfScalarPos(u8, block, start, '>') orelse {
+            return error.InvalidRegistry;
+        };
+        const tag = block[start .. end + 1];
+        cursor = end + 1;
+        const name = attribute(tag, "name") orelse continue;
+        if (required_name_fragment) |fragment| {
+            if (!std.mem.startsWith(u8, name, "VkPhysicalDevice")) continue;
+            if (std.mem.indexOf(u8, name, fragment) == null) continue;
+        }
+        try writer.print("\"{s}\",", .{name});
+    }
+    try writer.writeAll("}");
 }
 
 fn writeHeader(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\// Generated from Vulkan PFN declarations. Do not edit.
+        \\const std = @import("std");
         \\const raw = @import("vulkan_raw");
         \\
         \\pub const Scope = enum { global, instance, device };

@@ -17,19 +17,19 @@ pub const layer = struct {
     pub const khronos_validation: Layer = .{ .name = "VK_LAYER_KHRONOS_validation" };
 };
 
-const portability_instance_extensions = [_][:0]const u8{
-    "VK_KHR_portability_enumeration",
+const portability_instance_extensions = [_]command.InstanceExtension{
+    command.extension.khr_portability_enumeration,
 };
-const portability_device_extensions = [_][:0]const u8{
-    "VK_KHR_portability_subset",
+const portability_device_extensions = [_]command.DeviceExtension{
+    command.extension.khr_portability_subset,
 };
 
 pub const Portability = struct {
-    pub fn instanceExtensions() []const [:0]const u8 {
+    pub fn instanceExtensions() []const command.InstanceExtension {
         return if (platform == .metal) &portability_instance_extensions else &.{};
     }
 
-    pub fn deviceExtensions() []const [:0]const u8 {
+    pub fn deviceExtensions() []const command.DeviceExtension {
         return if (platform == .metal) &portability_device_extensions else &.{};
     }
 
@@ -41,17 +41,17 @@ pub const Portability = struct {
     }
 };
 
-const metal_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_EXT_metal_surface" };
-const win32_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_win32_surface" };
-const xlib_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_xlib_surface" };
-const xcb_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
-const wayland_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_wayland_surface" };
-const android_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_android_surface" };
-const headless_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_EXT_headless_surface" };
+const metal_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.ext_metal_surface };
+const win32_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_win32_surface };
+const xlib_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_xlib_surface };
+const xcb_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_xcb_surface };
+const wayland_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_wayland_surface };
+const android_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_android_surface };
+const headless_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.ext_headless_surface };
 
 /// Instance extensions needed by the surface constructor selected at build time.
 pub const SurfaceConfiguration = struct {
-    pub fn instanceExtensions() []const [:0]const u8 {
+    pub fn instanceExtensions() []const command.InstanceExtension {
         return switch (platform) {
             .metal => &metal_surface_extensions,
             .win32 => &win32_surface_extensions,
@@ -63,7 +63,7 @@ pub const SurfaceConfiguration = struct {
         };
     }
 
-    pub fn headlessInstanceExtensions() []const [:0]const u8 {
+    pub fn headlessInstanceExtensions() []const command.InstanceExtension {
         return &headless_surface_extensions;
     }
 };

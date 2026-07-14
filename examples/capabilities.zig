@@ -17,10 +17,10 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Khronos validation layer available: {}", .{
         vk.supportsLayer(layers, vk.layer.khronos_validation.name),
     });
-    for (vk.Portability.instanceExtensions()) |name| {
-        std.log.info("platform requires instance extension: {s}", .{name});
+    for (vk.Portability.instanceExtensions()) |item| {
+        std.log.info("platform requires instance extension: {s}", .{item.name});
     }
-    for (vk.Portability.deviceExtensions()) |name| {
-        std.log.info("platform may require device extension: {s}", .{name});
+    for (vk.Portability.deviceExtensions()) |item| {
+        std.log.info("platform may require device extension: {s}", .{item.name});
     }
 }

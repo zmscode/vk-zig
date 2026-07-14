@@ -71,6 +71,15 @@ pub fn ExtensionChain(comptime NodeTypes: []const type) type {
             return true;
         }
 
+        /// Registry extension names required by the structures in this chain.
+        pub fn requiredExtensions() [NodeTypes.len]?[:0]const u8 {
+            var names: [NodeTypes.len]?[:0]const u8 = undefined;
+            inline for (NodeTypes, 0..) |Node, index| {
+                names[index] = Node.required_extension;
+            }
+            return names;
+        }
+
         fn linkRaw(chain: *Chain) ?*anyopaque {
             var next: ?*anyopaque = null;
             inline for (0..NodeTypes.len) |offset| {

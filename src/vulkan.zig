@@ -45,7 +45,12 @@ pub const flag_domains = types.registry_flags;
 pub const CommandFunction = command.FunctionType;
 /// Generated Vulkan extension descriptors with stable sentinel-terminated names.
 pub const extension = command.extension;
-pub const Extension = command.Extension;
+pub const InstanceExtension = command.InstanceExtension;
+pub const DeviceExtension = command.DeviceExtension;
+pub const instance_extensions = command.instance_extensions;
+pub const device_extensions = command.device_extensions;
+pub const findInstanceExtension = command.findInstanceExtension;
+pub const findDeviceExtension = command.findDeviceExtension;
 pub const DeviceFeature = device_configuration.Feature;
 pub const DeviceFeatureSet = device_configuration.FeatureSet;
 pub const DeviceFeatureProfile = feature_chains.Profile;
@@ -192,7 +197,47 @@ const DeviceHandle = NonNullHandle(raw.VkDevice);
 
 pub const Portability = configuration.Portability;
 pub const SurfaceConfiguration = configuration.SurfaceConfiguration;
-pub const ExtensionSet = registry.NameSet;
+/// Set for explicit extension names absent from the generated registry snapshot.
+pub const RawExtensionNameSet = registry.NameSet;
+
+pub fn InstanceExtensionSet(comptime capacity: usize) type {
+    return TypedExtensionSet(InstanceExtension, capacity);
+}
+
+pub fn DeviceExtensionSet(comptime capacity: usize) type {
+    return TypedExtensionSet(DeviceExtension, capacity);
+}
+
+fn TypedExtensionSet(comptime ExtensionType: type, comptime capacity: usize) type {
+    return struct {
+        items: [capacity]ExtensionType = undefined,
+        len: usize = 0,
+
+        const Set = @This();
+
+        pub fn append(set: *Set, item: ExtensionType) Error!void {
+            if (set.contains(item.name)) return;
+            if (set.len == set.items.len) return error.CountOverflow;
+            set.items[set.len] = item;
+            set.len += 1;
+        }
+
+        pub fn appendAll(set: *Set, items: []const ExtensionType) Error!void {
+            for (items) |item| try set.append(item);
+        }
+
+        pub fn contains(set: *const Set, name: []const u8) bool {
+            for (set.slice()) |item| {
+                if (std.mem.eql(u8, item.name, name)) return true;
+            }
+            return false;
+        }
+
+        pub fn slice(set: *const Set) []const ExtensionType {
+            return set.items[0..set.len];
+        }
+    };
+}
 pub const boundedCString = registry.boundedCString;
 pub const ExtensionProperty = registry.ExtensionProperty;
 pub const LayerProperty = registry.LayerProperty;
@@ -428,6 +473,25 @@ pub const Entry = struct {
         return error.EnumerationUnstable;
     }
 
+    pub fn instanceExtensionsRawInto(
+        entry: *const Entry,
+        layer_name: ?[:0]const u8,
+        storage: []raw.VkExtensionProperties,
+    ) Error![]raw.VkExtensionProperties {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const required = try entry.instanceExtensionCount(layer_name);
+        if (required > storage.len) return error.BufferTooSmall;
+        var written: u32 = @intCast(storage.len);
+        const result = entry.enumerate_instance_extension_properties(
+            optionalStringPointer(layer_name),
+            &written,
+            if (storage.len == 0) null else storage.ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or written > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        return storage[0..written];
+    }
+
     pub fn instanceLayersRaw(
         entry: *const Entry,
         gpa: std.mem.Allocator,
@@ -456,6 +520,23 @@ pub const Entry = struct {
             properties = try gpa.realloc(properties, count);
         }
         return error.EnumerationUnstable;
+    }
+
+    pub fn instanceLayersRawInto(
+        entry: *const Entry,
+        storage: []raw.VkLayerProperties,
+    ) Error![]raw.VkLayerProperties {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const required = try entry.instanceLayerCount();
+        if (required > storage.len) return error.BufferTooSmall;
+        var written: u32 = @intCast(storage.len);
+        const result = entry.enumerate_instance_layer_properties(
+            &written,
+            if (storage.len == 0) null else storage.ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or written > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        return storage[0..written];
     }
 
     pub fn load(
@@ -498,14 +579,28 @@ pub const Entry = struct {
         options: InstanceOptions,
         advanced: AdvancedInstanceOptions,
     ) Error!Instance {
+        try validateInstanceExtensions(options);
         var layer_pointers: [name_count_max][*c]const u8 = undefined;
         const layer_count = try fillNamePointers(options.layers, &layer_pointers);
 
         var extension_pointers: [name_count_max][*c]const u8 = undefined;
-        var extension_count = try fillNamePointers(options.extensions, &extension_pointers);
+        var extension_count: usize = 0;
+        for (options.extensions) |item| {
+            if (instanceExtensionPromotedToCore(item, options.api_version)) continue;
+            if (extension_count == extension_pointers.len) return error.CountOverflow;
+            extension_pointers[extension_count] = item.name.ptr;
+            extension_count += 1;
+        }
+        for (options.raw_extension_names, 0..) |name, index| {
+            if (containsTypedInstanceExtension(options.extensions, name) or
+                containsName(options.raw_extension_names[0..index], name)) continue;
+            if (extension_count == extension_pointers.len) return error.CountOverflow;
+            extension_pointers[extension_count] = name.ptr;
+            extension_count += 1;
+        }
         if (options.debug_messenger != null) {
             const debug_utils_extension = extension.ext_debug_utils.name;
-            if (!containsName(options.extensions, debug_utils_extension)) {
+            if (!containsInstanceExtension(options, debug_utils_extension)) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
                 extension_pointers[extension_count] = debug_utils_extension.ptr;
                 extension_count += 1;
@@ -527,7 +622,7 @@ pub const Entry = struct {
         };
         for (typed_chain_extensions) |maybe_name| {
             const name = maybe_name orelse continue;
-            if (!containsName(options.extensions, name)) {
+            if (!containsInstanceExtension(options, name)) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
                 extension_pointers[extension_count] = name.ptr;
                 extension_count += 1;
@@ -537,9 +632,9 @@ pub const Entry = struct {
         if (options.enumerate_portability) {
             if (platform != .metal) return error.PortabilityNotSupported;
             const portability_extension = Portability.instanceExtensions()[0];
-            if (!containsName(options.extensions, portability_extension)) {
+            if (!containsInstanceExtension(options, portability_extension.name)) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
-                extension_pointers[extension_count] = portability_extension.ptr;
+                extension_pointers[extension_count] = portability_extension.name.ptr;
                 extension_count += 1;
             }
             flags = flags.merge(Portability.instanceFlags());
@@ -577,6 +672,8 @@ pub const Entry = struct {
         };
         var instance = try entry.createInstanceRaw(&create_info, advanced.allocation_callbacks);
         errdefer instance.deinit();
+        instance._api_version = options.api_version;
+        instance.recordEnabledExtensions(extension_pointers[0..extension_count]);
         if (options.debug_messenger) |config| {
             instance._debug_messenger = try instance.createDebugMessenger(
                 config,
@@ -626,11 +723,17 @@ pub const InstanceOptions = struct {
     engine_version: Version = .{ .major = 0, .minor = 1, .patch = 0 },
     api_version: Version = .{ .major = 1, .minor = 0, .patch = 0 },
     layers: []const [:0]const u8 = &.{},
-    extensions: []const [:0]const u8 = &.{},
+    extensions: []const InstanceExtension = &.{},
+    /// Explicit escape hatch for instance extensions absent from this registry snapshot.
+    raw_extension_names: []const [:0]const u8 = &.{},
     enumerate_portability: bool = false,
     validation: configuration.ValidationOptions = .{},
     layer_settings: []const configuration.LayerSetting = &.{},
     debug_messenger: ?debug_utils.Config = null,
+
+    pub fn validate(options: InstanceOptions) Error!void {
+        return validateInstanceExtensions(options);
+    }
 };
 
 /// Explicit escape hatch for raw instance flags, chains, and host allocation callbacks.
@@ -644,6 +747,9 @@ pub const AdvancedInstanceOptions = struct {
 pub const Instance = struct {
     _handle: ?InstanceHandle,
     _debug_messenger: ?debug_utils.Messenger,
+    _enabled_extensions: [name_count_max][:0]const u8 = undefined,
+    _enabled_extension_count: usize = 0,
+    _api_version: Version = .v1_0,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: InstanceDispatch,
 
@@ -658,6 +764,31 @@ pub const Instance = struct {
     pub fn debugMessengerActive(instance: *const Instance) bool {
         if (instance._handle == null) return false;
         return instance._debug_messenger != null;
+    }
+
+    /// Extensions explicitly enabled at creation; promoted core capabilities are
+    /// reported by `supportsExtension` without duplicating their names here.
+    pub fn enabledExtensions(instance: *const Instance) []const [:0]const u8 {
+        if (instance._handle == null) return &.{};
+        return instance._enabled_extensions[0..instance._enabled_extension_count];
+    }
+
+    pub fn supportsExtension(instance: *const Instance, item: InstanceExtension) bool {
+        if (instance._handle == null) return false;
+        if (containsName(instance.enabledExtensions(), item.name)) return true;
+        return instanceExtensionPromotedToCore(item, instance._api_version);
+    }
+
+    fn recordEnabledExtensions(instance: *Instance, pointers: []const [*c]const u8) void {
+        instance._enabled_extension_count = 0;
+        for (pointers) |pointer| {
+            if (pointer == null or instance._enabled_extension_count == instance._enabled_extensions.len) continue;
+            const sentinel: [*:0]const u8 = @ptrCast(pointer);
+            const name: [:0]const u8 = std.mem.span(sentinel);
+            if (containsName(instance._enabled_extensions[0..instance._enabled_extension_count], name)) continue;
+            instance._enabled_extensions[instance._enabled_extension_count] = name;
+            instance._enabled_extension_count += 1;
+        }
     }
 
     pub fn createDebugMessenger(
@@ -720,10 +851,7 @@ pub const Instance = struct {
         );
     }
 
-    pub fn physicalDevices(
-        instance: *const Instance,
-        gpa: std.mem.Allocator,
-    ) (Error || std.mem.Allocator.Error)![]PhysicalDevice {
+    pub fn physicalDeviceCount(instance: *const Instance) Error!u32 {
         const instance_handle = instance._handle orelse return error.InactiveObject;
         var count: u32 = 0;
         try checkSuccess(instance.dispatch.enumerate_physical_devices(
@@ -732,46 +860,53 @@ pub const Instance = struct {
             null,
         ));
         try validateEnumerationCount(count);
-        if (count == 0) return gpa.alloc(PhysicalDevice, 0);
+        return count;
+    }
 
-        var handles = try gpa.alloc(raw.VkPhysicalDevice, count);
-        defer gpa.free(handles);
+    pub fn physicalDevicesInto(
+        instance: *const Instance,
+        storage: []PhysicalDevice,
+    ) Error![]PhysicalDevice {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const required = try instance.physicalDeviceCount();
+        if (required > storage.len) return error.BufferTooSmall;
+        var handles: [enumeration_item_count_max]raw.VkPhysicalDevice = undefined;
+        var written: u32 = @intCast(storage.len);
+        const result = instance.dispatch.enumerate_physical_devices(
+            instance_handle,
+            &written,
+            if (storage.len == 0) null else handles[0..storage.len].ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or written > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        for (storage[0..written], handles[0..written]) |*device, handle| {
+            device.* = .{
+                ._handle = handle orelse return error.InvalidHandle,
+                ._instance_handle = instance_handle,
+                .dispatch = instance.dispatch,
+            };
+        }
+        return storage[0..written];
+    }
 
+    pub fn physicalDevices(
+        instance: *const Instance,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]PhysicalDevice {
+        var devices = try gpa.alloc(PhysicalDevice, try instance.physicalDeviceCount());
+        errdefer gpa.free(devices);
         for (0..enumeration_attempt_count_max) |_| {
-            var written: u32 = @intCast(handles.len);
-            const result = instance.dispatch.enumerate_physical_devices(
-                instance_handle,
-                &written,
-                handles.ptr,
-            );
-            if (result == raw.VK_SUCCESS) {
-                const devices = try gpa.alloc(PhysicalDevice, written);
-                for (devices, handles[0..written]) |*device, handle| {
-                    const live_handle = handle orelse {
-                        gpa.free(devices);
-                        return error.InvalidHandle;
-                    };
-                    device.* = .{
-                        ._handle = live_handle,
-                        ._instance_handle = instance_handle,
-                        .dispatch = instance.dispatch,
-                    };
-                }
-                return devices;
-            }
-            if (result != raw.VK_INCOMPLETE) try checkSuccess(result);
-
-            count = 0;
-            try checkSuccess(instance.dispatch.enumerate_physical_devices(
-                instance_handle,
-                &count,
-                null,
-            ));
-            try validateEnumerationCount(count);
-            if (count <= handles.len) {
-                count = @intCast(@min(handles.len * 2, enumeration_item_count_max));
-            }
-            handles = try gpa.realloc(handles, count);
+            const written = instance.physicalDevicesInto(devices) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try instance.physicalDeviceCount();
+                    const next = if (required > devices.len) required else try nextEnumerationCapacity(required, devices.len);
+                    devices = try gpa.realloc(devices, next);
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(devices, written.len);
         }
         return error.EnumerationUnstable;
     }
@@ -1259,11 +1394,25 @@ pub const PhysicalDevice = struct {
         gpa: std.mem.Allocator,
         format: Format,
     ) (Error || std.mem.Allocator.Error)![]DrmFormatModifierProperties {
-        const count = try device.drmFormatModifierPropertyCount(format);
-        const output = try gpa.alloc(DrmFormatModifierProperties, count);
+        var output = try gpa.alloc(DrmFormatModifierProperties, try device.drmFormatModifierPropertyCount(format));
         errdefer gpa.free(output);
-        const written = try device.drmFormatModifierPropertiesInto(format, output);
-        return gpa.realloc(output, written.len);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = device.drmFormatModifierPropertiesInto(format, output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try device.drmFormatModifierPropertyCount(format);
+                    const next = if (required > output.len)
+                        required
+                    else
+                        @min(output.len * 2, drm_format_modifier_property_count_max);
+                    if (next <= output.len) return error.EnumerationUnstable;
+                    output = try gpa.realloc(output, next);
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(output, written.len);
+        }
+        return error.EnumerationUnstable;
     }
 
     pub fn sparseImageFormatPropertyCount(
@@ -1309,11 +1458,25 @@ pub const PhysicalDevice = struct {
         gpa: std.mem.Allocator,
         options: SparseImageFormatOptions,
     ) (Error || std.mem.Allocator.Error)![]SparseImageFormatProperties {
-        const count = try device.sparseImageFormatPropertyCount(options);
-        const output = try gpa.alloc(SparseImageFormatProperties, count);
+        var output = try gpa.alloc(SparseImageFormatProperties, try device.sparseImageFormatPropertyCount(options));
         errdefer gpa.free(output);
-        const written = try device.sparseImageFormatPropertiesInto(options, output);
-        return gpa.realloc(output, written.len);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = device.sparseImageFormatPropertiesInto(options, output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try device.sparseImageFormatPropertyCount(options);
+                    const next = if (required > output.len)
+                        required
+                    else
+                        @min(output.len * 2, sparse_image_format_property_count_max);
+                    if (next <= output.len) return error.EnumerationUnstable;
+                    output = try gpa.realloc(output, next);
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(output, written.len);
+        }
+        return error.EnumerationUnstable;
     }
 
     /// Returns the raw Vulkan 1.0 feature structure for explicit FFI interop.
@@ -1450,6 +1613,23 @@ pub const PhysicalDevice = struct {
         return error.EnumerationUnstable;
     }
 
+    pub fn queueFamilyPropertiesInto(
+        device: *const PhysicalDevice,
+        storage: []raw.VkQueueFamilyProperties,
+    ) Error![]raw.VkQueueFamilyProperties {
+        if (storage.len > device_queue_count_max) return error.CountOverflow;
+        const required = try device.queueFamilyCount();
+        if (required > storage.len) return error.BufferTooSmall;
+        var written: u32 = @intCast(storage.len);
+        device.dispatch.get_physical_device_queue_family_properties(
+            device._handle,
+            &written,
+            if (storage.len == 0) null else storage.ptr,
+        );
+        if (written > storage.len) return error.BufferTooSmall;
+        return storage[0..written];
+    }
+
     pub fn queueFamilyCount(device: *const PhysicalDevice) Error!u32 {
         var count: u32 = 0;
         if (device.dispatch.get_physical_device_queue_family_properties2) |get_properties2| {
@@ -1555,18 +1735,65 @@ pub const PhysicalDevice = struct {
         return error.EnumerationUnstable;
     }
 
+    pub fn deviceExtensionCount(
+        device: *const PhysicalDevice,
+        layer_name: ?[:0]const u8,
+    ) Error!u32 {
+        var count: u32 = 0;
+        try checkSuccess(device.dispatch.enumerate_device_extension_properties(
+            device._handle,
+            optionalStringPointer(layer_name),
+            &count,
+            null,
+        ));
+        try validateEnumerationCount(count);
+        return count;
+    }
+
+    pub fn deviceExtensionsInto(
+        device: *const PhysicalDevice,
+        layer_name: ?[:0]const u8,
+        storage: []ExtensionProperty,
+    ) Error![]ExtensionProperty {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const required = try device.deviceExtensionCount(layer_name);
+        if (required > storage.len) return error.BufferTooSmall;
+        var raw_properties: [enumeration_item_count_max]raw.VkExtensionProperties = undefined;
+        var written: u32 = @intCast(storage.len);
+        const result = device.dispatch.enumerate_device_extension_properties(
+            device._handle,
+            optionalStringPointer(layer_name),
+            &written,
+            if (storage.len == 0) null else raw_properties[0..storage.len].ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or written > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        for (storage[0..written], raw_properties[0..written]) |*property, raw_property| {
+            property.* = .fromRaw(raw_property);
+        }
+        return storage[0..written];
+    }
+
     pub fn deviceExtensions(
         device: *const PhysicalDevice,
         gpa: std.mem.Allocator,
         layer_name: ?[:0]const u8,
     ) (Error || std.mem.Allocator.Error)![]ExtensionProperty {
-        const raw_properties = try device.deviceExtensionsRaw(gpa, layer_name);
-        defer gpa.free(raw_properties);
-        const output = try gpa.alloc(ExtensionProperty, raw_properties.len);
-        for (output, raw_properties) |*property, raw_property| {
-            property.* = .fromRaw(raw_property);
+        var output = try gpa.alloc(ExtensionProperty, try device.deviceExtensionCount(layer_name));
+        errdefer gpa.free(output);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = device.deviceExtensionsInto(layer_name, output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try device.deviceExtensionCount(layer_name);
+                    const next = if (required > output.len) required else try nextEnumerationCapacity(required, output.len);
+                    output = try gpa.realloc(output, next);
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(output, written.len);
         }
-        return output;
+        return error.EnumerationUnstable;
     }
 
     pub fn deviceExtensionsRaw(
@@ -1580,6 +1807,26 @@ pub const PhysicalDevice = struct {
             device._handle,
             layer_name,
         );
+    }
+
+    pub fn deviceExtensionsRawInto(
+        device: *const PhysicalDevice,
+        layer_name: ?[:0]const u8,
+        storage: []raw.VkExtensionProperties,
+    ) Error![]raw.VkExtensionProperties {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const required = try device.deviceExtensionCount(layer_name);
+        if (required > storage.len) return error.BufferTooSmall;
+        var written: u32 = @intCast(storage.len);
+        const result = device.dispatch.enumerate_device_extension_properties(
+            device._handle,
+            optionalStringPointer(layer_name),
+            &written,
+            if (storage.len == 0) null else storage.ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or written > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        return storage[0..written];
     }
 
     pub fn surfaceSupport(
@@ -1800,6 +2047,14 @@ pub const PhysicalDevice = struct {
         options: DeviceOptions,
         requested: anytype,
     ) Error!Device {
+        for (@TypeOf(requested.*).requiredExtensions()) |maybe_name| {
+            const name = maybe_name orelse continue;
+            var enabled = containsName(options.raw_extension_names, name);
+            for (options.extensions) |item| {
+                if (std.mem.eql(u8, item.name, name)) enabled = true;
+            }
+            if (!enabled) return error.ExtensionNotPresent;
+        }
         var supported = @TypeOf(requested.*).empty();
         try physical_device.extensionFeatures(&supported);
         if (!requested.supportedBy(&supported)) return error.FeatureNotPresent;
@@ -1817,7 +2072,7 @@ pub const PhysicalDevice = struct {
         const evaluation = try physical_device.evaluateDeviceRequirements(options);
         if (!evaluation.supported()) {
             return switch (evaluation.reasons()[0]) {
-                .missing_extension, .unsatisfied_extension_dependency, .instance_extension_used_as_device_extension => error.ExtensionNotPresent,
+                .missing_extension, .unsatisfied_extension_dependency => error.ExtensionNotPresent,
                 .missing_feature => error.FeatureNotPresent,
                 .missing_queue_family, .insufficient_queue_count, .queue_capability_missing => error.QueueFamilyNotFound,
                 .invalid_options => error.InvalidOptions,
@@ -1842,29 +2097,36 @@ pub const PhysicalDevice = struct {
         }
 
         var extension_pointers: [name_count_max][*c]const u8 = undefined;
-        var enabled_extensions: [name_count_max]Extension = undefined;
+        var enabled_extension_names: [name_count_max][:0]const u8 = undefined;
         var extension_count: usize = 0;
+        const api_version = physical_device.properties().api_version;
         for (options.extensions) |item| {
+            if (device_configuration.promotedToCore(item, api_version)) continue;
             if (extension_count == extension_pointers.len) return error.CountOverflow;
             extension_pointers[extension_count] = item.name.ptr;
-            enabled_extensions[extension_count] = item;
+            enabled_extension_names[extension_count] = item.name;
+            extension_count += 1;
+        }
+        for (options.raw_extension_names, 0..) |name, index| {
+            var already_enabled = containsName(enabled_extension_names[0..extension_count], name);
+            if (!already_enabled) already_enabled = containsName(options.raw_extension_names[0..index], name);
+            if (already_enabled) continue;
+            if (extension_count == extension_pointers.len) return error.CountOverflow;
+            extension_pointers[extension_count] = name.ptr;
+            enabled_extension_names[extension_count] = name;
             extension_count += 1;
         }
         if (options.enable_portability_subset) {
             const portability_extension = extension.khr_portability_subset;
-            var found = false;
-            for (options.extensions) |item| {
-                if (std.mem.eql(u8, item.name, portability_extension.name)) found = true;
-            }
+            const found = containsName(enabled_extension_names[0..extension_count], portability_extension.name);
             if (!found) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
                 extension_pointers[extension_count] = portability_extension.name.ptr;
-                enabled_extensions[extension_count] = portability_extension;
+                enabled_extension_names[extension_count] = portability_extension.name;
                 extension_count += 1;
             }
         }
 
-        const api_version = physical_device.properties().api_version;
         const generated_features = options.features.generated();
         var feature_storage = feature_chains.FeatureStorage.init(generated_features);
         const feature_root = feature_storage.linkWithTail(api_version, extension_feature_tail);
@@ -1902,7 +2164,11 @@ pub const PhysicalDevice = struct {
             .pEnabledFeatures = if (has_promoted_features) null else &feature_storage.root.features,
         };
         var device = try physical_device.createDeviceRaw(&create_info, null);
-        device.enabled_capabilities = .init(enabled_extensions[0..extension_count], options.features, api_version);
+        device.enabled_capabilities = .initNames(
+            enabled_extension_names[0..extension_count],
+            options.features,
+            api_version,
+        );
         const limits = physical_device.properties().limits;
         device._max_push_constant_size = limits.max_push_constants_size;
         device._max_sampler_anisotropy = limits.max_sampler_anisotropy;
@@ -2101,7 +2367,7 @@ pub const Device = struct {
         return device.enabled_capabilities.extensions();
     }
 
-    pub fn supportsExtension(device: *const Device, item: Extension) bool {
+    pub fn supportsExtension(device: *const Device, item: DeviceExtension) bool {
         return device.enabled_capabilities.supportsExtension(item);
     }
 
@@ -4367,6 +4633,88 @@ fn containsName(names: []const [:0]const u8, expected: []const u8) bool {
     return false;
 }
 
+fn containsInstanceExtension(options: InstanceOptions, expected: []const u8) bool {
+    if (containsTypedInstanceExtension(options.extensions, expected)) return true;
+    return containsName(options.raw_extension_names, expected);
+}
+
+fn containsTypedInstanceExtension(
+    extensions: []const InstanceExtension,
+    expected: []const u8,
+) bool {
+    for (extensions) |item| {
+        if (std.mem.eql(u8, item.name, expected)) return true;
+    }
+    return false;
+}
+
+fn validateInstanceExtensions(options: InstanceOptions) Error!void {
+    if (options.extensions.len + options.raw_extension_names.len > name_count_max) {
+        return error.CountOverflow;
+    }
+    for (options.extensions) |item| {
+        if (instanceExtensionPromotedToCore(item, options.api_version)) continue;
+        if (item.depends) |depends| {
+            if (!instanceDependencyExpressionSatisfied(depends, options, options.api_version)) {
+                return error.ExtensionNotPresent;
+            }
+        }
+    }
+}
+
+fn instanceExtensionPromotedToCore(item: InstanceExtension, version: Version) bool {
+    const promoted = item.promoted_to orelse return false;
+    return registryVersionTokenSatisfied(promoted, version);
+}
+
+fn registryVersionTokenSatisfied(token: []const u8, version: Version) bool {
+    if (!std.mem.startsWith(u8, token, "VK_VERSION_")) return false;
+    const rest = token["VK_VERSION_".len..];
+    const separator = std.mem.indexOfScalar(u8, rest, '_') orelse return false;
+    const major = std.fmt.parseInt(u7, rest[0..separator], 10) catch return false;
+    const minor = std.fmt.parseInt(u10, rest[separator + 1 ..], 10) catch return false;
+    return version.atLeast(.{ .major = major, .minor = minor, .patch = 0 });
+}
+
+fn instanceDependencyExpressionSatisfied(
+    expression: []const u8,
+    options: InstanceOptions,
+    version: Version,
+) bool {
+    var depth: usize = 0;
+    var start: usize = 0;
+    for (expression, 0..) |character, index| switch (character) {
+        '(' => depth += 1,
+        ')' => depth -|= 1,
+        ',' => if (depth == 0) {
+            if (instanceDependencyExpressionSatisfied(expression[start..index], options, version)) return true;
+            start = index + 1;
+        },
+        else => {},
+    };
+    if (start != 0) return instanceDependencyExpressionSatisfied(expression[start..], options, version);
+
+    depth = 0;
+    start = 0;
+    for (expression, 0..) |character, index| switch (character) {
+        '(' => depth += 1,
+        ')' => depth -|= 1,
+        '+' => if (depth == 0) {
+            if (!instanceDependencyExpressionSatisfied(expression[start..index], options, version)) return false;
+            start = index + 1;
+        },
+        else => {},
+    };
+    if (start != 0) return instanceDependencyExpressionSatisfied(expression[start..], options, version);
+
+    var token = std.mem.trim(u8, expression, " \t\r\n");
+    while (token.len >= 2 and token[0] == '(' and token[token.len - 1] == ')') {
+        token = std.mem.trim(u8, token[1 .. token.len - 1], " \t\r\n");
+    }
+    if (registryVersionTokenSatisfied(token, version)) return true;
+    return containsInstanceExtension(options, token);
+}
+
 fn optionalCString(pointer: [*c]const u8) ?[]const u8 {
     if (pointer == null) return null;
     const sentinel: [*:0]const u8 = @ptrCast(pointer);
@@ -4591,6 +4939,51 @@ var test_external_memory_handle_type: raw.VkExternalMemoryHandleTypeFlagBits = 0
 var test_drm_format_modifier: u64 = 0;
 var test_drm_sharing_mode: raw.VkSharingMode = raw.VK_SHARING_MODE_EXCLUSIVE;
 var test_drm_queue_family_count: u32 = 0;
+var test_enumerated_physical_device_count: u32 = 0;
+var test_physical_device_enumeration_unstable = false;
+var test_enumerated_device_extension_count: u32 = 0;
+
+fn testEnumeratePhysicalDevices(
+    _: raw.VkInstance,
+    count: [*c]u32,
+    handles: [*c]raw.VkPhysicalDevice,
+) callconv(.c) raw.VkResult {
+    if (handles == null) {
+        count.* = test_enumerated_physical_device_count;
+        return raw.VK_SUCCESS;
+    }
+    const capacity = count.*;
+    count.* = test_enumerated_physical_device_count;
+    if (test_physical_device_enumeration_unstable or capacity < test_enumerated_physical_device_count) {
+        return raw.VK_INCOMPLETE;
+    }
+    for (0..test_enumerated_physical_device_count) |index| {
+        handles[index] = testHandle(raw.VkPhysicalDevice, 0x1100 + index * 0x10);
+    }
+    return raw.VK_SUCCESS;
+}
+
+fn testEnumerateDeviceExtensions(
+    _: raw.VkPhysicalDevice,
+    _: [*c]const u8,
+    count: [*c]u32,
+    properties: [*c]raw.VkExtensionProperties,
+) callconv(.c) raw.VkResult {
+    if (properties == null) {
+        count.* = test_enumerated_device_extension_count;
+        return raw.VK_SUCCESS;
+    }
+    const capacity = count.*;
+    count.* = test_enumerated_device_extension_count;
+    if (capacity < test_enumerated_device_extension_count) return raw.VK_INCOMPLETE;
+    for (0..test_enumerated_device_extension_count) |index| {
+        properties[index] = .{};
+        const name = if (index == 0) "VK_TEST_one" else "VK_TEST_two";
+        @memcpy(properties[index].extensionName[0..name.len], name);
+        properties[index].specVersion = @intCast(index + 1);
+    }
+    return raw.VK_SUCCESS;
+}
 
 fn testHandle(comptime OptionalHandle: type, address: usize) NonNullHandle(OptionalHandle) {
     return @ptrFromInt(address);
@@ -5989,6 +6382,59 @@ test "surface enumeration supports typed caller storage" {
             surface,
             &mode_storage_small,
         ),
+    );
+}
+
+test "core enumerations support zero exact insufficient unstable and invalid counts" {
+    var instance = testInstance();
+    defer instance.deinit();
+    instance.dispatch.enumerate_physical_devices = testEnumeratePhysicalDevices;
+
+    test_enumerated_physical_device_count = 0;
+    try std.testing.expectEqual(@as(u32, 0), try instance.physicalDeviceCount());
+    try std.testing.expectEqual(@as(usize, 0), (try instance.physicalDevicesInto(&.{})).len);
+
+    test_enumerated_physical_device_count = 2;
+    var devices: [2]PhysicalDevice = undefined;
+    try std.testing.expectEqual(@as(usize, 2), (try instance.physicalDevicesInto(&devices)).len);
+    var short_devices: [1]PhysicalDevice = undefined;
+    try std.testing.expectError(error.BufferTooSmall, instance.physicalDevicesInto(&short_devices));
+
+    test_physical_device_enumeration_unstable = true;
+    try std.testing.expectError(
+        error.EnumerationUnstable,
+        instance.physicalDevices(std.testing.allocator),
+    );
+    test_physical_device_enumeration_unstable = false;
+
+    test_enumerated_physical_device_count = enumeration_item_count_max;
+    try std.testing.expectEqual(
+        @as(u32, enumeration_item_count_max),
+        try instance.physicalDeviceCount(),
+    );
+    test_enumerated_physical_device_count = enumeration_item_count_max + 1;
+    try std.testing.expectError(error.TooManyObjects, instance.physicalDeviceCount());
+
+    var physical_device: PhysicalDevice = .{
+        ._handle = testHandle(raw.VkPhysicalDevice, 0x1100),
+        ._instance_handle = testHandle(raw.VkInstance, 0x1000),
+        .dispatch = instance.dispatch,
+    };
+    physical_device.dispatch.enumerate_device_extension_properties = testEnumerateDeviceExtensions;
+    test_enumerated_device_extension_count = 2;
+    var extensions: [2]ExtensionProperty = undefined;
+    const written = try physical_device.deviceExtensionsInto(null, &extensions);
+    try std.testing.expectEqual(@as(usize, 2), written.len);
+    try std.testing.expectEqualStrings("VK_TEST_one", written[0].name());
+    var short_extensions: [1]ExtensionProperty = undefined;
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        physical_device.deviceExtensionsInto(null, &short_extensions),
+    );
+    test_enumerated_device_extension_count = enumeration_item_count_max + 1;
+    try std.testing.expectError(
+        error.TooManyObjects,
+        physical_device.deviceExtensionCount(null),
     );
 }
 

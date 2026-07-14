@@ -185,7 +185,9 @@ pub const GroupMember = struct {
 
 pub const Requirements = struct {
     queues: []const QueueOptions,
-    extensions: []const command.Extension = &.{},
+    extensions: []const command.DeviceExtension = &.{},
+    /// Explicit escape hatch for device extensions absent from this registry snapshot.
+    raw_extension_names: []const [:0]const u8 = &.{},
     features: FeatureSet = .empty,
     enabled_instance_extensions: []const [:0]const u8 = &.{},
     device_group: []const GroupMember = &.{},
@@ -195,6 +197,10 @@ pub const Requirements = struct {
         if (requirements.queues.len == 0) return error.InvalidOptions;
         if (requirements.queues.len > queue_count_max) return error.CountOverflow;
         if (requirements.extensions.len > extension_count_max) return error.CountOverflow;
+        if (requirements.raw_extension_names.len > extension_count_max) return error.CountOverflow;
+        if (requirements.extensions.len + requirements.raw_extension_names.len > extension_count_max) {
+            return error.CountOverflow;
+        }
         if (requirements.device_group.len > group_device_count_max) return error.CountOverflow;
         for (requirements.device_group, 0..) |member, index| {
             for (requirements.device_group[0..index]) |previous| {
@@ -217,7 +223,6 @@ pub const Requirements = struct {
 
 pub const Rejection = union(enum) {
     invalid_options,
-    instance_extension_used_as_device_extension: [:0]const u8,
     missing_extension: [:0]const u8,
     unsatisfied_extension_dependency: [:0]const u8,
     missing_feature: Feature,
@@ -258,6 +263,11 @@ pub fn evaluate(requirements: Requirements, available: Availability) Evaluation 
         result.reject(.invalid_options);
     }
     if (requirements.extensions.len > extension_count_max) result.reject(.invalid_options);
+    if (requirements.raw_extension_names.len > extension_count_max or
+        requirements.extensions.len + requirements.raw_extension_names.len > extension_count_max)
+    {
+        result.reject(.invalid_options);
+    }
     if (requirements.device_group.len > group_device_count_max) result.reject(.invalid_options);
     for (requirements.device_group, 0..) |member, index| {
         for (requirements.device_group[0..index]) |previous| {
@@ -266,21 +276,24 @@ pub fn evaluate(requirements: Requirements, available: Availability) Evaluation 
     }
 
     for (requirements.extensions) |requested| {
-        if (requested.scope != .device) {
-            result.reject(.{ .instance_extension_used_as_device_extension = requested.name });
-            continue;
-        }
         if (!extensionSupported(requested, available.api_version, available.extensions)) {
             result.reject(.{ .missing_extension = requested.name });
             continue;
         }
+        if (promotedToCore(requested, available.api_version)) continue;
         if (requested.depends) |depends| {
             if (!dependencyExpressionSatisfied(
                 depends,
                 requirements.extensions,
+                requirements.raw_extension_names,
                 requirements.enabled_instance_extensions,
                 available.api_version,
             )) result.reject(.{ .unsatisfied_extension_dependency = requested.name });
+        }
+    }
+    for (requirements.raw_extension_names) |requested| {
+        if (!registry.supportsExtensionRaw(available.extensions, requested)) {
+            result.reject(.{ .missing_extension = requested });
         }
     }
     if (available.features.firstMissing(requirements.features)) |missing| {
@@ -321,6 +334,11 @@ pub fn evaluate(requirements: Requirements, available: Availability) Evaluation 
     return result;
 }
 
+pub fn promotedToCore(requested: command.DeviceExtension, api_version: core.Version) bool {
+    const promoted = requested.promoted_to orelse return false;
+    return versionTokenSatisfied(promoted, api_version);
+}
+
 fn findQueueFamily(
     families: []const physical_device.QueueFamily,
     index: core.QueueFamilyIndex,
@@ -330,7 +348,7 @@ fn findQueueFamily(
 }
 
 pub fn extensionSupported(
-    requested: command.Extension,
+    requested: command.DeviceExtension,
     api_version: core.Version,
     available: []const raw.VkExtensionProperties,
 ) bool {
@@ -350,7 +368,8 @@ fn versionTokenSatisfied(token: []const u8, version: core.Version) bool {
 
 fn dependencyExpressionSatisfied(
     expression: []const u8,
-    device_extensions: []const command.Extension,
+    device_extensions: []const command.DeviceExtension,
+    raw_device_extensions: []const [:0]const u8,
     instance_extensions: []const [:0]const u8,
     api_version: core.Version,
 ) bool {
@@ -362,12 +381,12 @@ fn dependencyExpressionSatisfied(
         '(' => depth += 1,
         ')' => depth -|= 1,
         ',' => if (depth == 0) {
-            if (dependencyExpressionSatisfied(expression[start..index], device_extensions, instance_extensions, api_version)) return true;
+            if (dependencyExpressionSatisfied(expression[start..index], device_extensions, raw_device_extensions, instance_extensions, api_version)) return true;
             start = index + 1;
         },
         else => {},
     };
-    if (start != 0) return dependencyExpressionSatisfied(expression[start..], device_extensions, instance_extensions, api_version);
+    if (start != 0) return dependencyExpressionSatisfied(expression[start..], device_extensions, raw_device_extensions, instance_extensions, api_version);
 
     depth = 0;
     start = 0;
@@ -375,12 +394,12 @@ fn dependencyExpressionSatisfied(
         '(' => depth += 1,
         ')' => depth -|= 1,
         '+' => if (depth == 0) {
-            if (!dependencyExpressionSatisfied(expression[start..index], device_extensions, instance_extensions, api_version)) return false;
+            if (!dependencyExpressionSatisfied(expression[start..index], device_extensions, raw_device_extensions, instance_extensions, api_version)) return false;
             start = index + 1;
         },
         else => {},
     };
-    if (start != 0) return dependencyExpressionSatisfied(expression[start..], device_extensions, instance_extensions, api_version);
+    if (start != 0) return dependencyExpressionSatisfied(expression[start..], device_extensions, raw_device_extensions, instance_extensions, api_version);
 
     var token = std.mem.trim(u8, expression, " \t\r\n");
     while (token.len >= 2 and token[0] == '(' and token[token.len - 1] == ')') {
@@ -388,6 +407,7 @@ fn dependencyExpressionSatisfied(
     }
     if (versionTokenSatisfied(token, api_version)) return true;
     for (device_extensions) |enabled| if (std.mem.eql(u8, enabled.name, token)) return true;
+    if (registry.containsName(raw_device_extensions, token)) return true;
     return registry.containsName(instance_extensions, token);
 }
 
@@ -398,11 +418,38 @@ pub const EnabledCapabilities = struct {
     features: FeatureSet = .empty,
     api_version: core.Version = .v1_0,
 
-    pub fn init(items: []const command.Extension, features: FeatureSet, api_version: core.Version) EnabledCapabilities {
-        var enabled: EnabledCapabilities = .{ .features = features, .api_version = api_version };
+    pub fn init(
+        items: []const command.DeviceExtension,
+        raw_names: []const [:0]const u8,
+        features: FeatureSet,
+        api_version: core.Version,
+    ) EnabledCapabilities {
+        var names: [extension_count_max][:0]const u8 = undefined;
+        var count: usize = 0;
         for (items) |item| {
+            if (count == names.len) break;
+            names[count] = item.name;
+            count += 1;
+        }
+        for (raw_names) |name| {
+            if (count == names.len) break;
+            if (registry.containsName(names[0..count], name)) continue;
+            names[count] = name;
+            count += 1;
+        }
+        return initNames(names[0..count], features, api_version);
+    }
+
+    pub fn initNames(
+        names: []const [:0]const u8,
+        features: FeatureSet,
+        api_version: core.Version,
+    ) EnabledCapabilities {
+        var enabled: EnabledCapabilities = .{ .features = features, .api_version = api_version };
+        for (names) |name| {
             if (enabled.extension_count == enabled._extensions.len) break;
-            enabled._extensions[enabled.extension_count] = item.name;
+            if (registry.containsName(enabled.extensions(), name)) continue;
+            enabled._extensions[enabled.extension_count] = name;
             enabled.extension_count += 1;
         }
         return enabled;
@@ -412,7 +459,7 @@ pub const EnabledCapabilities = struct {
         return enabled._extensions[0..enabled.extension_count];
     }
 
-    pub fn supportsExtension(enabled: *const EnabledCapabilities, item: command.Extension) bool {
+    pub fn supportsExtension(enabled: *const EnabledCapabilities, item: command.DeviceExtension) bool {
         if (registry.containsName(enabled.extensions(), item.name)) return true;
         const promoted = item.promoted_to orelse return false;
         return versionTokenSatisfied(promoted, enabled.api_version);
@@ -497,6 +544,7 @@ test "device groups and enabled capabilities remain typed and queryable" {
 
     const enabled = EnabledCapabilities.init(
         &.{command.extension.khr_swapchain},
+        &.{},
         .init(&.{.dynamic_rendering}),
         .v1_3,
     );
