@@ -4,10 +4,12 @@ Zig 0.16 bindings for Vulkan, generated from the official Khronos registry and h
 package provides:
 
 - a complete target-specific raw ABI at `vulkan.raw` and through the `vulkan-raw` module;
-- a typed runtime loader with entry, instance, physical-device, device, queue, and surface wrappers;
+- a typed runtime loader with entry, instance, physical-device, device, queue, surface, and
+  swapchain wrappers;
 - resource-safe `deinit` methods and Zig errors for common `VkResult` failures;
 - generated command descriptors that prevent PFN/name and dispatch-scope mismatches;
-- small owned wrappers for surfaces and `VK_EXT_debug_utils`;
+- generated extension-name descriptors and a bounded, allocation-free extension set;
+- typed queue-family, memory-selection, surface-query, swapchain-status, and debug-utils helpers;
 - reproducible offline builds from vendored Khronos inputs; and
 - an explicit command to pull, verify, and vendor a new Vulkan registry revision.
 
@@ -106,6 +108,37 @@ defer device.deinit();
 const queue = try device.queue(graphics_family, 0);
 ```
 
+Generated names remove repeated string literals, while `ExtensionSet` combines platform/windowing
+requirements without duplicates:
+
+```zig
+var extensions: vk.ExtensionSet(8) = .{};
+try extensions.append(vk.extension.khr_surface.name);
+try extensions.append(vk.extension.ext_debug_utils.name);
+try extensions.appendAll(vk.Portability.instanceExtensions());
+
+var instance = try entry.createInstance(.{
+    .extensions = extensions.slice(),
+    .enumerate_portability = vk.platform == .metal,
+});
+```
+
+Use `queueFamilies` and `findMemoryTypeIndex` instead of repeating flag and bit-index arithmetic:
+
+```zig
+const families = try physical_device.queueFamilies(gpa);
+defer gpa.free(families);
+const graphics = for (families) |family| {
+    if (family.supports(.graphics)) break family;
+} else return error.NoGraphicsQueue;
+
+const memory_type = try physical_device.findMemoryTypeIndex(.{
+    .type_bits = requirements.memoryTypeBits,
+    .required_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+    .preferred_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+});
+```
+
 `createInstanceRaw` and `createDeviceRaw` retain direct create-info control. Live wrapper handles
 are private and non-null by construction; use the checked `rawHandle()` methods at FFI boundaries.
 
@@ -127,6 +160,12 @@ const create_surface = (try instance.load(
 )) orelse return error.MetalSurfaceUnavailable;
 ```
 
+Use `require` when a missing command is an error rather than an optional capability:
+
+```zig
+const create_surface = try instance.require(vk.command.create_metal_surface_ext);
+```
+
 For provisional or vendor commands absent from the registry, `loadUnchecked(PFN, name)` remains
 available as an explicitly unchecked escape hatch.
 
@@ -142,22 +181,63 @@ After a platform-specific command creates a raw `VkSurfaceKHR`, transfer ownersh
 var surface = try instance.adoptSurface(raw_surface, allocation_callbacks);
 defer surface.deinit();
 const can_present = try physical_device.surfaceSupport(&surface, graphics_family);
+const capabilities = try physical_device.surfaceCapabilities(&surface);
+const formats = try physical_device.surfaceFormats(gpa, &surface);
+defer gpa.free(formats);
+const present_modes = try physical_device.presentModes(gpa, &surface);
+defer gpa.free(present_modes);
+```
+
+`deviceExtensions` enumerates per-device support. Once `VK_KHR_swapchain` is enabled on the
+logical device, create and own a swapchain without manually loading its commands:
+
+```zig
+var swapchain = try device.createSwapchain(.{
+    .surface = &surface,
+    .min_image_count = capabilities.minImageCount,
+    .image_format = format.format,
+    .image_color_space = format.colorSpace,
+    .image_extent = extent,
+    .image_usage = vk.raw.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+    .pre_transform = capabilities.currentTransform,
+});
+defer swapchain.deinit();
+
+const acquired = try swapchain.acquireNextImage(.{ .semaphore = image_available });
+const image_index = switch (acquired) {
+    .success, .suboptimal => |index| index,
+    .timeout, .not_ready => return,
+    .out_of_date => return recreateSwapchain(),
+};
+const status = try queue.present(.{
+    .swapchain = &swapchain,
+    .image_index = image_index,
+    .wait_semaphores = &.{render_finished},
+});
+if (status != .success) try recreateSwapchain();
 ```
 
 The debug-utils wrapper loads its own extension commands, rolls back partial creation, and owns the
 messenger. Enable `VK_EXT_debug_utils` in `InstanceOptions.extensions` first:
 
 ```zig
-var messenger = try vk.ext.debug_utils.Messenger.init(&instance, .{
+const messenger_options: vk.ext.debug_utils.MessengerOptions = .{
     .callback = debugCallback,
-});
+};
+var debug_create_info = messenger_options.createInfo();
+// Pass &debug_create_info as InstanceOptions.next to receive instance creation messages too.
+var messenger = try vk.ext.debug_utils.Messenger.init(&instance, messenger_options);
 defer messenger.deinit();
 
 try device.setObjectName(.{ .device = &device }, "main-device");
+try device.setObjectName(.{ .image = image }, "scene-color");
+try queue.beginLabel(.{ .name = "opaque-pass", .color = .{ 0.2, 0.4, 1.0, 1.0 } });
+defer queue.endLabel() catch {};
 ```
 
-Destroy extension objects and surfaces before their parent instance. See
-`examples/debug_utils.zig` for a complete callback signature.
+Use `vk.ext.debug_utils.Message.fromCallback(...)` for bounded callback text and label/object
+slices. Destroy swapchains before their device and surface, and extension objects/surfaces before
+their parent instance. See `examples/debug_utils.zig` for a complete callback signature.
 
 ## Commands
 

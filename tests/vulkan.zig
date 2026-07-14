@@ -1,6 +1,15 @@
 const std = @import("std");
 const vk = @import("vulkan");
 
+fn debugCallback(
+    _: vk.raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
+    _: vk.raw.VkDebugUtilsMessageTypeFlagsEXT,
+    _: [*c]const vk.raw.VkDebugUtilsMessengerCallbackDataEXT,
+    _: ?*anyopaque,
+) callconv(.c) vk.raw.VkBool32 {
+    return vk.raw.VK_FALSE;
+}
+
 test "raw bindings contain core Vulkan declarations" {
     try std.testing.expect(@hasDecl(vk.raw, "VkInstance"));
     try std.testing.expect(@hasDecl(vk.raw, "VkDevice"));
@@ -48,6 +57,96 @@ test "generated commands bind scope, name, and function type" {
     try std.testing.expectEqualStrings("vkCreateInstance", CreateInstance.name);
     try std.testing.expect(CreateInstance.Function ==
         vk.CommandFunction(vk.raw.PFN_vkCreateInstance));
+}
+
+test "generated extension names compose without duplicates" {
+    try std.testing.expectEqualStrings("VK_KHR_surface", vk.extension.khr_surface.name);
+    try std.testing.expectEqualStrings("VK_KHR_swapchain", vk.extension.khr_swapchain.name);
+    try std.testing.expectEqualStrings("VK_EXT_debug_utils", vk.extension.ext_debug_utils.name);
+
+    var extensions: vk.ExtensionSet(4) = .{};
+    try extensions.append(vk.extension.khr_surface.name);
+    try extensions.append(vk.extension.khr_surface.name);
+    try extensions.appendAll(&.{
+        vk.extension.ext_debug_utils.name,
+        vk.extension.khr_swapchain.name,
+    });
+    try std.testing.expectEqual(@as(usize, 3), extensions.slice().len);
+    try std.testing.expect(extensions.contains("VK_EXT_debug_utils"));
+    try std.testing.expect(!extensions.contains("VK_EXT_missing"));
+    try extensions.append("VK_EXT_fourth");
+    try std.testing.expectError(error.CountOverflow, extensions.append("VK_EXT_fifth"));
+}
+
+test "typed queue capabilities and memory selection avoid raw bit arithmetic" {
+    const graphics_transfer: vk.QueueFamily = .{
+        .index = 3,
+        .properties = .{
+            .queueFlags = @intCast(
+                vk.raw.VK_QUEUE_GRAPHICS_BIT | vk.raw.VK_QUEUE_TRANSFER_BIT,
+            ),
+            .queueCount = 2,
+        },
+    };
+    try std.testing.expect(graphics_transfer.supports(.graphics));
+    try std.testing.expect(graphics_transfer.supports(.transfer));
+    try std.testing.expect(!graphics_transfer.supports(.compute));
+    try std.testing.expectEqual(@as(u32, 2), graphics_transfer.queueCount());
+
+    var memory: vk.raw.VkPhysicalDeviceMemoryProperties = .{};
+    memory.memoryTypeCount = 3;
+    memory.memoryTypes[0].propertyFlags = vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    memory.memoryTypes[1].propertyFlags = @intCast(
+        vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            vk.raw.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    );
+    memory.memoryTypes[2].propertyFlags = vk.raw.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    try std.testing.expectEqual(@as(u32, 1), try vk.selectMemoryTypeIndex(memory, .{
+        .type_bits = 0b111,
+        .required_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        .preferred_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    }));
+    try std.testing.expectError(error.MemoryTypeNotFound, vk.selectMemoryTypeIndex(memory, .{
+        .type_bits = 0b011,
+        .required_flags = vk.raw.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    }));
+}
+
+test "debug utility options produce reusable callback and label views" {
+    const messenger_options: vk.ext.debug_utils.MessengerOptions = .{
+        .callback = debugCallback,
+    };
+    const messenger_info = messenger_options.createInfo();
+    try std.testing.expectEqual(
+        @as(vk.raw.VkStructureType, @intCast(
+            vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        )),
+        messenger_info.sType,
+    );
+    try std.testing.expect(messenger_info.pfnUserCallback != null);
+
+    const label = (vk.ext.debug_utils.LabelOptions{
+        .name = "frame",
+        .color = .{ 1.0, 0.5, 0.25, 1.0 },
+    }).createInfo();
+    try std.testing.expectEqualStrings("frame", std.mem.span(label.pLabelName));
+    try std.testing.expectEqual(@as(f32, 0.5), label.color[1]);
+
+    var callback_data: vk.raw.VkDebugUtilsMessengerCallbackDataEXT = .{
+        .sType = vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT,
+        .pMessageIdName = "validation-id",
+        .pMessage = "validation message",
+    };
+    const message = vk.ext.debug_utils.Message.fromCallback(
+        vk.raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        vk.raw.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+        &callback_data,
+    ).?;
+    try std.testing.expect(message.isError());
+    try std.testing.expect(!message.isWarning());
+    try std.testing.expectEqualStrings("validation-id", message.idName().?);
+    try std.testing.expectEqualStrings("validation message", message.text().?);
+    try std.testing.expectEqual(@as(usize, 0), message.objects().len);
 }
 
 test "bounded property names and support checks do not allocate" {
@@ -160,6 +259,8 @@ test "checkSuccess maps only success-only Vulkan results" {
         .{ vk.raw.VK_ERROR_FORMAT_NOT_SUPPORTED, error.FormatNotSupported },
         .{ vk.raw.VK_ERROR_FRAGMENTED_POOL, error.FragmentedPool },
         .{ vk.raw.VK_ERROR_UNKNOWN, error.UnknownVulkanError },
+        .{ vk.raw.VK_ERROR_SURFACE_LOST_KHR, error.SurfaceLost },
+        .{ vk.raw.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, error.NativeWindowInUse },
     };
     for (cases) |case| try std.testing.expectError(case[1], vk.checkSuccess(case[0]));
     try std.testing.expectError(error.UnexpectedVulkanResult, vk.checkSuccess(-1234567));
@@ -180,31 +281,53 @@ test "all public wrapper declarations compile" {
     _ = &vk.Entry.instanceExtensions;
     _ = &vk.Entry.instanceLayers;
     _ = &vk.Entry.load;
+    _ = &vk.Entry.require;
     _ = &vk.Entry.loadUnchecked;
     _ = &vk.Entry.createInstance;
     _ = &vk.Entry.createInstanceRaw;
     _ = &vk.Instance.deinit;
     _ = &vk.Instance.rawHandle;
     _ = &vk.Instance.load;
+    _ = &vk.Instance.require;
     _ = &vk.Instance.loadUnchecked;
     _ = &vk.Instance.adoptSurface;
     _ = &vk.Instance.physicalDevices;
     _ = &vk.PhysicalDevice.properties;
+    _ = &vk.PhysicalDevice.features;
+    _ = &vk.PhysicalDevice.features2;
     _ = &vk.PhysicalDevice.memoryProperties;
     _ = &vk.PhysicalDevice.queueFamilyProperties;
+    _ = &vk.PhysicalDevice.queueFamilies;
+    _ = &vk.PhysicalDevice.deviceExtensions;
     _ = &vk.PhysicalDevice.surfaceSupport;
+    _ = &vk.PhysicalDevice.surfaceCapabilities;
+    _ = &vk.PhysicalDevice.surfaceFormats;
+    _ = &vk.PhysicalDevice.presentModes;
+    _ = &vk.PhysicalDevice.findMemoryTypeIndex;
     _ = &vk.PhysicalDevice.createDevice;
     _ = &vk.PhysicalDevice.createDeviceRaw;
     _ = &vk.Device.deinit;
     _ = &vk.Device.load;
+    _ = &vk.Device.require;
     _ = &vk.Device.loadUnchecked;
     _ = &vk.Device.waitIdle;
     _ = &vk.Device.queue;
     _ = &vk.Device.setObjectName;
+    _ = &vk.Device.createSwapchain;
+    _ = &vk.Device.beginCommandBufferLabel;
+    _ = &vk.Device.endCommandBufferLabel;
+    _ = &vk.Device.insertCommandBufferLabel;
     _ = &vk.Surface.deinit;
+    _ = &vk.Swapchain.deinit;
+    _ = &vk.Swapchain.images;
+    _ = &vk.Swapchain.acquireNextImage;
     _ = &vk.ext.debug_utils.Messenger.init;
     _ = &vk.Queue.submit;
     _ = &vk.Queue.waitIdle;
+    _ = &vk.Queue.present;
+    _ = &vk.Queue.beginLabel;
+    _ = &vk.Queue.endLabel;
+    _ = &vk.Queue.insertLabel;
 }
 
 test "vendored registry revision is recorded" {

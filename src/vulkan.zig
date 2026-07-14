@@ -8,6 +8,9 @@ pub const raw = @import("vulkan_raw");
 pub const command = @import("vulkan_commands");
 /// Converts a translated optional `PFN_vk*` type into its storable function-pointer type.
 pub const CommandFunction = command.FunctionType;
+/// Generated Vulkan extension descriptors with stable sentinel-terminated names.
+pub const extension = command.extension;
+pub const Extension = command.Extension;
 
 pub const platform = build_options.platform;
 pub const registry_commit = build_options.registry_commit;
@@ -23,6 +26,7 @@ const DeviceHandle = NonNullHandle(raw.VkDevice);
 const QueueHandle = NonNullHandle(raw.VkQueue);
 const SurfaceHandle = NonNullHandle(raw.VkSurfaceKHR);
 const DebugMessengerHandle = NonNullHandle(raw.VkDebugUtilsMessengerEXT);
+const SwapchainHandle = NonNullHandle(raw.VkSwapchainKHR);
 
 pub const Error = error{
     OutOfHostMemory,
@@ -46,6 +50,9 @@ pub const Error = error{
     InvalidOptions,
     CountOverflow,
     PortabilityNotSupported,
+    MemoryTypeNotFound,
+    SurfaceLost,
+    NativeWindowInUse,
 };
 
 pub const LoaderError = error{
@@ -99,6 +106,46 @@ pub const Portability = struct {
             0;
     }
 };
+
+/// A fixed-capacity, allocation-free set of unique extension names.
+pub fn ExtensionSet(comptime capacity: usize) type {
+    if (capacity > name_count_max) {
+        @compileError("extension-set capacity exceeds vk-zig's supported name count");
+    }
+    return struct {
+        names: [capacity][:0]const u8 = undefined,
+        count: usize = 0,
+
+        const Set = @This();
+
+        pub fn append(set: *Set, name: [:0]const u8) Error!void {
+            if (set.contains(name)) return;
+            if (set.count == capacity) return error.CountOverflow;
+            set.names[set.count] = name;
+            set.count += 1;
+        }
+
+        pub fn appendAll(set: *Set, names: []const [:0]const u8) Error!void {
+            for (names) |name| try set.append(name);
+        }
+
+        /// Converts foreign sentinel pointers while copying only their borrowed views.
+        pub fn appendPointerNames(
+            set: *Set,
+            names: []const [*:0]const u8,
+        ) Error!void {
+            for (names) |name| try set.append(std.mem.span(name));
+        }
+
+        pub fn contains(set: *const Set, expected: []const u8) bool {
+            return containsName(set.slice(), expected);
+        }
+
+        pub fn slice(set: *const Set) []const [:0]const u8 {
+            return set.names[0..set.count];
+        }
+    };
+}
 
 /// Returns the bytes before the first NUL, or the entire bounded input when none exists.
 pub fn boundedCString(bytes: []const u8) []const u8 {
@@ -306,6 +353,13 @@ pub const Entry = struct {
         );
     }
 
+    pub fn require(
+        entry: *const Entry,
+        comptime descriptor: anytype,
+    ) Error!DescriptorFunction(descriptor, .global) {
+        return entry.load(descriptor) orelse error.MissingCommand;
+    }
+
     /// Loads a dynamic command name without verifying that it matches the PFN type.
     pub fn loadUnchecked(
         entry: *const Entry,
@@ -327,10 +381,10 @@ pub const Entry = struct {
         var flags = options.flags;
         if (options.enumerate_portability) {
             if (platform != .metal) return error.PortabilityNotSupported;
-            const extension = portability_instance_extensions[0];
-            if (!containsName(options.extensions, extension)) {
+            const portability_extension = portability_instance_extensions[0];
+            if (!containsName(options.extensions, portability_extension)) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
-                extension_pointers[extension_count] = extension.ptr;
+                extension_pointers[extension_count] = portability_extension.ptr;
                 extension_count += 1;
             }
             flags |= Portability.instanceFlags();
@@ -433,6 +487,13 @@ pub const Instance = struct {
             Descriptor.Pfn,
             Descriptor.name,
         );
+    }
+
+    pub fn require(
+        instance: *const Instance,
+        comptime descriptor: anytype,
+    ) Error!DescriptorFunction(descriptor, .instance) {
+        return (try instance.load(descriptor)) orelse error.MissingCommand;
     }
 
     /// Loads a dynamic command name without verifying that it matches the PFN type.
@@ -549,6 +610,163 @@ pub const Surface = struct {
     }
 };
 
+pub const SwapchainOptions = struct {
+    surface: *const Surface,
+    min_image_count: u32,
+    image_format: raw.VkFormat,
+    image_color_space: raw.VkColorSpaceKHR,
+    image_extent: raw.VkExtent2D,
+    image_usage: raw.VkImageUsageFlags,
+    image_array_layers: u32 = 1,
+    queue_family_indices: []const u32 = &.{},
+    pre_transform: raw.VkSurfaceTransformFlagBitsKHR = raw.VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+    composite_alpha: raw.VkCompositeAlphaFlagBitsKHR = raw.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+    present_mode: raw.VkPresentModeKHR = raw.VK_PRESENT_MODE_FIFO_KHR,
+    clipped: bool = true,
+    old_swapchain: ?*const Swapchain = null,
+    flags: raw.VkSwapchainCreateFlagsKHR = 0,
+    next: ?*const anyopaque = null,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
+
+    pub fn validate(options: SwapchainOptions, device: *const Device) Error!void {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        if (options.surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        _ = try options.surface.rawHandle();
+        if (options.min_image_count == 0 or options.image_array_layers == 0) {
+            return error.InvalidOptions;
+        }
+        if (options.image_extent.width == 0 or options.image_extent.height == 0) {
+            return error.InvalidOptions;
+        }
+        _ = try count32(options.queue_family_indices.len);
+        for (options.queue_family_indices, 0..) |family_index, index| {
+            for (options.queue_family_indices[0..index]) |previous_index| {
+                if (family_index == previous_index) return error.InvalidOptions;
+            }
+        }
+        if (options.old_swapchain) |old| {
+            if (old._device_handle != device_handle) return error.InvalidHandle;
+            _ = try old.rawHandle();
+        }
+    }
+};
+
+pub const AcquireOptions = struct {
+    timeout_ns: u64 = std.math.maxInt(u64),
+    semaphore: raw.VkSemaphore = null,
+    fence: raw.VkFence = null,
+};
+
+pub const AcquireResult = union(enum) {
+    success: u32,
+    suboptimal: u32,
+    timeout,
+    not_ready,
+    out_of_date,
+};
+
+pub const PresentOptions = struct {
+    swapchain: *const Swapchain,
+    image_index: u32,
+    wait_semaphores: []const raw.VkSemaphore = &.{},
+    next: ?*const anyopaque = null,
+};
+
+pub const PresentStatus = enum {
+    success,
+    suboptimal,
+    out_of_date,
+};
+
+/// An owned `VkSwapchainKHR`. Destroy it before its parent device.
+pub const Swapchain = struct {
+    _handle: ?SwapchainHandle,
+    _device_handle: DeviceHandle,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    destroy_swapchain: CommandFunction(raw.PFN_vkDestroySwapchainKHR),
+    get_swapchain_images: CommandFunction(raw.PFN_vkGetSwapchainImagesKHR),
+    acquire_next_image: CommandFunction(raw.PFN_vkAcquireNextImageKHR),
+
+    pub fn deinit(swapchain: *Swapchain) void {
+        const handle = swapchain._handle orelse return;
+        swapchain.destroy_swapchain(
+            swapchain._device_handle,
+            handle,
+            swapchain.allocation_callbacks,
+        );
+        swapchain._handle = null;
+    }
+
+    pub fn rawHandle(swapchain: *const Swapchain) Error!raw.VkSwapchainKHR {
+        return swapchain._handle orelse error.InactiveObject;
+    }
+
+    /// Returns non-owning images whose lifetime is controlled by the swapchain.
+    pub fn images(
+        swapchain: *const Swapchain,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]raw.VkImage {
+        const handle = try swapchain.rawHandle();
+        var count: u32 = 0;
+        try checkSuccess(swapchain.get_swapchain_images(
+            swapchain._device_handle,
+            handle,
+            &count,
+            null,
+        ));
+        try validateEnumerationCount(count);
+        if (count == 0) return gpa.alloc(raw.VkImage, 0);
+
+        var image_handles = try gpa.alloc(raw.VkImage, count);
+        errdefer gpa.free(image_handles);
+        for (0..enumeration_attempt_count_max) |_| {
+            var written: u32 = @intCast(image_handles.len);
+            const result = swapchain.get_swapchain_images(
+                swapchain._device_handle,
+                handle,
+                &written,
+                image_handles.ptr,
+            );
+            if (result == raw.VK_SUCCESS) return gpa.realloc(image_handles, written);
+            if (result != raw.VK_INCOMPLETE) try checkSuccess(result);
+
+            count = 0;
+            try checkSuccess(swapchain.get_swapchain_images(
+                swapchain._device_handle,
+                handle,
+                &count,
+                null,
+            ));
+            count = try nextEnumerationCapacity(count, image_handles.len);
+            image_handles = try gpa.realloc(image_handles, count);
+        }
+        return error.EnumerationUnstable;
+    }
+
+    pub fn acquireNextImage(
+        swapchain: *const Swapchain,
+        options: AcquireOptions,
+    ) Error!AcquireResult {
+        if (options.semaphore == null and options.fence == null) return error.InvalidOptions;
+        var image_index: u32 = 0;
+        const result = swapchain.acquire_next_image(
+            swapchain._device_handle,
+            try swapchain.rawHandle(),
+            options.timeout_ns,
+            options.semaphore,
+            options.fence,
+            &image_index,
+        );
+        if (result == raw.VK_SUCCESS) return .{ .success = image_index };
+        if (result == raw.VK_SUBOPTIMAL_KHR) return .{ .suboptimal = image_index };
+        if (result == raw.VK_TIMEOUT) return .timeout;
+        if (result == raw.VK_NOT_READY) return .not_ready;
+        if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
+        try checkSuccess(result);
+        unreachable;
+    }
+};
+
 pub const PhysicalDevice = struct {
     _handle: PhysicalDeviceHandle,
     _instance_handle: InstanceHandle,
@@ -562,6 +780,29 @@ pub const PhysicalDevice = struct {
     pub fn properties(device: *const PhysicalDevice) raw.VkPhysicalDeviceProperties {
         var value: raw.VkPhysicalDeviceProperties = .{};
         device.dispatch.get_physical_device_properties(device._handle, &value);
+        return value;
+    }
+
+    pub fn features(device: *const PhysicalDevice) raw.VkPhysicalDeviceFeatures {
+        var value: raw.VkPhysicalDeviceFeatures = .{};
+        device.dispatch.get_physical_device_features(device._handle, &value);
+        return value;
+    }
+
+    /// Queries core and chained feature structures. `next` must point to a mutable
+    /// Vulkan feature structure whose lifetime covers this call.
+    pub fn features2(
+        device: *const PhysicalDevice,
+        next: ?*anyopaque,
+    ) Error!raw.VkPhysicalDeviceFeatures2 {
+        const get_features = device.dispatch.get_physical_device_features2 orelse {
+            return error.MissingCommand;
+        };
+        var value: raw.VkPhysicalDeviceFeatures2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = next,
+        };
+        get_features(device._handle, &value);
         return value;
     }
 
@@ -602,6 +843,35 @@ pub const PhysicalDevice = struct {
         return error.EnumerationUnstable;
     }
 
+    pub fn queueFamilies(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]QueueFamily {
+        const queue_properties = try device.queueFamilyProperties(gpa);
+        defer gpa.free(queue_properties);
+        const families = try gpa.alloc(QueueFamily, queue_properties.len);
+        for (families, queue_properties, 0..) |*family, property, index| {
+            family.* = .{
+                .index = @intCast(index),
+                .properties = property,
+            };
+        }
+        return families;
+    }
+
+    pub fn deviceExtensions(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+        layer_name: ?[:0]const u8,
+    ) (Error || std.mem.Allocator.Error)![]raw.VkExtensionProperties {
+        return enumerateDeviceExtensions(
+            gpa,
+            device.dispatch.enumerate_device_extension_properties,
+            device._handle,
+            layer_name,
+        );
+    }
+
     pub fn surfaceSupport(
         device: *const PhysicalDevice,
         surface: *const Surface,
@@ -609,12 +879,9 @@ pub const PhysicalDevice = struct {
     ) Error!bool {
         if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
         const surface_handle = try surface.rawHandle();
-        const get_support = loadInstance(
-            device.dispatch.get_instance_proc_addr,
-            device._instance_handle,
-            raw.PFN_vkGetPhysicalDeviceSurfaceSupportKHR,
-            @TypeOf(command.get_physical_device_surface_support_khr).name,
-        ) orelse return error.MissingCommand;
+        const get_support = device.dispatch.get_physical_device_surface_support_khr orelse {
+            return error.MissingCommand;
+        };
         var supported: raw.VkBool32 = raw.VK_FALSE;
         try checkSuccess(get_support(
             device._handle,
@@ -623,6 +890,64 @@ pub const PhysicalDevice = struct {
             &supported,
         ));
         return supported != raw.VK_FALSE;
+    }
+
+    pub fn surfaceCapabilities(
+        device: *const PhysicalDevice,
+        surface: *const Surface,
+    ) Error!raw.VkSurfaceCapabilitiesKHR {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        const get_capabilities = device.dispatch.get_physical_device_surface_capabilities_khr orelse {
+            return error.MissingCommand;
+        };
+        var capabilities: raw.VkSurfaceCapabilitiesKHR = .{};
+        try checkSuccess(get_capabilities(
+            device._handle,
+            try surface.rawHandle(),
+            &capabilities,
+        ));
+        return capabilities;
+    }
+
+    pub fn surfaceFormats(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+        surface: *const Surface,
+    ) (Error || std.mem.Allocator.Error)![]raw.VkSurfaceFormatKHR {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        const get_formats = device.dispatch.get_physical_device_surface_formats_khr orelse {
+            return error.MissingCommand;
+        };
+        return enumerateSurfaceFormats(
+            gpa,
+            get_formats,
+            device._handle,
+            try surface.rawHandle(),
+        );
+    }
+
+    pub fn presentModes(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+        surface: *const Surface,
+    ) (Error || std.mem.Allocator.Error)![]raw.VkPresentModeKHR {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        const get_present_modes = device.dispatch.get_physical_device_surface_present_modes_khr orelse {
+            return error.MissingCommand;
+        };
+        return enumeratePresentModes(
+            gpa,
+            get_present_modes,
+            device._handle,
+            try surface.rawHandle(),
+        );
+    }
+
+    pub fn findMemoryTypeIndex(
+        device: *const PhysicalDevice,
+        options: MemoryTypeOptions,
+    ) Error!u32 {
+        return selectMemoryTypeIndex(device.memoryProperties(), options);
     }
 
     pub fn createDevice(
@@ -647,10 +972,10 @@ pub const PhysicalDevice = struct {
         var extension_count = try fillNamePointers(options.extensions, &extension_pointers);
         if (options.enable_portability_subset) {
             if (platform != .metal) return error.PortabilityNotSupported;
-            const extension = portability_device_extensions[0];
-            if (!containsName(options.extensions, extension)) {
+            const portability_extension = portability_device_extensions[0];
+            if (!containsName(options.extensions, portability_extension)) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
-                extension_pointers[extension_count] = extension.ptr;
+                extension_pointers[extension_count] = portability_extension.ptr;
                 extension_count += 1;
             }
         }
@@ -698,11 +1023,82 @@ pub const PhysicalDevice = struct {
         };
         return .{
             ._handle = live_handle,
+            ._instance_handle = physical_device._instance_handle,
             .allocation_callbacks = allocation_callbacks,
             .dispatch = dispatch,
         };
     }
 };
+
+pub const QueueCapability = enum {
+    graphics,
+    compute,
+    transfer,
+    sparse_binding,
+    protected,
+};
+
+pub const QueueFamily = struct {
+    index: u32,
+    properties: raw.VkQueueFamilyProperties,
+
+    pub fn queueCount(family: QueueFamily) u32 {
+        return family.properties.queueCount;
+    }
+
+    pub fn supports(family: QueueFamily, capability: QueueCapability) bool {
+        if (family.properties.queueCount == 0) return false;
+        const bit: raw.VkQueueFlags = switch (capability) {
+            .graphics => @intCast(raw.VK_QUEUE_GRAPHICS_BIT),
+            .compute => @intCast(raw.VK_QUEUE_COMPUTE_BIT),
+            .transfer => @intCast(raw.VK_QUEUE_TRANSFER_BIT),
+            .sparse_binding => @intCast(raw.VK_QUEUE_SPARSE_BINDING_BIT),
+            .protected => @intCast(raw.VK_QUEUE_PROTECTED_BIT),
+        };
+        return (family.properties.queueFlags & bit) != 0;
+    }
+
+    pub fn presentationSupport(
+        family: QueueFamily,
+        device: *const PhysicalDevice,
+        surface: *const Surface,
+    ) Error!bool {
+        return device.surfaceSupport(surface, family.index);
+    }
+};
+
+pub const MemoryTypeOptions = struct {
+    type_bits: u32,
+    required_flags: raw.VkMemoryPropertyFlags,
+    preferred_flags: raw.VkMemoryPropertyFlags = 0,
+};
+
+/// Selects a compatible memory type, preferring the candidate with the most
+/// requested preferred flags. Equal candidates preserve Vulkan's order.
+pub fn selectMemoryTypeIndex(
+    memory: raw.VkPhysicalDeviceMemoryProperties,
+    options: MemoryTypeOptions,
+) Error!u32 {
+    if (memory.memoryTypeCount > memory.memoryTypes.len) return error.InvalidOptions;
+    var best_index: ?u32 = null;
+    var best_score: u32 = 0;
+    for (memory.memoryTypes[0..memory.memoryTypeCount], 0..) |memory_type, index| {
+        const index_u32: u32 = @intCast(index);
+        const type_bit = @as(u32, 1) << @intCast(index_u32);
+        if ((options.type_bits & type_bit) == 0) continue;
+        if ((memory_type.propertyFlags & options.required_flags) != options.required_flags) {
+            continue;
+        }
+        const score: u32 = @intCast(@popCount(
+            memory_type.propertyFlags & options.preferred_flags,
+        ));
+        if (best_index == null or score > best_score) {
+            best_index = index_u32;
+            best_score = score;
+        }
+    }
+    return best_index orelse error.MemoryTypeNotFound;
+}
 
 pub const DeviceQueueOptions = struct {
     family_index: u32,
@@ -747,6 +1143,7 @@ pub const DeviceOptions = struct {
 
 pub const Device = struct {
     _handle: ?DeviceHandle,
+    _instance_handle: InstanceHandle,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: DeviceDispatch,
 
@@ -777,8 +1174,13 @@ pub const Device = struct {
         );
         return .{
             ._handle = handle orelse return error.InvalidHandle,
+            ._device_handle = device_handle,
             .queue_submit = device.dispatch.queue_submit,
             .queue_wait_idle = device.dispatch.queue_wait_idle,
+            .queue_present_khr = device.dispatch.queue_present_khr,
+            .queue_begin_debug_utils_label_ext = device.dispatch.queue_begin_debug_utils_label_ext,
+            .queue_end_debug_utils_label_ext = device.dispatch.queue_end_debug_utils_label_ext,
+            .queue_insert_debug_utils_label_ext = device.dispatch.queue_insert_debug_utils_label_ext,
         };
     }
 
@@ -794,6 +1196,13 @@ pub const Device = struct {
             Descriptor.Pfn,
             Descriptor.name,
         );
+    }
+
+    pub fn require(
+        device: *const Device,
+        comptime descriptor: anytype,
+    ) Error!DescriptorFunction(descriptor, .device) {
+        return (try device.load(descriptor)) orelse error.MissingCommand;
     }
 
     /// Loads a dynamic command name without verifying that it matches the PFN type.
@@ -812,9 +1221,10 @@ pub const Device = struct {
         name: [:0]const u8,
     ) Error!void {
         const device_handle = device._handle orelse return error.InactiveObject;
-        const set_name = (try device.load(command.set_debug_utils_object_name_ext)) orelse {
+        const set_name = device.dispatch.set_debug_utils_object_name_ext orelse {
             return error.MissingCommand;
         };
+        try object.validateParent(device);
         const object_info = try object.info();
         const name_info: raw.VkDebugUtilsObjectNameInfoEXT = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
@@ -824,12 +1234,133 @@ pub const Device = struct {
         };
         try checkSuccess(set_name(device_handle, &name_info));
     }
+
+    pub fn createSwapchain(
+        device: *const Device,
+        options: SwapchainOptions,
+    ) Error!Swapchain {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        try options.validate(device);
+        const create_swapchain = device.dispatch.create_swapchain_khr orelse {
+            return error.MissingCommand;
+        };
+        const destroy_swapchain = device.dispatch.destroy_swapchain_khr orelse {
+            return error.MissingCommand;
+        };
+        const get_images = device.dispatch.get_swapchain_images_khr orelse {
+            return error.MissingCommand;
+        };
+        const acquire_next_image = device.dispatch.acquire_next_image_khr orelse {
+            return error.MissingCommand;
+        };
+
+        const old_handle = if (options.old_swapchain) |old|
+            try old.rawHandle()
+        else
+            null;
+        const concurrent = options.queue_family_indices.len > 1;
+        const create_info: raw.VkSwapchainCreateInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+            .pNext = options.next,
+            .flags = options.flags,
+            .surface = try options.surface.rawHandle(),
+            .minImageCount = options.min_image_count,
+            .imageFormat = options.image_format,
+            .imageColorSpace = options.image_color_space,
+            .imageExtent = options.image_extent,
+            .imageArrayLayers = options.image_array_layers,
+            .imageUsage = options.image_usage,
+            .imageSharingMode = if (concurrent)
+                raw.VK_SHARING_MODE_CONCURRENT
+            else
+                raw.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = if (concurrent)
+                @intCast(options.queue_family_indices.len)
+            else
+                0,
+            .pQueueFamilyIndices = if (concurrent)
+                options.queue_family_indices.ptr
+            else
+                null,
+            .preTransform = options.pre_transform,
+            .compositeAlpha = options.composite_alpha,
+            .presentMode = options.present_mode,
+            .clipped = if (options.clipped) raw.VK_TRUE else raw.VK_FALSE,
+            .oldSwapchain = old_handle,
+        };
+        var handle: raw.VkSwapchainKHR = null;
+        const result = create_swapchain(
+            device_handle,
+            &create_info,
+            options.allocation_callbacks,
+            &handle,
+        );
+        if (result != raw.VK_SUCCESS) {
+            if (handle) |provisional_handle| {
+                destroy_swapchain(device_handle, provisional_handle, options.allocation_callbacks);
+            }
+            try checkSuccess(result);
+            unreachable;
+        }
+        return .{
+            ._handle = handle orelse return error.InvalidHandle,
+            ._device_handle = device_handle,
+            .allocation_callbacks = options.allocation_callbacks,
+            .destroy_swapchain = destroy_swapchain,
+            .get_swapchain_images = get_images,
+            .acquire_next_image = acquire_next_image,
+        };
+    }
+
+    pub fn beginCommandBufferLabel(
+        device: *const Device,
+        command_buffer: raw.VkCommandBuffer,
+        options: ext.debug_utils.LabelOptions,
+    ) Error!void {
+        _ = device._handle orelse return error.InactiveObject;
+        const begin_label = device.dispatch.cmd_begin_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        const live_command_buffer = command_buffer orelse return error.InvalidHandle;
+        const label = options.createInfo();
+        begin_label(live_command_buffer, &label);
+    }
+
+    pub fn endCommandBufferLabel(
+        device: *const Device,
+        command_buffer: raw.VkCommandBuffer,
+    ) Error!void {
+        _ = device._handle orelse return error.InactiveObject;
+        const end_label = device.dispatch.cmd_end_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        end_label(command_buffer orelse return error.InvalidHandle);
+    }
+
+    pub fn insertCommandBufferLabel(
+        device: *const Device,
+        command_buffer: raw.VkCommandBuffer,
+        options: ext.debug_utils.LabelOptions,
+    ) Error!void {
+        _ = device._handle orelse return error.InactiveObject;
+        const insert_label = device.dispatch.cmd_insert_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        const live_command_buffer = command_buffer orelse return error.InvalidHandle;
+        const label = options.createInfo();
+        insert_label(live_command_buffer, &label);
+    }
 };
 
 pub const Queue = struct {
     _handle: QueueHandle,
+    _device_handle: DeviceHandle,
     queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
+    queue_present_khr: ?CommandFunction(raw.PFN_vkQueuePresentKHR),
+    queue_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueBeginDebugUtilsLabelEXT),
+    queue_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueEndDebugUtilsLabelEXT),
+    queue_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueInsertDebugUtilsLabelEXT),
 
     /// Returns the valid raw queue handle for explicit FFI integration.
     pub fn rawHandle(queue: *const Queue) raw.VkQueue {
@@ -853,6 +1384,55 @@ pub const Queue = struct {
     pub fn waitIdle(queue: *const Queue) Error!void {
         try checkSuccess(queue.queue_wait_idle(queue._handle));
     }
+
+    pub fn beginLabel(queue: *const Queue, options: ext.debug_utils.LabelOptions) Error!void {
+        const begin_label = queue.queue_begin_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        const label = options.createInfo();
+        begin_label(queue._handle, &label);
+    }
+
+    pub fn endLabel(queue: *const Queue) Error!void {
+        const end_label = queue.queue_end_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        end_label(queue._handle);
+    }
+
+    pub fn insertLabel(queue: *const Queue, options: ext.debug_utils.LabelOptions) Error!void {
+        const insert_label = queue.queue_insert_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        const label = options.createInfo();
+        insert_label(queue._handle, &label);
+    }
+
+    pub fn present(queue: *const Queue, options: PresentOptions) Error!PresentStatus {
+        const present_command = queue.queue_present_khr orelse return error.MissingCommand;
+        if (options.swapchain._device_handle != queue._device_handle) return error.InvalidHandle;
+        const wait_count = try count32(options.wait_semaphores.len);
+        const swapchain_handle = try options.swapchain.rawHandle();
+        const present_info: raw.VkPresentInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = options.next,
+            .waitSemaphoreCount = wait_count,
+            .pWaitSemaphores = if (options.wait_semaphores.len == 0)
+                null
+            else
+                options.wait_semaphores.ptr,
+            .swapchainCount = 1,
+            .pSwapchains = @ptrCast(&swapchain_handle),
+            .pImageIndices = @ptrCast(&options.image_index),
+            .pResults = null,
+        };
+        const result = present_command(queue._handle, &present_info);
+        if (result == raw.VK_SUCCESS) return .success;
+        if (result == raw.VK_SUBOPTIMAL_KHR) return .suboptimal;
+        if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
+        try checkSuccess(result);
+        unreachable;
+    }
 };
 
 pub const ext = struct {
@@ -872,6 +1452,86 @@ pub const ext = struct {
             flags: raw.VkDebugUtilsMessengerCreateFlagsEXT = 0,
             next: ?*const anyopaque = null,
             allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
+
+            /// Produces the same create info used by `Messenger.init`, suitable for
+            /// chaining through `InstanceOptions.next` to receive creation messages.
+            pub fn createInfo(options: MessengerOptions) raw.VkDebugUtilsMessengerCreateInfoEXT {
+                return .{
+                    .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                    .pNext = options.next,
+                    .flags = options.flags,
+                    .messageSeverity = options.severity,
+                    .messageType = options.message_type,
+                    .pfnUserCallback = options.callback,
+                    .pUserData = options.user_data,
+                };
+            }
+        };
+
+        /// A safe borrowed view over callback data. It is valid only during the callback.
+        pub const Message = struct {
+            severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
+            message_type: raw.VkDebugUtilsMessageTypeFlagsEXT,
+            data: *const raw.VkDebugUtilsMessengerCallbackDataEXT,
+
+            pub fn fromCallback(
+                severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
+                message_type: raw.VkDebugUtilsMessageTypeFlagsEXT,
+                data: [*c]const raw.VkDebugUtilsMessengerCallbackDataEXT,
+            ) ?Message {
+                if (data == null) return null;
+                return .{
+                    .severity = severity,
+                    .message_type = message_type,
+                    .data = @ptrCast(data),
+                };
+            }
+
+            pub fn text(message: Message) ?[]const u8 {
+                return optionalCString(message.data.pMessage);
+            }
+
+            pub fn idName(message: Message) ?[]const u8 {
+                return optionalCString(message.data.pMessageIdName);
+            }
+
+            pub fn isError(message: Message) bool {
+                return (message.severity & raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0;
+            }
+
+            pub fn isWarning(message: Message) bool {
+                return (message.severity & raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0;
+            }
+
+            pub fn objects(message: Message) []const raw.VkDebugUtilsObjectNameInfoEXT {
+                if (message.data.objectCount == 0 or message.data.pObjects == null) return &.{};
+                return message.data.pObjects[0..message.data.objectCount];
+            }
+
+            pub fn queueLabels(message: Message) []const raw.VkDebugUtilsLabelEXT {
+                if (message.data.queueLabelCount == 0 or message.data.pQueueLabels == null) return &.{};
+                return message.data.pQueueLabels[0..message.data.queueLabelCount];
+            }
+
+            pub fn commandBufferLabels(message: Message) []const raw.VkDebugUtilsLabelEXT {
+                if (message.data.cmdBufLabelCount == 0 or message.data.pCmdBufLabels == null) return &.{};
+                return message.data.pCmdBufLabels[0..message.data.cmdBufLabelCount];
+            }
+        };
+
+        pub const LabelOptions = struct {
+            name: [:0]const u8,
+            color: [4]f32 = .{ 0.0, 0.0, 0.0, 0.0 },
+            next: ?*const anyopaque = null,
+
+            pub fn createInfo(options: LabelOptions) raw.VkDebugUtilsLabelEXT {
+                return .{
+                    .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+                    .pNext = options.next,
+                    .pLabelName = options.name.ptr,
+                    .color = options.color,
+                };
+            }
         };
 
         pub const Messenger = struct {
@@ -889,15 +1549,7 @@ pub const ext = struct {
                     command.destroy_debug_utils_messenger_ext,
                 )) orelse return error.MissingCommand;
 
-                const create_info: raw.VkDebugUtilsMessengerCreateInfoEXT = .{
-                    .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-                    .pNext = options.next,
-                    .flags = options.flags,
-                    .messageSeverity = options.severity,
-                    .messageType = options.message_type,
-                    .pfnUserCallback = options.callback,
-                    .pUserData = options.user_data,
-                };
+                const create_info = options.createInfo();
                 var handle: raw.VkDebugUtilsMessengerEXT = null;
                 const result = create_messenger(
                     instance_handle,
@@ -944,6 +1596,31 @@ pub const ext = struct {
         pub const Object = union(enum) {
             device: *const Device,
             queue: *const Queue,
+            surface: *const Surface,
+            swapchain: *const Swapchain,
+            semaphore: raw.VkSemaphore,
+            command_buffer: raw.VkCommandBuffer,
+            fence: raw.VkFence,
+            device_memory: raw.VkDeviceMemory,
+            buffer: raw.VkBuffer,
+            image: raw.VkImage,
+            event: raw.VkEvent,
+            query_pool: raw.VkQueryPool,
+            buffer_view: raw.VkBufferView,
+            image_view: raw.VkImageView,
+            shader_module: raw.VkShaderModule,
+            pipeline_cache: raw.VkPipelineCache,
+            pipeline_layout: raw.VkPipelineLayout,
+            render_pass: raw.VkRenderPass,
+            pipeline: raw.VkPipeline,
+            descriptor_set_layout: raw.VkDescriptorSetLayout,
+            sampler: raw.VkSampler,
+            descriptor_pool: raw.VkDescriptorPool,
+            descriptor_set: raw.VkDescriptorSet,
+            framebuffer: raw.VkFramebuffer,
+            command_pool: raw.VkCommandPool,
+            raw_surface: raw.VkSurfaceKHR,
+            raw_swapchain: raw.VkSwapchainKHR,
 
             const Info = struct {
                 object_type: raw.VkObjectType,
@@ -954,13 +1631,75 @@ pub const ext = struct {
                 return switch (object) {
                     .device => |device| .{
                         .object_type = @intCast(raw.VK_OBJECT_TYPE_DEVICE),
-                        .handle = handleAddress(try device.rawHandle()),
+                        .handle = try handleValue(try device.rawHandle()),
                     },
                     .queue => |queue| .{
                         .object_type = @intCast(raw.VK_OBJECT_TYPE_QUEUE),
-                        .handle = handleAddress(queue.rawHandle()),
+                        .handle = try handleValue(queue.rawHandle()),
+                    },
+                    .surface => |surface| .{
+                        .object_type = @intCast(raw.VK_OBJECT_TYPE_SURFACE_KHR),
+                        .handle = try handleValue(try surface.rawHandle()),
+                    },
+                    .swapchain => |swapchain| .{
+                        .object_type = @intCast(raw.VK_OBJECT_TYPE_SWAPCHAIN_KHR),
+                        .handle = try handleValue(try swapchain.rawHandle()),
+                    },
+                    inline else => |handle, tag| .{
+                        .object_type = objectType(tag),
+                        .handle = try handleValue(handle),
                     },
                 };
+            }
+
+            fn objectType(comptime tag: std.meta.Tag(Object)) raw.VkObjectType {
+                return @intCast(switch (tag) {
+                    .device, .queue, .surface, .swapchain => unreachable,
+                    .semaphore => raw.VK_OBJECT_TYPE_SEMAPHORE,
+                    .command_buffer => raw.VK_OBJECT_TYPE_COMMAND_BUFFER,
+                    .fence => raw.VK_OBJECT_TYPE_FENCE,
+                    .device_memory => raw.VK_OBJECT_TYPE_DEVICE_MEMORY,
+                    .buffer => raw.VK_OBJECT_TYPE_BUFFER,
+                    .image => raw.VK_OBJECT_TYPE_IMAGE,
+                    .event => raw.VK_OBJECT_TYPE_EVENT,
+                    .query_pool => raw.VK_OBJECT_TYPE_QUERY_POOL,
+                    .buffer_view => raw.VK_OBJECT_TYPE_BUFFER_VIEW,
+                    .image_view => raw.VK_OBJECT_TYPE_IMAGE_VIEW,
+                    .shader_module => raw.VK_OBJECT_TYPE_SHADER_MODULE,
+                    .pipeline_cache => raw.VK_OBJECT_TYPE_PIPELINE_CACHE,
+                    .pipeline_layout => raw.VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+                    .render_pass => raw.VK_OBJECT_TYPE_RENDER_PASS,
+                    .pipeline => raw.VK_OBJECT_TYPE_PIPELINE,
+                    .descriptor_set_layout => raw.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                    .sampler => raw.VK_OBJECT_TYPE_SAMPLER,
+                    .descriptor_pool => raw.VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+                    .descriptor_set => raw.VK_OBJECT_TYPE_DESCRIPTOR_SET,
+                    .framebuffer => raw.VK_OBJECT_TYPE_FRAMEBUFFER,
+                    .command_pool => raw.VK_OBJECT_TYPE_COMMAND_POOL,
+                    .raw_surface => raw.VK_OBJECT_TYPE_SURFACE_KHR,
+                    .raw_swapchain => raw.VK_OBJECT_TYPE_SWAPCHAIN_KHR,
+                });
+            }
+
+            fn validateParent(object: Object, device: *const Device) Error!void {
+                const device_handle = device._handle orelse return error.InactiveObject;
+                switch (object) {
+                    .device => |named_device| {
+                        if (try named_device.rawHandle() != device_handle) return error.InvalidHandle;
+                    },
+                    .queue => |queue| {
+                        if (queue._device_handle != device_handle) return error.InvalidHandle;
+                    },
+                    .surface => |surface| {
+                        if (surface._instance_handle != device._instance_handle) {
+                            return error.InvalidHandle;
+                        }
+                    },
+                    .swapchain => |swapchain| {
+                        if (swapchain._device_handle != device_handle) return error.InvalidHandle;
+                    },
+                    else => {},
+                }
             }
         };
     };
@@ -972,11 +1711,28 @@ const InstanceDispatch = struct {
     destroy_instance: CommandFunction(raw.PFN_vkDestroyInstance),
     enumerate_physical_devices: CommandFunction(raw.PFN_vkEnumeratePhysicalDevices),
     get_physical_device_properties: CommandFunction(raw.PFN_vkGetPhysicalDeviceProperties),
+    get_physical_device_features: CommandFunction(raw.PFN_vkGetPhysicalDeviceFeatures),
+    get_physical_device_features2: ?CommandFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
     get_physical_device_memory_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceMemoryProperties,
     ),
     get_physical_device_queue_family_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
+    ),
+    enumerate_device_extension_properties: CommandFunction(
+        raw.PFN_vkEnumerateDeviceExtensionProperties,
+    ),
+    get_physical_device_surface_support_khr: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceSurfaceSupportKHR,
+    ),
+    get_physical_device_surface_capabilities_khr: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
+    ),
+    get_physical_device_surface_formats_khr: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceSurfaceFormatsKHR,
+    ),
+    get_physical_device_surface_present_modes_khr: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR,
     ),
     create_device: CommandFunction(raw.PFN_vkCreateDevice),
 
@@ -1010,6 +1766,23 @@ const InstanceDispatch = struct {
                 raw.PFN_vkGetPhysicalDeviceProperties,
                 "vkGetPhysicalDeviceProperties",
             ),
+            .get_physical_device_features = try loadInstanceRequired(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceFeatures,
+                "vkGetPhysicalDeviceFeatures",
+            ),
+            .get_physical_device_features2 = loadInstance(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceFeatures2,
+                "vkGetPhysicalDeviceFeatures2",
+            ) orelse loadInstance(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceFeatures2,
+                "vkGetPhysicalDeviceFeatures2KHR",
+            ),
             .get_physical_device_memory_properties = try loadInstanceRequired(
                 get_instance_proc_addr,
                 handle,
@@ -1021,6 +1794,36 @@ const InstanceDispatch = struct {
                 handle,
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
                 "vkGetPhysicalDeviceQueueFamilyProperties",
+            ),
+            .enumerate_device_extension_properties = try loadInstanceRequired(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkEnumerateDeviceExtensionProperties,
+                "vkEnumerateDeviceExtensionProperties",
+            ),
+            .get_physical_device_surface_support_khr = loadInstance(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceSurfaceSupportKHR,
+                "vkGetPhysicalDeviceSurfaceSupportKHR",
+            ),
+            .get_physical_device_surface_capabilities_khr = loadInstance(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
+                "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+            ),
+            .get_physical_device_surface_formats_khr = loadInstance(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceSurfaceFormatsKHR,
+                "vkGetPhysicalDeviceSurfaceFormatsKHR",
+            ),
+            .get_physical_device_surface_present_modes_khr = loadInstance(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR,
+                "vkGetPhysicalDeviceSurfacePresentModesKHR",
             ),
             .create_device = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -1039,6 +1842,18 @@ const DeviceDispatch = struct {
     queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
     device_wait_idle: CommandFunction(raw.PFN_vkDeviceWaitIdle),
+    create_swapchain_khr: ?CommandFunction(raw.PFN_vkCreateSwapchainKHR),
+    destroy_swapchain_khr: ?CommandFunction(raw.PFN_vkDestroySwapchainKHR),
+    get_swapchain_images_khr: ?CommandFunction(raw.PFN_vkGetSwapchainImagesKHR),
+    acquire_next_image_khr: ?CommandFunction(raw.PFN_vkAcquireNextImageKHR),
+    queue_present_khr: ?CommandFunction(raw.PFN_vkQueuePresentKHR),
+    set_debug_utils_object_name_ext: ?CommandFunction(raw.PFN_vkSetDebugUtilsObjectNameEXT),
+    queue_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueBeginDebugUtilsLabelEXT),
+    queue_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueEndDebugUtilsLabelEXT),
+    queue_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueInsertDebugUtilsLabelEXT),
+    cmd_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdBeginDebugUtilsLabelEXT),
+    cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
+    cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
 
     fn init(
         get_device_proc_addr: CommandFunction(raw.PFN_vkGetDeviceProcAddr),
@@ -1075,6 +1890,78 @@ const DeviceDispatch = struct {
                 handle,
                 raw.PFN_vkDeviceWaitIdle,
                 "vkDeviceWaitIdle",
+            ),
+            .create_swapchain_khr = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateSwapchainKHR,
+                "vkCreateSwapchainKHR",
+            ),
+            .destroy_swapchain_khr = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroySwapchainKHR,
+                "vkDestroySwapchainKHR",
+            ),
+            .get_swapchain_images_khr = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetSwapchainImagesKHR,
+                "vkGetSwapchainImagesKHR",
+            ),
+            .acquire_next_image_khr = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkAcquireNextImageKHR,
+                "vkAcquireNextImageKHR",
+            ),
+            .queue_present_khr = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkQueuePresentKHR,
+                "vkQueuePresentKHR",
+            ),
+            .set_debug_utils_object_name_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkSetDebugUtilsObjectNameEXT,
+                "vkSetDebugUtilsObjectNameEXT",
+            ),
+            .queue_begin_debug_utils_label_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkQueueBeginDebugUtilsLabelEXT,
+                "vkQueueBeginDebugUtilsLabelEXT",
+            ),
+            .queue_end_debug_utils_label_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkQueueEndDebugUtilsLabelEXT,
+                "vkQueueEndDebugUtilsLabelEXT",
+            ),
+            .queue_insert_debug_utils_label_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkQueueInsertDebugUtilsLabelEXT,
+                "vkQueueInsertDebugUtilsLabelEXT",
+            ),
+            .cmd_begin_debug_utils_label_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdBeginDebugUtilsLabelEXT,
+                "vkCmdBeginDebugUtilsLabelEXT",
+            ),
+            .cmd_end_debug_utils_label_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdEndDebugUtilsLabelEXT,
+                "vkCmdEndDebugUtilsLabelEXT",
+            ),
+            .cmd_insert_debug_utils_label_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdInsertDebugUtilsLabelEXT,
+                "vkCmdInsertDebugUtilsLabelEXT",
             ),
         };
     }
@@ -1143,6 +2030,102 @@ fn loadDeviceRequired(
     ) orelse error.MissingCommand;
 }
 
+fn enumerateDeviceExtensions(
+    gpa: std.mem.Allocator,
+    enumerate: CommandFunction(raw.PFN_vkEnumerateDeviceExtensionProperties),
+    physical_device: raw.VkPhysicalDevice,
+    layer_name: ?[:0]const u8,
+) (Error || std.mem.Allocator.Error)![]raw.VkExtensionProperties {
+    var count: u32 = 0;
+    try checkSuccess(enumerate(
+        physical_device,
+        optionalStringPointer(layer_name),
+        &count,
+        null,
+    ));
+    try validateEnumerationCount(count);
+    if (count == 0) return gpa.alloc(raw.VkExtensionProperties, 0);
+
+    var properties = try gpa.alloc(raw.VkExtensionProperties, count);
+    errdefer gpa.free(properties);
+    for (0..enumeration_attempt_count_max) |_| {
+        var written: u32 = @intCast(properties.len);
+        const result = enumerate(
+            physical_device,
+            optionalStringPointer(layer_name),
+            &written,
+            properties.ptr,
+        );
+        if (result == raw.VK_SUCCESS) return gpa.realloc(properties, written);
+        if (result != raw.VK_INCOMPLETE) try checkSuccess(result);
+
+        count = 0;
+        try checkSuccess(enumerate(
+            physical_device,
+            optionalStringPointer(layer_name),
+            &count,
+            null,
+        ));
+        count = try nextEnumerationCapacity(count, properties.len);
+        properties = try gpa.realloc(properties, count);
+    }
+    return error.EnumerationUnstable;
+}
+
+fn enumerateSurfaceFormats(
+    gpa: std.mem.Allocator,
+    enumerate: CommandFunction(raw.PFN_vkGetPhysicalDeviceSurfaceFormatsKHR),
+    physical_device: raw.VkPhysicalDevice,
+    surface: raw.VkSurfaceKHR,
+) (Error || std.mem.Allocator.Error)![]raw.VkSurfaceFormatKHR {
+    var count: u32 = 0;
+    try checkSuccess(enumerate(physical_device, surface, &count, null));
+    try validateEnumerationCount(count);
+    if (count == 0) return gpa.alloc(raw.VkSurfaceFormatKHR, 0);
+
+    var formats = try gpa.alloc(raw.VkSurfaceFormatKHR, count);
+    errdefer gpa.free(formats);
+    for (0..enumeration_attempt_count_max) |_| {
+        var written: u32 = @intCast(formats.len);
+        const result = enumerate(physical_device, surface, &written, formats.ptr);
+        if (result == raw.VK_SUCCESS) return gpa.realloc(formats, written);
+        if (result != raw.VK_INCOMPLETE) try checkSuccess(result);
+
+        count = 0;
+        try checkSuccess(enumerate(physical_device, surface, &count, null));
+        count = try nextEnumerationCapacity(count, formats.len);
+        formats = try gpa.realloc(formats, count);
+    }
+    return error.EnumerationUnstable;
+}
+
+fn enumeratePresentModes(
+    gpa: std.mem.Allocator,
+    enumerate: CommandFunction(raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR),
+    physical_device: raw.VkPhysicalDevice,
+    surface: raw.VkSurfaceKHR,
+) (Error || std.mem.Allocator.Error)![]raw.VkPresentModeKHR {
+    var count: u32 = 0;
+    try checkSuccess(enumerate(physical_device, surface, &count, null));
+    try validateEnumerationCount(count);
+    if (count == 0) return gpa.alloc(raw.VkPresentModeKHR, 0);
+
+    var modes = try gpa.alloc(raw.VkPresentModeKHR, count);
+    errdefer gpa.free(modes);
+    for (0..enumeration_attempt_count_max) |_| {
+        var written: u32 = @intCast(modes.len);
+        const result = enumerate(physical_device, surface, &written, modes.ptr);
+        if (result == raw.VK_SUCCESS) return gpa.realloc(modes, written);
+        if (result != raw.VK_INCOMPLETE) try checkSuccess(result);
+
+        count = 0;
+        try checkSuccess(enumerate(physical_device, surface, &count, null));
+        count = try nextEnumerationCapacity(count, modes.len);
+        modes = try gpa.realloc(modes, count);
+    }
+    return error.EnumerationUnstable;
+}
+
 /// Maps errors for commands whose only successful result is `VK_SUCCESS`.
 /// Do not use this for enumerate, wait, acquire, or present commands that allow status results.
 pub fn checkSuccess(result: raw.VkResult) Error!void {
@@ -1160,6 +2143,8 @@ pub fn checkSuccess(result: raw.VkResult) Error!void {
     if (result == raw.VK_ERROR_FORMAT_NOT_SUPPORTED) return error.FormatNotSupported;
     if (result == raw.VK_ERROR_FRAGMENTED_POOL) return error.FragmentedPool;
     if (result == raw.VK_ERROR_UNKNOWN) return error.UnknownVulkanError;
+    if (result == raw.VK_ERROR_SURFACE_LOST_KHR) return error.SurfaceLost;
+    if (result == raw.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) return error.NativeWindowInUse;
     return error.UnexpectedVulkanResult;
 }
 
@@ -1205,8 +2190,20 @@ fn containsName(names: []const [:0]const u8, expected: []const u8) bool {
     return false;
 }
 
-fn handleAddress(handle: anytype) u64 {
-    return @intCast(@intFromPtr(handle));
+fn optionalCString(pointer: [*c]const u8) ?[]const u8 {
+    if (pointer == null) return null;
+    const sentinel: [*:0]const u8 = @ptrCast(pointer);
+    return std.mem.span(sentinel);
+}
+
+fn handleValue(handle: anytype) Error!u64 {
+    const Handle = @TypeOf(handle);
+    return switch (@typeInfo(Handle)) {
+        .optional => if (handle) |live_handle| handleValue(live_handle) else error.InvalidHandle,
+        .pointer => @intCast(@intFromPtr(handle)),
+        .int => if (handle == 0) error.InvalidHandle else @intCast(handle),
+        else => @compileError("expected a Vulkan pointer or integer handle"),
+    };
 }
 
 fn NonNullHandle(comptime OptionalHandle: type) type {
@@ -1479,11 +2476,26 @@ fn testInstance() Instance {
             .destroy_instance = testDestroyInstance,
             .enumerate_physical_devices = testFunction(raw.PFN_vkEnumeratePhysicalDevices),
             .get_physical_device_properties = testFunction(raw.PFN_vkGetPhysicalDeviceProperties),
+            .get_physical_device_features = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures),
+            .get_physical_device_features2 = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
             .get_physical_device_memory_properties = testFunction(
                 raw.PFN_vkGetPhysicalDeviceMemoryProperties,
             ),
             .get_physical_device_queue_family_properties = testFunction(
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
+            ),
+            .enumerate_device_extension_properties = testFunction(
+                raw.PFN_vkEnumerateDeviceExtensionProperties,
+            ),
+            .get_physical_device_surface_support_khr = testSurfaceSupport,
+            .get_physical_device_surface_capabilities_khr = testFunction(
+                raw.PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
+            ),
+            .get_physical_device_surface_formats_khr = testFunction(
+                raw.PFN_vkGetPhysicalDeviceSurfaceFormatsKHR,
+            ),
+            .get_physical_device_surface_present_modes_khr = testFunction(
+                raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR,
             ),
             .create_device = testFunction(raw.PFN_vkCreateDevice),
         },
@@ -1493,6 +2505,7 @@ fn testInstance() Instance {
 fn testDevice() Device {
     return .{
         ._handle = testHandle(raw.VkDevice, 0x2000),
+        ._instance_handle = testHandle(raw.VkInstance, 0x1000),
         .allocation_callbacks = null,
         .dispatch = .{
             .get_device_proc_addr = testGetDeviceProcAddr,
@@ -1501,6 +2514,18 @@ fn testDevice() Device {
             .queue_submit = testFunction(raw.PFN_vkQueueSubmit),
             .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
             .device_wait_idle = testFunction(raw.PFN_vkDeviceWaitIdle),
+            .create_swapchain_khr = null,
+            .destroy_swapchain_khr = null,
+            .get_swapchain_images_khr = null,
+            .acquire_next_image_khr = null,
+            .queue_present_khr = null,
+            .set_debug_utils_object_name_ext = testSetObjectName,
+            .queue_begin_debug_utils_label_ext = null,
+            .queue_end_debug_utils_label_ext = null,
+            .queue_insert_debug_utils_label_ext = null,
+            .cmd_begin_debug_utils_label_ext = null,
+            .cmd_end_debug_utils_label_ext = null,
+            .cmd_insert_debug_utils_label_ext = null,
         },
     };
 }
@@ -1550,8 +2575,13 @@ test "Vulkan u32 counts reject narrowing overflow" {
 test "queue submit rejects oversized slices before dispatch" {
     const queue: Queue = .{
         ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = testHandle(raw.VkDevice, 0x2000),
         .queue_submit = testQueueSubmit,
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
     };
     test_queue_submit_count = 0;
 
@@ -1662,8 +2692,13 @@ test "surface and object-name wrappers normalize fake dispatch results" {
     try std.testing.expectEqual(@as(u64, 0x2000), test_named_object_handle);
     const queue: Queue = .{
         ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = testHandle(raw.VkDevice, 0x2000),
         .queue_submit = testFunction(raw.PFN_vkQueueSubmit),
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
     };
     try device.setObjectName(.{ .queue = &queue }, "test-queue");
     try std.testing.expectEqual(

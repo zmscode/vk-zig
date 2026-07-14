@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(layers);
 
     std.log.info("VK_EXT_debug_utils available: {}", .{
-        vk.supportsExtension(extensions, "VK_EXT_debug_utils"),
+        vk.supportsExtension(extensions, vk.extension.ext_debug_utils.name),
     });
     std.log.info("Khronos validation layer available: {}", .{
         vk.supportsLayer(layers, "VK_LAYER_KHRONOS_validation"),

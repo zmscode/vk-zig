@@ -17,15 +17,6 @@ pub fn deviceTypeName(device_type: vk.raw.VkPhysicalDeviceType) []const u8 {
     return "other";
 }
 
-pub fn findGraphicsQueue(properties: []const vk.raw.VkQueueFamilyProperties) ?u32 {
-    for (properties, 0..) |queue_family, index| {
-        const graphics_bit: vk.raw.VkQueueFlags = @intCast(vk.raw.VK_QUEUE_GRAPHICS_BIT);
-        if (queue_family.queueCount == 0) continue;
-        if ((queue_family.queueFlags & graphics_bit) != 0) return @intCast(index);
-    }
-    return null;
-}
-
 pub fn boolName(value: vk.raw.VkBool32) []const u8 {
     return if (value == vk.raw.VK_TRUE) "yes" else "no";
 }

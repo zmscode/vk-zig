@@ -40,6 +40,13 @@ pub fn main(init: std.process.Init) !void {
     defer registry_commands.deinit(gpa);
     try collectRegistryCommands(gpa, registry, &registry_commands);
 
+    var registry_extensions: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (registry_extensions.items) |extension_name| gpa.free(extension_name);
+        registry_extensions.deinit(gpa);
+    }
+    try collectRegistryExtensions(gpa, registry, &registry_extensions);
+
     var commands: std.ArrayList(Command) = .empty;
     defer commands.deinit(gpa);
     try collectBindingCommands(gpa, bindings, &registry_commands, &commands);
@@ -72,11 +79,33 @@ pub fn main(init: std.process.Init) !void {
     var key_iterator = generated_names.keyIterator();
     while (key_iterator.next()) |key| gpa.free(key.*);
 
+    try writeExtensions(&output.writer, registry_extensions.items);
+
     if (commands.items.len < 100) return error.IncompleteCommandGeneration;
+    if (registry_extensions.items.len < 100) return error.IncompleteExtensionGeneration;
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = args[3],
         .data = output.written(),
     });
+}
+
+fn collectRegistryExtensions(
+    gpa: std.mem.Allocator,
+    registry: []const u8,
+    extensions: *std.ArrayList([]const u8),
+) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<extension ")) |extension_start| {
+        const tag_end = std.mem.indexOfPos(u8, registry, extension_start, ">") orelse {
+            return error.InvalidRegistry;
+        };
+        const opening_tag = registry[extension_start .. tag_end + 1];
+        const name = attribute(opening_tag, "name") orelse return error.InvalidRegistry;
+        if (std.mem.startsWith(u8, name, "VK_")) {
+            try extensions.append(gpa, try gpa.dupe(u8, name));
+        }
+        cursor = tag_end + 1;
+    }
 }
 
 fn collectRegistryCommands(
@@ -219,6 +248,37 @@ fn snakeName(command_name: []const u8, buffer: []u8) ![]const u8 {
         length += 1;
     }
     return buffer[0..length];
+}
+
+fn extensionSnakeName(extension_name: []const u8, buffer: []u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, extension_name, "VK_")) return error.InvalidExtensionName;
+    const source = extension_name["VK_".len..];
+    if (source.len > buffer.len) return error.NameTooLong;
+    for (source, buffer[0..source.len]) |character, *output| {
+        output.* = std.ascii.toLower(character);
+    }
+    return buffer[0..source.len];
+}
+
+fn writeExtensions(writer: *std.Io.Writer, extensions: []const []const u8) !void {
+    try writer.writeAll(
+        \\
+        \\pub const Extension = struct {
+        \\    name: [:0]const u8,
+        \\};
+        \\
+        \\pub const extension = struct {
+        \\
+    );
+    for (extensions) |extension_name| {
+        var name_buffer: [256]u8 = undefined;
+        const generated_name = try extensionSnakeName(extension_name, &name_buffer);
+        try writer.print(
+            "    pub const {s}: Extension = .{{ .name = \"{s}\" }};\n",
+            .{ generated_name, extension_name },
+        );
+    }
+    try writer.writeAll("};\n");
 }
 
 fn writeHeader(writer: *std.Io.Writer) !void {

@@ -15,9 +15,10 @@ Each example also has a named run step:
 | `instance_extensions.zig` | `zig build run-instance-extensions` | Allocator-aware extension enumeration |
 | `instance_layers.zig` | `zig build run-instance-layers` | Layer enumeration and bounded names |
 | `physical_devices.zig` | `zig build run-physical-devices` | Instance ownership and physical-device discovery |
-| `queue_families.zig` | `zig build run-queue-families` | Queue-family property enumeration |
-| `memory_properties.zig` | `zig build run-memory-properties` | Memory heaps and memory types |
-| `device_features.zig` | `zig build run-device-features` | Generic dispatch loading with `Instance.load` |
+| `queue_families.zig` | `zig build run-queue-families` | Typed queue-family capability enumeration |
+| `memory_properties.zig` | `zig build run-memory-properties` | Memory heaps, types, and preferred type selection |
+| `device_features.zig` | `zig build run-device-features` | Core and chained physical-device feature queries |
+| `device_extensions.zig` | `zig build run-device-extensions` | Per-device extension enumeration and generated names |
 | `logical_device.zig` | `zig build run-logical-device` | Logical-device and queue creation/teardown |
 | `raw_create_info.zig` | `zig build run-raw-create-info` | Raw generated structs with wrapped ownership |
 | `platform.zig` | `zig build run-platform` | Target-specific declaration generation |

@@ -1,6 +1,6 @@
 ---
 name: use-vk-zig
-description: Use vk-zig to generate target-specific Vulkan 1.4 bindings and build or debug Zig 0.16 Vulkan applications. Trigger when an agent is adding vk-zig to build.zig/build.zig.zon, regenerating Vulkan bindings from Khronos inputs, loading core or extension commands, creating instances/devices/queues, using surfaces or VK_EXT_debug_utils, handling MoltenVK portability, or diagnosing Vulkan loader discovery.
+description: Use vk-zig to generate target-specific Vulkan 1.4 bindings and build or debug Zig 0.16 Vulkan applications. Trigger when an agent is adding vk-zig to build.zig/build.zig.zon, regenerating Vulkan bindings from Khronos inputs, loading commands, selecting queues or memory, creating instances/devices/surfaces/swapchains, using VK_EXT_debug_utils, handling MoltenVK portability, or diagnosing Vulkan loader discovery.
 ---
 
 # Use vk-zig
@@ -22,9 +22,12 @@ consumer unless the user explicitly needs a standalone snapshot.
 
 ## Choose the API level
 
-- Prefer `vk.Loader`, `Entry`, `Instance`, `PhysicalDevice`, `Device`, `Queue`, and `Surface`.
+- Prefer `vk.Loader`, `Entry`, `Instance`, `PhysicalDevice`, `Device`, `Queue`, `Surface`, and
+  `Swapchain`.
 - Use `vk.command.<snake_case_name>` with `entry.load`, `instance.load`, or `device.load`. The
   descriptor binds the PFN type, Vulkan name, and valid dispatch scope.
+- Use `entry.require`, `instance.require`, or `device.require` when absence is an error. Use `load`
+  only when probing an optional capability.
 - Use `loadUnchecked(PFN, name)` only for genuinely dynamic, provisional, or vendor commands that
   are absent from the generated descriptors.
 - Use `vk.CommandFunction(PFN)` when storing a Vulkan command pointer.
@@ -49,17 +52,32 @@ Create a logical device with `PhysicalDevice.createDevice(DeviceOptions)`. Suppl
 Use `createInstanceRaw` or `createDeviceRaw` for uncommon create-info chains. Keep every `pNext`
 node and borrowed slice alive until the Vulkan call returns.
 
-Deinitialize children before parents: queues need no deinit, then devices, surfaces/debug
-messengers, instances, and finally the loader. Wrapper `deinit` methods are idempotent, but using
-an inactive owner returns `error.InactiveObject`.
+Build extension lists with generated `vk.extension.<vendor_name>.name` descriptors and
+`vk.ExtensionSet(capacity)`. Append platform/window-system requirements, then pass `set.slice()`
+to instance or device options. Do not duplicate string literals or hand-roll deduplication.
+
+Enumerate queue families with `queueFamilies`, select them with `QueueFamily.supports`, and use
+`QueueFamily.presentationSupport` when a surface is involved. Use `findMemoryTypeIndex` with
+required and preferred property flags instead of manually scanning `memoryTypes`.
+
+Deinitialize children before parents: swapchains, then devices, surfaces/debug messengers,
+instances, and finally the loader. Queues and swapchain images are non-owning and need no deinit.
+Wrapper `deinit` methods are idempotent, but using an inactive owner returns
+`error.InactiveObject`.
 
 ## Use common extensions
 
 - Transfer ownership of a created `VkSurfaceKHR` with `instance.adoptSurface(...)`, then query
-  presentation support with `physical_device.surfaceSupport(&surface, family_index)`.
+  presentation support, capabilities, formats, and present modes through `PhysicalDevice`.
+- Enumerate `deviceExtensions`, enable `vk.extension.khr_swapchain.name`, then use
+  `device.createSwapchain`. Handle every `AcquireResult` and `PresentStatus` tag; `.out_of_date`
+  and `.suboptimal` are normal control flow for recreation, not generic errors.
 - Create an owned debug messenger with `vk.ext.debug_utils.Messenger.init(&instance, options)`.
-- Name wrapper objects with `device.setObjectName(.{ .device = &device }, "name")` or the `.queue`
-  variant. Do not convert wrapper pointers with `@intFromPtr` in consumer code.
+- Reuse `MessengerOptions.createInfo()` in `InstanceOptions.next` when validation output is needed
+  during instance creation/destruction. Decode callback pointers with
+  `vk.ext.debug_utils.Message.fromCallback`.
+- Name wrapper and raw Vulkan objects with `device.setObjectName`; use queue and command-buffer
+  label methods for GPU captures. Do not convert handles with `@intFromPtr` in consumer code.
 
 Enable `VK_KHR_surface`, the platform surface extension, or `VK_EXT_debug_utils` in
 `InstanceOptions.extensions` before calling their commands.

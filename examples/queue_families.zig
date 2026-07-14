@@ -14,14 +14,19 @@ pub fn main(init: std.process.Init) !void {
 
     for (devices) |*device| {
         const device_properties = device.properties();
-        const families = try device.queueFamilyProperties(init.gpa);
+        const families = try device.queueFamilies(init.gpa);
         defer init.gpa.free(families);
 
         std.log.info("{s} queue families:", .{vk.physicalDeviceName(&device_properties)});
-        for (families, 0..) |family, index| {
+        for (families) |family| {
             std.log.info(
                 "  {d}: queues={d}, flags=0x{x}, timestamp bits={d}",
-                .{ index, family.queueCount, family.queueFlags, family.timestampValidBits },
+                .{
+                    family.index,
+                    family.queueCount(),
+                    family.properties.queueFlags,
+                    family.properties.timestampValidBits,
+                },
             );
         }
     }

@@ -12,15 +12,8 @@ pub fn main(init: std.process.Init) !void {
     const devices = try instance.physicalDevices(init.gpa);
     defer init.gpa.free(devices);
 
-    const get_features = (try instance.load(
-        vk.command.get_physical_device_features2,
-    )) orelse return error.Features2Unavailable;
-
     for (devices) |*device| {
-        var features: vk.raw.VkPhysicalDeviceFeatures2 = .{
-            .sType = vk.raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        };
-        get_features(device.rawHandle(), &features);
+        const features = try device.features2(null);
         const properties = device.properties();
         std.log.info("{s} selected features:", .{vk.physicalDeviceName(&properties)});
         std.log.info(

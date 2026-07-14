@@ -314,6 +314,7 @@ const examples = [_]Example{
     .{ .name = "queue-families", .path = "examples/queue_families.zig" },
     .{ .name = "memory-properties", .path = "examples/memory_properties.zig" },
     .{ .name = "device-features", .path = "examples/device_features.zig" },
+    .{ .name = "device-extensions", .path = "examples/device_extensions.zig" },
     .{ .name = "logical-device", .path = "examples/logical_device.zig" },
     .{ .name = "raw-create-info", .path = "examples/raw_create_info.zig" },
     .{ .name = "platform", .path = "examples/platform.zig" },
