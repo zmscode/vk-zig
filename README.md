@@ -199,6 +199,41 @@ defer rendering_scope.deinit();
 try rendering_scope.end();
 ```
 
+Compatibility workloads can use owned render passes and framebuffers without exposing Vulkan
+handles or pointer graphs. Choose a pipeline target explicitly with
+`.compatibility = .{ .render_pass = ... }`; dynamic-rendering pipelines use
+`.compatibility = .{ .dynamic_rendering = ... }`.
+
+```zig
+var render_pass = try device.createRenderPass(.{
+    .attachments = &.{.{
+        .format = format,
+        .load = .clear,
+        .store = .store,
+        .final_layout = .color_attachment_optimal,
+    }},
+    .subpasses = &.{.{
+        .color_attachments = &.{.{
+            .attachment = .{ .index = 0, .layout = .color_attachment_optimal },
+        }},
+    }},
+});
+defer render_pass.deinit();
+
+var framebuffer = try device.createFramebuffer(.{
+    .render_pass = &render_pass,
+    .width = extent.width,
+    .height = extent.height,
+    .attachments = .{ .views = &.{&color_view} },
+});
+defer framebuffer.deinit();
+```
+
+`beginRenderPass` returns an idempotent scope. Call `scope.next(...)` for additional subpasses.
+Imageless framebuffers use the `.imageless` attachment variant at creation and provide the live
+views through `RenderPassBeginOptions.imageless_attachments`. See
+`examples/legacy_render_pass.zig` for a complete raw-free recording function.
+
 Physical memory properties are owned typed snapshots, so their slices remain valid as long as the
 snapshot does. Counts and heap indices are validated before any slice is exposed:
 

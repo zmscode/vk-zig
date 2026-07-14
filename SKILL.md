@@ -108,6 +108,14 @@ reset, `CommandBuffer.reset` for individually resettable pools, and `CommandBuff
 `CommandPool.freeCommandBuffer` before destroying the pool. Keep resources alive until GPU work
 is complete. Follow `examples/frame_resources.zig` for a complete raw-free clear frame.
 
+Prefer dynamic rendering for new graphics paths. For compatibility paths, create an owned
+`RenderPass` and `Framebuffer`, then record with `CommandBuffer.beginRenderPass`; use the returned
+scope's `next` and `end` methods. Describe graphics pipeline compatibility with the tagged
+`GraphicsPipelineOptions.compatibility` union: `.dynamic_rendering` takes attachment formats,
+while `.render_pass` takes a render-pass pointer and subpass index. Do not pass raw render-pass or
+framebuffer handles. Use `.imageless` framebuffer attachments only when the device feature is
+enabled, and supply the live image views in `RenderPassBeginOptions.imageless_attachments`.
+
 Create timeline semaphores with `device.createSemaphore(.{ .kind = .timeline,
 .initial_value = value })`. Use `counterValue`, `signal`, `wait`, or
 `Device.waitTimelineSemaphores`; do not pass a timeline semaphore to legacy `Queue.submit`, image

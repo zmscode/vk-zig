@@ -27,7 +27,7 @@ pub const LoadOperation = enum {
     discard,
     none,
 
-    fn toRaw(value: LoadOperation) raw.VkAttachmentLoadOp {
+    pub fn toRaw(value: LoadOperation) raw.VkAttachmentLoadOp {
         return switch (value) {
             .load => raw.VK_ATTACHMENT_LOAD_OP_LOAD,
             .clear => raw.VK_ATTACHMENT_LOAD_OP_CLEAR,
@@ -42,7 +42,7 @@ pub const StoreOperation = enum {
     discard,
     none,
 
-    fn toRaw(value: StoreOperation) raw.VkAttachmentStoreOp {
+    pub fn toRaw(value: StoreOperation) raw.VkAttachmentStoreOp {
         return switch (value) {
             .store => raw.VK_ATTACHMENT_STORE_OP_STORE,
             .discard => raw.VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -157,6 +157,10 @@ test "dynamic rendering options validate clear, multiview, and suspend state" {
     const view: images.View = .{
         ._handle = @ptrFromInt(0x2000),
         ._device_handle = device_handle,
+        .format = .r8g8b8a8_unorm,
+        .samples = ._1,
+        .extent = .{ .width = 32, .height = 32, .depth = 1 },
+        .layer_count = 1,
         .allocation_callbacks = null,
         .destroy_image_view = undefined,
     };
@@ -169,6 +173,10 @@ test "dynamic rendering options validate clear, multiview, and suspend state" {
     const resolve_view: images.View = .{
         ._handle = @ptrFromInt(0x3000),
         ._device_handle = device_handle,
+        .format = .r8g8b8a8_unorm,
+        .samples = ._1,
+        .extent = .{ .width = 32, .height = 32, .depth = 1 },
+        .layer_count = 1,
         .allocation_callbacks = null,
         .destroy_image_view = undefined,
     };

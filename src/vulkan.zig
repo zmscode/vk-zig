@@ -15,6 +15,7 @@ pub const shaders = @import("shader.zig");
 pub const descriptors = @import("descriptor.zig");
 pub const pipelines = @import("pipeline.zig");
 pub const rendering = @import("rendering.zig");
+pub const render_passes = @import("render_pass.zig");
 pub const transfers = @import("transfer.zig");
 pub const synchronization = @import("synchronization.zig");
 pub const commands = @import("command_buffer.zig");
@@ -707,6 +708,7 @@ pub const MultiDrawIndexed = commands.MultiDrawIndexed;
 pub const StencilFaces = commands.StencilFaces;
 pub const CommandBuffer = commands.Buffer;
 pub const CommandBufferLabelScope = commands.LabelScope;
+pub const CommandBufferRenderPassScope = commands.RenderPassScope;
 pub const CommandPool = commands.Pool;
 
 pub const SwapchainOptions = presentation.Options;
@@ -1044,6 +1046,7 @@ pub const PhysicalDevice = struct {
         if (features_12.timelineSemaphore != raw.VK_FALSE) supported.enable(.timeline_semaphore);
         if (features_12.bufferDeviceAddress != raw.VK_FALSE) supported.enable(.buffer_device_address);
         if (features_12.descriptorIndexing != raw.VK_FALSE) supported.enable(.descriptor_indexing);
+        if (features_12.imagelessFramebuffer != raw.VK_FALSE) supported.enable(.imageless_framebuffer);
         if (features_13.synchronization2 != raw.VK_FALSE) supported.enable(.synchronization2);
         if (features_13.dynamicRendering != raw.VK_FALSE) supported.enable(.dynamic_rendering);
         if (features_13.maintenance4 != raw.VK_FALSE) supported.enable(.maintenance4);
@@ -1465,6 +1468,7 @@ pub const PhysicalDevice = struct {
             .timelineSemaphore = bool32(options.features.contains(.timeline_semaphore)),
             .bufferDeviceAddress = bool32(options.features.contains(.buffer_device_address)),
             .descriptorIndexing = bool32(options.features.contains(.descriptor_indexing)),
+            .imagelessFramebuffer = bool32(options.features.contains(.imageless_framebuffer)),
         };
         var features_13: raw.VkPhysicalDeviceVulkan13Features = .{
             .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -1627,6 +1631,22 @@ pub const PipelineBlendOperation = pipelines.BlendOperation;
 pub const PipelineColorBlendAttachment = pipelines.ColorBlendAttachment;
 pub const PipelineDynamicState = pipelines.DynamicState;
 pub const PipelineRenderingFormats = pipelines.RenderingFormats;
+pub const GraphicsPipelineCompatibility = pipelines.GraphicsCompatibility;
+pub const LegacyRenderPassPipelineCompatibility = pipelines.LegacyRenderPassCompatibility;
+pub const RenderPass = render_passes.RenderPass;
+pub const RenderPassOptions = render_passes.Options;
+pub const RenderPassAttachment = render_passes.Attachment;
+pub const RenderPassAttachmentReference = render_passes.AttachmentReference;
+pub const RenderSubpass = render_passes.Subpass;
+pub const RenderSubpassIndex = render_passes.SubpassIndex;
+pub const RenderSubpassDependency = render_passes.Dependency;
+pub const Framebuffer = render_passes.Framebuffer;
+pub const FramebufferOptions = render_passes.FramebufferOptions;
+pub const FramebufferAttachments = render_passes.FramebufferAttachments;
+pub const ImagelessFramebufferAttachment = render_passes.ImagelessAttachment;
+pub const RenderPassBeginOptions = render_passes.BeginOptions;
+pub const RenderPassContents = render_passes.Contents;
+pub const RenderPassInheritance = render_passes.Inheritance;
 pub const selectMemoryTypeIndex = memory.selectTypeIndex;
 pub const selectMemoryTypeIndexRaw = memory.selectTypeIndexRaw;
 
@@ -1985,6 +2005,37 @@ pub const Device = struct {
         }, options, output);
     }
 
+    pub fn createRenderPass(
+        device: *const Device,
+        options: render_passes.Options,
+    ) Error!render_passes.RenderPass {
+        const device_handle = try device.dispatchHandle();
+        const uses_multiview = options.correlated_view_masks.len != 0 or for (options.subpasses) |subpass| {
+            if (subpass.view_mask != 0) break true;
+        } else for (options.dependencies) |dependency| {
+            if (dependency.view_offset != 0) break true;
+        } else false;
+        if (uses_multiview and !device.supportsFeature(.multiview)) return error.FeatureNotPresent;
+        return render_passes.create(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_render_pass,
+            .create2 = device.dispatch.create_render_pass2,
+            .destroy = device.dispatch.destroy_render_pass,
+            .get_granularity = device.dispatch.get_render_area_granularity,
+        }, options);
+    }
+
+    pub fn createFramebuffer(
+        device: *const Device,
+        options: render_passes.FramebufferOptions,
+    ) Error!render_passes.Framebuffer {
+        const device_handle = try device.dispatchHandle();
+        if (options.attachments == .imageless and !device.supportsFeature(.imageless_framebuffer)) return error.FeatureNotPresent;
+        return render_passes.createFramebuffer(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_framebuffer,
+            .destroy = device.dispatch.destroy_framebuffer,
+        }, options);
+    }
+
     pub fn createAllocatedBuffer(
         device: *const Device,
         options: buffers.AllocatedOptions,
@@ -2286,6 +2337,12 @@ pub const Device = struct {
             .cmd_wait_events2 = device.dispatch.cmd_wait_events2,
             .cmd_begin_rendering = device.dispatch.cmd_begin_rendering,
             .cmd_end_rendering = device.dispatch.cmd_end_rendering,
+            .cmd_begin_render_pass = device.dispatch.cmd_begin_render_pass,
+            .cmd_next_subpass = device.dispatch.cmd_next_subpass,
+            .cmd_end_render_pass = device.dispatch.cmd_end_render_pass,
+            .cmd_begin_render_pass2 = device.dispatch.cmd_begin_render_pass2,
+            .cmd_next_subpass2 = device.dispatch.cmd_next_subpass2,
+            .cmd_end_render_pass2 = device.dispatch.cmd_end_render_pass2,
             .cmd_clear_color_image = device.dispatch.cmd_clear_color_image,
             .cmd_clear_depth_stencil_image = device.dispatch.cmd_clear_depth_stencil_image,
             .cmd_fill_buffer = device.dispatch.cmd_fill_buffer,
@@ -2692,6 +2749,12 @@ const DeviceDispatch = struct {
     create_graphics_pipelines: CommandFunction(raw.PFN_vkCreateGraphicsPipelines),
     create_compute_pipelines: CommandFunction(raw.PFN_vkCreateComputePipelines),
     destroy_pipeline: CommandFunction(raw.PFN_vkDestroyPipeline),
+    create_render_pass: CommandFunction(raw.PFN_vkCreateRenderPass),
+    create_render_pass2: ?CommandFunction(raw.PFN_vkCreateRenderPass2),
+    destroy_render_pass: CommandFunction(raw.PFN_vkDestroyRenderPass),
+    get_render_area_granularity: CommandFunction(raw.PFN_vkGetRenderAreaGranularity),
+    create_framebuffer: CommandFunction(raw.PFN_vkCreateFramebuffer),
+    destroy_framebuffer: CommandFunction(raw.PFN_vkDestroyFramebuffer),
     create_buffer: CommandFunction(raw.PFN_vkCreateBuffer),
     destroy_buffer: CommandFunction(raw.PFN_vkDestroyBuffer),
     get_buffer_memory_requirements: CommandFunction(raw.PFN_vkGetBufferMemoryRequirements),
@@ -2750,6 +2813,12 @@ const DeviceDispatch = struct {
     cmd_wait_events2: ?CommandFunction(raw.PFN_vkCmdWaitEvents2),
     cmd_begin_rendering: ?CommandFunction(raw.PFN_vkCmdBeginRendering),
     cmd_end_rendering: ?CommandFunction(raw.PFN_vkCmdEndRendering),
+    cmd_begin_render_pass: CommandFunction(raw.PFN_vkCmdBeginRenderPass),
+    cmd_next_subpass: CommandFunction(raw.PFN_vkCmdNextSubpass),
+    cmd_end_render_pass: CommandFunction(raw.PFN_vkCmdEndRenderPass),
+    cmd_begin_render_pass2: ?CommandFunction(raw.PFN_vkCmdBeginRenderPass2),
+    cmd_next_subpass2: ?CommandFunction(raw.PFN_vkCmdNextSubpass2),
+    cmd_end_render_pass2: ?CommandFunction(raw.PFN_vkCmdEndRenderPass2),
     cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
     cmd_clear_depth_stencil_image: CommandFunction(raw.PFN_vkCmdClearDepthStencilImage),
     cmd_fill_buffer: CommandFunction(raw.PFN_vkCmdFillBuffer),
@@ -3014,6 +3083,12 @@ const DeviceDispatch = struct {
                 raw.PFN_vkDestroyPipeline,
                 "vkDestroyPipeline",
             ),
+            .create_render_pass = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCreateRenderPass, "vkCreateRenderPass"),
+            .create_render_pass2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.create_render_pass2),
+            .destroy_render_pass = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkDestroyRenderPass, "vkDestroyRenderPass"),
+            .get_render_area_granularity = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkGetRenderAreaGranularity, "vkGetRenderAreaGranularity"),
+            .create_framebuffer = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCreateFramebuffer, "vkCreateFramebuffer"),
+            .destroy_framebuffer = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkDestroyFramebuffer, "vkDestroyFramebuffer"),
             .get_device_memory_opaque_capture_address = loadDeviceDescriptor(
                 get_device_proc_addr,
                 handle,
@@ -3302,6 +3377,12 @@ const DeviceDispatch = struct {
                 handle,
                 command.cmd_end_rendering,
             ),
+            .cmd_begin_render_pass = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBeginRenderPass, "vkCmdBeginRenderPass"),
+            .cmd_next_subpass = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdNextSubpass, "vkCmdNextSubpass"),
+            .cmd_end_render_pass = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdEndRenderPass, "vkCmdEndRenderPass"),
+            .cmd_begin_render_pass2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_begin_render_pass2),
+            .cmd_next_subpass2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_next_subpass2),
+            .cmd_end_render_pass2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_end_render_pass2),
             .cmd_clear_color_image = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
@@ -3958,6 +4039,9 @@ var test_reset_command_pool_count: usize = 0;
 var test_allocated_command_buffer_level: raw.VkCommandBufferLevel = raw.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 var test_begin_has_inheritance = false;
 var test_begin_occlusion_query = raw.VK_FALSE;
+var test_inheritance_render_pass: raw.VkRenderPass = null;
+var test_inheritance_framebuffer: raw.VkFramebuffer = null;
+var test_inheritance_subpass: u32 = 0;
 var test_begin_command_buffer_count: usize = 0;
 var test_end_command_buffer_count: usize = 0;
 var test_reset_command_buffer_count: usize = 0;
@@ -3980,6 +4064,10 @@ var test_event_reset_count: usize = 0;
 var test_event_wait_count: usize = 0;
 var test_dispatch_dimensions: [3]u32 = .{ 0, 0, 0 };
 var test_indirect_draw_count: u32 = 0;
+var test_begin_render_pass_count: usize = 0;
+var test_next_subpass_count: usize = 0;
+var test_end_render_pass_count: usize = 0;
+var test_begin_render_pass_imageless = false;
 var test_destroy_pipeline_layout_count: usize = 0;
 var test_push_constant_count: usize = 0;
 var test_push_constant_offset: u32 = 0;
@@ -4582,6 +4670,11 @@ fn testBeginCommandBuffer(
         inheritance.*.occlusionQueryEnable
     else
         raw.VK_FALSE;
+    if (begin_info.*.pInheritanceInfo) |inheritance| {
+        test_inheritance_render_pass = inheritance.*.renderPass;
+        test_inheritance_framebuffer = inheritance.*.framebuffer;
+        test_inheritance_subpass = inheritance.*.subpass;
+    }
     return test_resource_result;
 }
 
@@ -4644,6 +4737,63 @@ fn testCmdBeginRendering(
 
 fn testCmdEndRendering(_: raw.VkCommandBuffer) callconv(.c) void {
     test_end_rendering_count += 1;
+}
+
+fn testCreateRenderPass2(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkRenderPassCreateInfo2,
+    _: [*c]const raw.VkAllocationCallbacks,
+    output: [*c]raw.VkRenderPass,
+) callconv(.c) raw.VkResult {
+    output.* = testHandle(raw.VkRenderPass, 0x5600);
+    return test_resource_result;
+}
+
+fn testDestroyRenderPass(
+    _: raw.VkDevice,
+    _: raw.VkRenderPass,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+fn testGetRenderAreaGranularity(_: raw.VkDevice, _: raw.VkRenderPass, output: [*c]raw.VkExtent2D) callconv(.c) void {
+    output.* = .{ .width = 1, .height = 1 };
+}
+
+fn testCreateFramebuffer(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkFramebufferCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    output: [*c]raw.VkFramebuffer,
+) callconv(.c) raw.VkResult {
+    output.* = testHandle(raw.VkFramebuffer, 0x5700);
+    return test_resource_result;
+}
+
+fn testDestroyFramebuffer(
+    _: raw.VkDevice,
+    _: raw.VkFramebuffer,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+fn testCmdBeginRenderPass2(
+    _: raw.VkCommandBuffer,
+    info: [*c]const raw.VkRenderPassBeginInfo,
+    _: [*c]const raw.VkSubpassBeginInfo,
+) callconv(.c) void {
+    test_begin_render_pass_count += 1;
+    test_begin_render_pass_imageless = info.*.pNext != null;
+}
+
+fn testCmdNextSubpass2(
+    _: raw.VkCommandBuffer,
+    _: [*c]const raw.VkSubpassBeginInfo,
+    _: [*c]const raw.VkSubpassEndInfo,
+) callconv(.c) void {
+    test_next_subpass_count += 1;
+}
+
+fn testCmdEndRenderPass2(_: raw.VkCommandBuffer, _: [*c]const raw.VkSubpassEndInfo) callconv(.c) void {
+    test_end_render_pass_count += 1;
 }
 
 fn testCmdDraw(
@@ -5006,6 +5156,12 @@ fn testDevice() Device {
             .create_graphics_pipelines = testFunction(raw.PFN_vkCreateGraphicsPipelines),
             .create_compute_pipelines = testFunction(raw.PFN_vkCreateComputePipelines),
             .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
+            .create_render_pass = testFunction(raw.PFN_vkCreateRenderPass),
+            .create_render_pass2 = null,
+            .destroy_render_pass = testFunction(raw.PFN_vkDestroyRenderPass),
+            .get_render_area_granularity = testFunction(raw.PFN_vkGetRenderAreaGranularity),
+            .create_framebuffer = testFunction(raw.PFN_vkCreateFramebuffer),
+            .destroy_framebuffer = testFunction(raw.PFN_vkDestroyFramebuffer),
             .create_buffer = testCreateBuffer,
             .destroy_buffer = testDestroyBuffer,
             .get_buffer_memory_requirements = testGetBufferMemoryRequirements,
@@ -5064,6 +5220,12 @@ fn testDevice() Device {
             .cmd_wait_events2 = null,
             .cmd_begin_rendering = null,
             .cmd_end_rendering = null,
+            .cmd_begin_render_pass = testFunction(raw.PFN_vkCmdBeginRenderPass),
+            .cmd_next_subpass = testFunction(raw.PFN_vkCmdNextSubpass),
+            .cmd_end_render_pass = testFunction(raw.PFN_vkCmdEndRenderPass),
+            .cmd_begin_render_pass2 = null,
+            .cmd_next_subpass2 = null,
+            .cmd_end_render_pass2 = null,
             .cmd_clear_color_image = testCmdClearColorImage,
             .cmd_clear_depth_stencil_image = testFunction(raw.PFN_vkCmdClearDepthStencilImage),
             .cmd_fill_buffer = testFunction(raw.PFN_vkCmdFillBuffer),
@@ -5998,6 +6160,10 @@ test "dynamic rendering scopes record typed attachments and end once" {
     const view: ImageView = .{
         ._handle = testHandle(raw.VkImageView, 0x5100),
         ._device_handle = device._handle.?,
+        .format = .b8g8r8a8_srgb,
+        .samples = ._1,
+        .extent = .{ .width = 64, .height = 64, .depth = 1 },
+        .layer_count = 1,
         .allocation_callbacks = null,
         .destroy_image_view = testDestroyImageView,
     };
@@ -6037,6 +6203,7 @@ test "dynamic rendering scopes record typed attachments and end once" {
         ._handle = testHandle(raw.VkPipeline, 0x5200),
         ._device_handle = device._handle.?,
         .bind_point = .graphics,
+        ._dynamic_rendering = true,
         .allocation_callbacks = null,
         .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
     };
@@ -6065,6 +6232,7 @@ test "dynamic rendering scopes record typed attachments and end once" {
     try std.testing.expectError(error.InvalidOptions, command_buffer.end());
     try scope.end();
     try scope.end();
+    scope.deinit();
     try command_buffer.end();
 
     try std.testing.expectEqual(@as(usize, 1), test_begin_rendering_count);
@@ -6079,6 +6247,153 @@ test "dynamic rendering scopes record typed attachments and end once" {
     try std.testing.expectEqual(@as(u32, 2), test_multi_draw_count);
     try std.testing.expectEqual(@as(u32, 7), test_stencil_reference);
     try std.testing.expectEqual(@as(u32, 2), test_indirect_draw_count);
+}
+
+test "legacy render-pass scopes validate compatibility subpasses imageless views and inheritance" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_name_result = raw.VK_SUCCESS;
+    test_begin_render_pass_count = 0;
+    test_next_subpass_count = 0;
+    test_end_render_pass_count = 0;
+    test_begin_render_pass_imageless = false;
+    test_inheritance_render_pass = null;
+    test_inheritance_framebuffer = null;
+    test_inheritance_subpass = 99;
+
+    var device = testDevice();
+    defer device.deinit();
+    device.dispatch.create_render_pass2 = testCreateRenderPass2;
+    device.dispatch.destroy_render_pass = testDestroyRenderPass;
+    device.dispatch.get_render_area_granularity = testGetRenderAreaGranularity;
+    device.dispatch.create_framebuffer = testCreateFramebuffer;
+    device.dispatch.destroy_framebuffer = testDestroyFramebuffer;
+    device.dispatch.cmd_begin_render_pass2 = testCmdBeginRenderPass2;
+    device.dispatch.cmd_next_subpass2 = testCmdNextSubpass2;
+    device.dispatch.cmd_end_render_pass2 = testCmdEndRenderPass2;
+
+    try std.testing.expectError(error.FeatureNotPresent, device.createRenderPass(.{
+        .subpasses = &.{.{ .view_mask = 1 }},
+    }));
+
+    var render_pass = try device.createRenderPass(.{
+        .attachments = &.{.{
+            .format = .r8g8b8a8_unorm,
+            .load = .clear,
+            .final_layout = .color_attachment_optimal,
+        }},
+        .subpasses = &.{
+            .{ .color_attachments = &.{.{ .attachment = .{ .index = 0, .layout = .color_attachment_optimal } }} },
+            .{ .color_attachments = &.{.{ .attachment = .{ .index = 0, .layout = .color_attachment_optimal } }} },
+        },
+        .dependencies = &.{.{
+            .source = .{ .index = 0 },
+            .destination = .{ .index = 1 },
+            .source_stages = .init(&.{.color_attachment_output}),
+            .destination_stages = .init(&.{.color_attachment_output}),
+        }},
+    });
+    defer render_pass.deinit();
+    try std.testing.expectError(error.FeatureNotPresent, device.createFramebuffer(.{
+        .render_pass = &render_pass,
+        .width = 64,
+        .height = 64,
+        .attachments = .{ .imageless = &.{.{
+            .usage = .init(&.{.color_attachment}),
+            .width = 64,
+            .height = 64,
+            .view_formats = &.{.r8g8b8a8_unorm},
+        }} },
+    }));
+    device.enabled_capabilities.features.enable(.imageless_framebuffer);
+    var framebuffer = try device.createFramebuffer(.{
+        .render_pass = &render_pass,
+        .width = 64,
+        .height = 64,
+        .attachments = .{ .imageless = &.{.{
+            .usage = .init(&.{.color_attachment}),
+            .width = 64,
+            .height = 64,
+            .view_formats = &.{.r8g8b8a8_unorm},
+        }} },
+    });
+    defer framebuffer.deinit();
+    const view: ImageView = .{
+        ._handle = testHandle(raw.VkImageView, 0x5800),
+        ._device_handle = device._handle.?,
+        .format = .r8g8b8a8_unorm,
+        .samples = ._1,
+        .extent = .{ .width = 64, .height = 64, .depth = 1 },
+        .layer_count = 1,
+        .allocation_callbacks = null,
+        .destroy_image_view = testDestroyImageView,
+    };
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
+    try command_buffer.begin(.{});
+    var scope = try command_buffer.beginRenderPass(.{
+        .render_pass = &render_pass,
+        .framebuffer = &framebuffer,
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 64, .height = 64 } },
+        .clear_values = &.{.{ .color = .{ .float = .{ 0, 0, 0, 1 } } }},
+        .imageless_attachments = &.{&view},
+    });
+    const render_pass_handle = try render_pass.rawHandle();
+    const pipeline0: Pipeline = .{
+        ._handle = testHandle(raw.VkPipeline, 0x5900),
+        ._device_handle = device._handle.?,
+        .bind_point = .graphics,
+        ._render_pass_handle = render_pass_handle,
+        ._subpass = 0,
+        .allocation_callbacks = null,
+        .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
+    };
+    const pipeline1: Pipeline = .{
+        ._handle = testHandle(raw.VkPipeline, 0x5910),
+        ._device_handle = device._handle.?,
+        .bind_point = .graphics,
+        ._render_pass_handle = render_pass_handle,
+        ._subpass = 1,
+        .allocation_callbacks = null,
+        .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
+    };
+    try device.setObjectName(&render_pass, "legacy-render-pass");
+    try std.testing.expectEqual(@as(raw.VkObjectType, @intCast(raw.VK_OBJECT_TYPE_RENDER_PASS)), test_named_object_type);
+    try device.setObjectName(&framebuffer, "legacy-framebuffer");
+    try std.testing.expectEqual(@as(raw.VkObjectType, @intCast(raw.VK_OBJECT_TYPE_FRAMEBUFFER)), test_named_object_type);
+    try device.setObjectName(&pipeline0, "legacy-pipeline");
+    try std.testing.expectEqual(@as(raw.VkObjectType, @intCast(raw.VK_OBJECT_TYPE_PIPELINE)), test_named_object_type);
+    try command_buffer.bindPipeline(&pipeline0);
+    try scope.next(.inline_commands);
+    try std.testing.expectError(error.InvalidOptions, command_buffer.bindPipeline(&pipeline0));
+    try command_buffer.bindPipeline(&pipeline1);
+    try std.testing.expectError(error.InvalidOptions, scope.next(.inline_commands));
+    try std.testing.expectError(error.InvalidOptions, command_buffer.end());
+    try scope.end();
+    try scope.end();
+    scope.deinit();
+    try command_buffer.end();
+    try std.testing.expectEqual(@as(usize, 1), test_begin_render_pass_count);
+    try std.testing.expectEqual(@as(usize, 1), test_next_subpass_count);
+    try std.testing.expectEqual(@as(usize, 1), test_end_render_pass_count);
+    try std.testing.expect(test_begin_render_pass_imageless);
+
+    var secondary = try pool.allocateCommandBuffer(.{ .level = .secondary });
+    defer secondary.deinit();
+    try secondary.begin(.{
+        .flags = .init(&.{.render_pass_continue}),
+        .inheritance = .{ .render_pass = .{
+            .render_pass = &render_pass,
+            .subpass = 1,
+            .framebuffer = &framebuffer,
+        } },
+    });
+    try secondary.end();
+    try std.testing.expectEqual(render_pass_handle, test_inheritance_render_pass);
+    try std.testing.expectEqual(try framebuffer.rawHandle(), test_inheritance_framebuffer);
+    try std.testing.expectEqual(@as(u32, 1), test_inheritance_subpass);
 }
 
 test "pipeline layouts validate and record typed push constants" {

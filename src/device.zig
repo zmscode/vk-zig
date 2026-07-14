@@ -79,6 +79,7 @@ pub const Feature = enum {
     timeline_semaphore,
     buffer_device_address,
     descriptor_indexing,
+    imageless_framebuffer,
     // Vulkan 1.3+
     synchronization2,
     dynamic_rendering,
@@ -195,6 +196,7 @@ pub const FeatureSet = struct {
             .timeline_semaphore,
             .buffer_device_address,
             .descriptor_indexing,
+            .imageless_framebuffer,
             .synchronization2,
             .dynamic_rendering,
             .maintenance4,

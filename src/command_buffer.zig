@@ -7,6 +7,7 @@ const image = @import("image.zig");
 const debug_utils = @import("debug_utils.zig");
 const sync = @import("synchronization.zig");
 const rendering = @import("rendering.zig");
+const render_passes = @import("render_pass.zig");
 const transfer = @import("transfer.zig");
 const buffers = @import("buffer.zig");
 const sampler = @import("sampler.zig");
@@ -29,6 +30,7 @@ pub const Options = struct {
 
 pub const SecondaryInheritance = struct {
     occlusion_query_enable: bool = false,
+    render_pass: ?render_passes.Inheritance = null,
 };
 
 pub const BeginOptions = struct {
@@ -208,6 +210,11 @@ pub const Buffer = struct {
     simultaneous_use: bool = false,
     pending_submissions: usize = 0,
     rendering_active: bool = false,
+    render_pass_active: bool = false,
+    active_render_pass: raw.VkRenderPass = null,
+    active_framebuffer: raw.VkFramebuffer = null,
+    active_subpass: u32 = 0,
+    active_subpass_count: u32 = 0,
     graphics_pipeline_bound: bool = false,
     compute_pipeline_bound: bool = false,
     begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
@@ -223,6 +230,12 @@ pub const Buffer = struct {
     cmd_wait_events2: ?CommandFunction(raw.PFN_vkCmdWaitEvents2),
     cmd_begin_rendering: ?CommandFunction(raw.PFN_vkCmdBeginRendering),
     cmd_end_rendering: ?CommandFunction(raw.PFN_vkCmdEndRendering),
+    cmd_begin_render_pass: CommandFunction(raw.PFN_vkCmdBeginRenderPass),
+    cmd_next_subpass: CommandFunction(raw.PFN_vkCmdNextSubpass),
+    cmd_end_render_pass: CommandFunction(raw.PFN_vkCmdEndRenderPass),
+    cmd_begin_render_pass2: ?CommandFunction(raw.PFN_vkCmdBeginRenderPass2),
+    cmd_next_subpass2: ?CommandFunction(raw.PFN_vkCmdNextSubpass2),
+    cmd_end_render_pass2: ?CommandFunction(raw.PFN_vkCmdEndRenderPass2),
     cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
     cmd_clear_depth_stencil_image: CommandFunction(raw.PFN_vkCmdClearDepthStencilImage),
     cmd_fill_buffer: CommandFunction(raw.PFN_vkCmdFillBuffer),
@@ -278,6 +291,11 @@ pub const Buffer = struct {
             buffer.simultaneous_use = false;
             buffer.pending_submissions = 0;
             buffer.rendering_active = false;
+            buffer.render_pass_active = false;
+            buffer.active_render_pass = null;
+            buffer.active_framebuffer = null;
+            buffer.active_subpass = 0;
+            buffer.active_subpass_count = 0;
             buffer.graphics_pipeline_bound = false;
             buffer.compute_pipeline_bound = false;
         }
@@ -296,6 +314,11 @@ pub const Buffer = struct {
             buffer.simultaneous_use = false;
             buffer.pending_submissions = 0;
             buffer.rendering_active = false;
+            buffer.render_pass_active = false;
+            buffer.active_render_pass = null;
+            buffer.active_framebuffer = null;
+            buffer.active_subpass = 0;
+            buffer.active_subpass_count = 0;
             buffer.graphics_pipeline_bound = false;
             buffer.compute_pipeline_bound = false;
         }
@@ -322,6 +345,18 @@ pub const Buffer = struct {
             else
                 raw.VK_FALSE,
         };
+        if (options.inheritance) |inheritance| {
+            if (inheritance.render_pass) |legacy| {
+                if (!options.flags.contains(.render_pass_continue) or legacy.render_pass._device_handle != buffer._device_handle) return error.InvalidOptions;
+                if (legacy.render_pass.subpassColorAttachmentCount(legacy.subpass) == null) return error.InvalidOptions;
+                inheritance_info.renderPass = try legacy.render_pass.rawHandle();
+                inheritance_info.subpass = legacy.subpass;
+                if (legacy.framebuffer) |framebuffer| {
+                    if (framebuffer._device_handle != buffer._device_handle or framebuffer._render_pass_handle != inheritance_info.renderPass) return error.InvalidHandle;
+                    inheritance_info.framebuffer = try framebuffer.rawHandle();
+                }
+            } else if (options.flags.contains(.render_pass_continue)) return error.InvalidOptions;
+        }
         const begin_info: raw.VkCommandBufferBeginInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = options.flags.toRaw(),
@@ -331,13 +366,18 @@ pub const Buffer = struct {
         buffer.state = .recording;
         buffer.simultaneous_use = options.flags.contains(.simultaneous_use);
         buffer.rendering_active = false;
+        buffer.render_pass_active = false;
+        buffer.active_render_pass = null;
+        buffer.active_framebuffer = null;
+        buffer.active_subpass = 0;
+        buffer.active_subpass_count = 0;
         buffer.graphics_pipeline_bound = false;
         buffer.compute_pipeline_bound = false;
     }
 
     pub fn end(buffer: *Buffer) core.Error!void {
         const handle = try buffer.liveHandle();
-        if (buffer.state != .recording or buffer.rendering_active) return error.InvalidOptions;
+        if (buffer.state != .recording or buffer.rendering_active or buffer.render_pass_active) return error.InvalidOptions;
         try core.checkSuccess(buffer.end_command_buffer(handle));
         buffer.state = .executable;
     }
@@ -355,6 +395,11 @@ pub const Buffer = struct {
         buffer.simultaneous_use = false;
         buffer.pending_submissions = 0;
         buffer.rendering_active = false;
+        buffer.render_pass_active = false;
+        buffer.active_render_pass = null;
+        buffer.active_framebuffer = null;
+        buffer.active_subpass = 0;
+        buffer.active_subpass_count = 0;
         buffer.graphics_pipeline_bound = false;
         buffer.compute_pipeline_bound = false;
     }
@@ -505,7 +550,7 @@ pub const Buffer = struct {
         options: rendering.Options,
     ) core.Error!RenderingScope {
         const handle = try buffer.liveHandle();
-        if (buffer.state != .recording or buffer.rendering_active) return error.InvalidOptions;
+        if (buffer.state != .recording or buffer.rendering_active or buffer.render_pass_active) return error.InvalidOptions;
         const begin_rendering = buffer.cmd_begin_rendering orelse return error.MissingCommand;
         try options.validate(buffer._device_handle);
         var color_attachments: [16]raw.VkRenderingAttachmentInfo = undefined;
@@ -555,6 +600,96 @@ pub const Buffer = struct {
         const end_rendering = buffer.cmd_end_rendering orelse return error.MissingCommand;
         end_rendering(handle);
         buffer.rendering_active = false;
+    }
+
+    pub fn beginRenderPass(buffer: *Buffer, options: render_passes.BeginOptions) core.Error!RenderPassScope {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or buffer.rendering_active or buffer.render_pass_active) return error.InvalidOptions;
+        if (options.render_pass._device_handle != buffer._device_handle or options.framebuffer._device_handle != buffer._device_handle) return error.InvalidHandle;
+        const render_pass_handle = try options.render_pass.rawHandle();
+        const framebuffer_handle = try options.framebuffer.rawHandle();
+        if (options.framebuffer._render_pass_handle != render_pass_handle or
+            options.render_area.offset.x < 0 or options.render_area.offset.y < 0 or
+            options.render_area.extent.width == 0 or options.render_area.extent.height == 0)
+        {
+            return error.InvalidOptions;
+        }
+        const right = std.math.add(u32, @intCast(options.render_area.offset.x), options.render_area.extent.width) catch return error.SizeOverflow;
+        const bottom = std.math.add(u32, @intCast(options.render_area.offset.y), options.render_area.extent.height) catch return error.SizeOverflow;
+        if (right > options.framebuffer.width or bottom > options.framebuffer.height or
+            options.clear_values.len > options.render_pass.attachmentCount() or
+            options.clear_values.len > render_passes.attachment_count_max)
+        {
+            return error.InvalidOptions;
+        }
+        var clear_values: [render_passes.attachment_count_max]raw.VkClearValue = undefined;
+        for (options.clear_values, 0..) |value, index| clear_values[index] = value.toRaw();
+        var attachment_views: [render_passes.framebuffer_attachment_count_max]raw.VkImageView = undefined;
+        var attachment_info: raw.VkRenderPassAttachmentBeginInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO,
+        };
+        if (options.framebuffer.imageless) {
+            if (options.imageless_attachments.len != options.framebuffer.attachment_count) return error.InvalidOptions;
+            for (options.imageless_attachments, 0..) |view, index| {
+                if (view._device_handle != buffer._device_handle or view.format != options.render_pass.attachmentFormat(index).?) return error.InvalidHandle;
+                if (view.samples) |samples| if (samples != options.render_pass.attachmentSamples(index).?) return error.InvalidOptions;
+                if (view.extent) |extent| if (right > extent.width or bottom > extent.height) return error.InvalidOptions;
+                if (view.layer_count) |layers| if (options.framebuffer.layers > layers) return error.InvalidOptions;
+                attachment_views[index] = try view.rawHandle();
+            }
+            attachment_info.attachmentCount = @intCast(options.imageless_attachments.len);
+            attachment_info.pAttachments = if (options.imageless_attachments.len == 0) null else attachment_views[0..options.imageless_attachments.len].ptr;
+        } else if (options.imageless_attachments.len != 0) return error.InvalidOptions;
+        const begin_info: raw.VkRenderPassBeginInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .pNext = if (options.framebuffer.imageless) &attachment_info else null,
+            .renderPass = render_pass_handle,
+            .framebuffer = framebuffer_handle,
+            .renderArea = options.render_area.toRaw(),
+            .clearValueCount = @intCast(options.clear_values.len),
+            .pClearValues = if (options.clear_values.len == 0) null else clear_values[0..options.clear_values.len].ptr,
+        };
+        if (buffer.cmd_begin_render_pass2) |begin2| {
+            const subpass_begin: raw.VkSubpassBeginInfo = .{
+                .sType = raw.VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO,
+                .contents = options.contents.toRaw(),
+            };
+            begin2(handle, &begin_info, &subpass_begin);
+        } else buffer.cmd_begin_render_pass(handle, &begin_info, options.contents.toRaw());
+        buffer.render_pass_active = true;
+        buffer.active_render_pass = render_pass_handle;
+        buffer.active_framebuffer = framebuffer_handle;
+        buffer.active_subpass = 0;
+        buffer.active_subpass_count = @intCast(options.render_pass.subpassCount());
+        buffer.graphics_pipeline_bound = false;
+        return .{ .buffer = buffer };
+    }
+
+    pub fn nextSubpass(buffer: *Buffer, contents: render_passes.Contents) core.Error!void {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or !buffer.render_pass_active or buffer.active_subpass + 1 >= buffer.active_subpass_count) return error.InvalidOptions;
+        if (buffer.cmd_next_subpass2) |next2| {
+            const end_info: raw.VkSubpassEndInfo = .{ .sType = raw.VK_STRUCTURE_TYPE_SUBPASS_END_INFO };
+            const begin_info: raw.VkSubpassBeginInfo = .{ .sType = raw.VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO, .contents = contents.toRaw() };
+            next2(handle, &begin_info, &end_info);
+        } else buffer.cmd_next_subpass(handle, contents.toRaw());
+        buffer.active_subpass += 1;
+        buffer.graphics_pipeline_bound = false;
+    }
+
+    pub fn endRenderPass(buffer: *Buffer) core.Error!void {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or !buffer.render_pass_active) return error.InvalidOptions;
+        if (buffer.cmd_end_render_pass2) |end2| {
+            const end_info: raw.VkSubpassEndInfo = .{ .sType = raw.VK_STRUCTURE_TYPE_SUBPASS_END_INFO };
+            end2(handle, &end_info);
+        } else buffer.cmd_end_render_pass(handle);
+        buffer.render_pass_active = false;
+        buffer.active_render_pass = null;
+        buffer.active_framebuffer = null;
+        buffer.active_subpass = 0;
+        buffer.active_subpass_count = 0;
+        buffer.graphics_pipeline_bound = false;
     }
 
     pub fn clearColorImage(buffer: *Buffer, options: ClearColorImageOptions) core.Error!void {
@@ -770,7 +905,15 @@ pub const Buffer = struct {
         const handle = try command_buffer.liveHandle();
         if (command_buffer.state != .recording or value._device_handle != command_buffer._device_handle) return error.InvalidOptions;
         switch (value.bind_point) {
-            .graphics => command_buffer.graphics_pipeline_bound = true,
+            .graphics => {
+                if (command_buffer.rendering_active and !value._dynamic_rendering) return error.InvalidOptions;
+                if (command_buffer.render_pass_active and
+                    (value._render_pass_handle != command_buffer.active_render_pass or value._subpass != command_buffer.active_subpass))
+                {
+                    return error.InvalidOptions;
+                }
+                command_buffer.graphics_pipeline_bound = true;
+            },
             .compute => command_buffer.compute_pipeline_bound = true,
             else => return error.InvalidOptions,
         }
@@ -889,18 +1032,18 @@ pub const Buffer = struct {
     }
 
     pub fn draw(command_buffer: *Buffer, options: DrawOptions) core.Error!void {
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or options.vertex_count == 0 or options.instance_count == 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or !(command_buffer.rendering_active or command_buffer.render_pass_active) or !command_buffer.graphics_pipeline_bound or options.vertex_count == 0 or options.instance_count == 0) return error.InvalidOptions;
         command_buffer.cmd_draw(try command_buffer.liveHandle(), options.vertex_count, options.instance_count, options.first_vertex, options.first_instance);
     }
 
     pub fn drawIndexed(command_buffer: *Buffer, options: DrawIndexedOptions) core.Error!void {
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or options.index_count == 0 or options.instance_count == 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or !(command_buffer.rendering_active or command_buffer.render_pass_active) or !command_buffer.graphics_pipeline_bound or options.index_count == 0 or options.instance_count == 0) return error.InvalidOptions;
         command_buffer.cmd_draw_indexed(try command_buffer.liveHandle(), options.index_count, options.instance_count, options.first_index, options.vertex_offset, options.first_instance);
     }
 
     pub fn drawMulti(command_buffer: *Buffer, draws: []const MultiDraw, instance_count: u32, first_instance: u32) core.Error!void {
         const command = command_buffer.cmd_draw_multi orelse return error.MissingCommand;
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or draws.len == 0 or draws.len > 256 or instance_count == 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or !(command_buffer.rendering_active or command_buffer.render_pass_active) or !command_buffer.graphics_pipeline_bound or draws.len == 0 or draws.len > 256 or instance_count == 0) return error.InvalidOptions;
         var values: [256]raw.VkMultiDrawInfoEXT = undefined;
         for (draws, 0..) |draw_info, index| {
             if (draw_info.vertex_count == 0) return error.InvalidOptions;
@@ -911,7 +1054,7 @@ pub const Buffer = struct {
 
     pub fn drawMultiIndexed(command_buffer: *Buffer, draws: []const MultiDrawIndexed, instance_count: u32, first_instance: u32, common_vertex_offset: ?i32) core.Error!void {
         const command = command_buffer.cmd_draw_multi_indexed orelse return error.MissingCommand;
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or draws.len == 0 or draws.len > 256 or instance_count == 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or !(command_buffer.rendering_active or command_buffer.render_pass_active) or !command_buffer.graphics_pipeline_bound or draws.len == 0 or draws.len > 256 or instance_count == 0) return error.InvalidOptions;
         var values: [256]raw.VkMultiDrawIndexedInfoEXT = undefined;
         for (draws, 0..) |draw_info, index| {
             if (draw_info.index_count == 0) return error.InvalidOptions;
@@ -922,20 +1065,20 @@ pub const Buffer = struct {
     }
 
     pub fn drawIndirect(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset, draw_count: u32, stride: u32) core.Error!void {
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or draw_count == 0 or stride < @sizeOf(DrawIndirectCommand) or stride % 4 != 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or !(command_buffer.rendering_active or command_buffer.render_pass_active) or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or draw_count == 0 or stride < @sizeOf(DrawIndirectCommand) or stride % 4 != 0) return error.InvalidOptions;
         try validateIndirectRange(indirect, offset, draw_count, stride, @sizeOf(DrawIndirectCommand));
         command_buffer.cmd_draw_indirect(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes(), draw_count, stride);
     }
 
     pub fn drawIndexedIndirect(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset, draw_count: u32, stride: u32) core.Error!void {
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or draw_count == 0 or stride < @sizeOf(DrawIndexedIndirectCommand) or stride % 4 != 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or !(command_buffer.rendering_active or command_buffer.render_pass_active) or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or draw_count == 0 or stride < @sizeOf(DrawIndexedIndirectCommand) or stride % 4 != 0) return error.InvalidOptions;
         try validateIndirectRange(indirect, offset, draw_count, stride, @sizeOf(DrawIndexedIndirectCommand));
         command_buffer.cmd_draw_indexed_indirect(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes(), draw_count, stride);
     }
 
     pub fn drawIndirectCount(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset, count_buffer: *const buffers.Buffer, count_offset: core.DeviceOffset, max_draw_count: u32, stride: u32) core.Error!void {
         const command = command_buffer.cmd_draw_indirect_count orelse return error.MissingCommand;
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or count_buffer._device_handle != command_buffer._device_handle or max_draw_count == 0 or stride < @sizeOf(DrawIndirectCommand) or stride % 4 != 0 or count_offset.bytes() % 4 != 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or !(command_buffer.rendering_active or command_buffer.render_pass_active) or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or count_buffer._device_handle != command_buffer._device_handle or max_draw_count == 0 or stride < @sizeOf(DrawIndirectCommand) or stride % 4 != 0 or count_offset.bytes() % 4 != 0) return error.InvalidOptions;
         try validateIndirectRange(indirect, offset, max_draw_count, stride, @sizeOf(DrawIndirectCommand));
         try validateFixedRange(count_buffer, count_offset, @sizeOf(u32));
         command(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes(), try count_buffer.rawHandle(), count_offset.bytes(), max_draw_count, stride);
@@ -943,19 +1086,19 @@ pub const Buffer = struct {
 
     pub fn drawIndexedIndirectCount(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset, count_buffer: *const buffers.Buffer, count_offset: core.DeviceOffset, max_draw_count: u32, stride: u32) core.Error!void {
         const command = command_buffer.cmd_draw_indexed_indirect_count orelse return error.MissingCommand;
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or count_buffer._device_handle != command_buffer._device_handle or max_draw_count == 0 or stride < @sizeOf(DrawIndexedIndirectCommand) or stride % 4 != 0 or count_offset.bytes() % 4 != 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or !(command_buffer.rendering_active or command_buffer.render_pass_active) or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or count_buffer._device_handle != command_buffer._device_handle or max_draw_count == 0 or stride < @sizeOf(DrawIndexedIndirectCommand) or stride % 4 != 0 or count_offset.bytes() % 4 != 0) return error.InvalidOptions;
         try validateIndirectRange(indirect, offset, max_draw_count, stride, @sizeOf(DrawIndexedIndirectCommand));
         try validateFixedRange(count_buffer, count_offset, @sizeOf(u32));
         command(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes(), try count_buffer.rawHandle(), count_offset.bytes(), max_draw_count, stride);
     }
 
     pub fn dispatch(command_buffer: *Buffer, options: DispatchOptions) core.Error!void {
-        if (command_buffer.state != .recording or command_buffer.rendering_active or !command_buffer.compute_pipeline_bound or options.x == 0 or options.y == 0 or options.z == 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or command_buffer.rendering_active or command_buffer.render_pass_active or !command_buffer.compute_pipeline_bound or options.x == 0 or options.y == 0 or options.z == 0) return error.InvalidOptions;
         command_buffer.cmd_dispatch(try command_buffer.liveHandle(), options.x, options.y, options.z);
     }
 
     pub fn dispatchIndirect(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset) core.Error!void {
-        if (command_buffer.state != .recording or command_buffer.rendering_active or !command_buffer.compute_pipeline_bound or indirect._device_handle != command_buffer._device_handle or offset.bytes() % 4 != 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or command_buffer.rendering_active or command_buffer.render_pass_active or !command_buffer.compute_pipeline_bound or indirect._device_handle != command_buffer._device_handle or offset.bytes() % 4 != 0) return error.InvalidOptions;
         try validateFixedRange(indirect, offset, @sizeOf(DispatchIndirectCommand));
         command_buffer.cmd_dispatch_indirect(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes());
     }
@@ -972,7 +1115,7 @@ pub const Buffer = struct {
 
     pub fn dispatchBase(command_buffer: *Buffer, base: DispatchOptions, groups: DispatchOptions) core.Error!void {
         const command = command_buffer.cmd_dispatch_base orelse return error.MissingCommand;
-        if (command_buffer.state != .recording or command_buffer.rendering_active or !command_buffer.compute_pipeline_bound or groups.x == 0 or groups.y == 0 or groups.z == 0) return error.InvalidOptions;
+        if (command_buffer.state != .recording or command_buffer.rendering_active or command_buffer.render_pass_active or !command_buffer.compute_pipeline_bound or groups.x == 0 or groups.y == 0 or groups.z == 0) return error.InvalidOptions;
         command(try command_buffer.liveHandle(), base.x, base.y, base.z, groups.x, groups.y, groups.z);
     }
 
@@ -1050,6 +1193,26 @@ pub const RenderingScope = struct {
     }
 };
 
+pub const RenderPassScope = struct {
+    buffer: *Buffer,
+    active: bool = true,
+
+    pub fn next(scope: *RenderPassScope, contents: render_passes.Contents) core.Error!void {
+        if (!scope.active) return error.InvalidOptions;
+        try scope.buffer.nextSubpass(contents);
+    }
+
+    pub fn end(scope: *RenderPassScope) core.Error!void {
+        if (!scope.active) return;
+        try scope.buffer.endRenderPass();
+        scope.active = false;
+    }
+
+    pub fn deinit(scope: *RenderPassScope) void {
+        scope.end() catch {};
+    }
+};
+
 pub const LabelScope = struct {
     command_buffer: CommandBufferHandle,
     end_label: CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
@@ -1089,6 +1252,12 @@ pub const Pool = struct {
     cmd_wait_events2: ?CommandFunction(raw.PFN_vkCmdWaitEvents2),
     cmd_begin_rendering: ?CommandFunction(raw.PFN_vkCmdBeginRendering),
     cmd_end_rendering: ?CommandFunction(raw.PFN_vkCmdEndRendering),
+    cmd_begin_render_pass: CommandFunction(raw.PFN_vkCmdBeginRenderPass),
+    cmd_next_subpass: CommandFunction(raw.PFN_vkCmdNextSubpass),
+    cmd_end_render_pass: CommandFunction(raw.PFN_vkCmdEndRenderPass),
+    cmd_begin_render_pass2: ?CommandFunction(raw.PFN_vkCmdBeginRenderPass2),
+    cmd_next_subpass2: ?CommandFunction(raw.PFN_vkCmdNextSubpass2),
+    cmd_end_render_pass2: ?CommandFunction(raw.PFN_vkCmdEndRenderPass2),
     cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
     cmd_clear_depth_stencil_image: CommandFunction(raw.PFN_vkCmdClearDepthStencilImage),
     cmd_fill_buffer: CommandFunction(raw.PFN_vkCmdFillBuffer),
@@ -1176,6 +1345,12 @@ pub const Pool = struct {
             .cmd_wait_events2 = pool.cmd_wait_events2,
             .cmd_begin_rendering = pool.cmd_begin_rendering,
             .cmd_end_rendering = pool.cmd_end_rendering,
+            .cmd_begin_render_pass = pool.cmd_begin_render_pass,
+            .cmd_next_subpass = pool.cmd_next_subpass,
+            .cmd_end_render_pass = pool.cmd_end_render_pass,
+            .cmd_begin_render_pass2 = pool.cmd_begin_render_pass2,
+            .cmd_next_subpass2 = pool.cmd_next_subpass2,
+            .cmd_end_render_pass2 = pool.cmd_end_render_pass2,
             .cmd_clear_color_image = pool.cmd_clear_color_image,
             .cmd_clear_depth_stencil_image = pool.cmd_clear_depth_stencil_image,
             .cmd_fill_buffer = pool.cmd_fill_buffer,
@@ -1281,6 +1456,7 @@ test "known image bounds validate compressed transfer regions" {
         ._device_handle = @ptrFromInt(0x2000),
         .format = .bc1_rgba_unorm_block,
         .extent = .{ .width = 64, .height = 64, .depth = 1 },
+        .samples = ._1,
         .mip_levels = 4,
         .array_layers = 2,
         .allocation_callbacks = null,

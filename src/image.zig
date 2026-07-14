@@ -132,6 +132,7 @@ pub const Image = struct {
     _device_handle: DeviceHandle,
     format: types.Format,
     extent: types.Extent3D,
+    samples: types.SampleCountBit,
     mip_levels: u32,
     array_layers: u32,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
@@ -404,6 +405,7 @@ pub fn create(
         ._device_handle = device_handle,
         .format = options.format,
         .extent = options.extent,
+        .samples = options.samples,
         .mip_levels = options.mip_levels,
         .array_layers = options.array_layers,
         .allocation_callbacks = allocation_callbacks,
@@ -414,6 +416,10 @@ pub fn create(
 pub const View = struct {
     _handle: ?ImageViewHandle,
     _device_handle: DeviceHandle,
+    format: types.Format,
+    samples: ?types.SampleCountBit,
+    extent: ?types.Extent3D,
+    layer_count: ?u32,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
 
@@ -465,6 +471,19 @@ pub fn createView(
     return .{
         ._handle = handle orelse return error.InvalidHandle,
         ._device_handle = device_handle,
+        .format = options.format,
+        .samples = switch (options.image) {
+            .owned => |value| value.samples,
+            .swapchain => ._1,
+        },
+        .extent = options.image.knownExtentAtMip(options.subresource_range.base_mip_level),
+        .layer_count = switch (options.subresource_range.layer_count) {
+            .count => |count| count,
+            .remaining => if (options.image.knownArrayLayers()) |count|
+                count -| options.subresource_range.base_array_layer
+            else
+                null,
+        },
         .allocation_callbacks = allocation_callbacks,
         .destroy_image_view = destroy_image_view,
     };
@@ -493,6 +512,7 @@ test "owned images expose typed layouts, sparse requirements, and host-copy avai
         ._device_handle = @ptrFromInt(0x2000),
         .format = .r8g8b8a8_unorm,
         .extent = .{ .width = 16, .height = 16, .depth = 1 },
+        .samples = ._1,
         .mip_levels = 4,
         .array_layers = 1,
         .allocation_callbacks = null,

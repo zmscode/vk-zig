@@ -378,6 +378,7 @@ const examples = [_]Example{
     .{ .name = "format-queries", .path = "examples/format_queries.zig" },
     .{ .name = "debug-utils", .path = "examples/debug_utils.zig" },
     .{ .name = "frame-resources", .path = "examples/frame_resources.zig" },
+    .{ .name = "legacy-render-pass", .path = "examples/legacy_render_pass.zig" },
     .{ .name = "timeline-submit", .path = "examples/timeline_submit.zig" },
     .{ .name = "buffer-setup", .path = "examples/buffer_setup.zig" },
 };

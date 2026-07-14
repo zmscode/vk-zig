@@ -6,6 +6,7 @@ const shader = @import("shader.zig");
 const debug_utils = @import("debug_utils.zig");
 const types = @import("vulkan_types");
 const sampler = @import("sampler.zig");
+const render_passes = @import("render_pass.zig");
 
 const CommandFunction = command.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -355,6 +356,16 @@ pub const RenderingFormats = struct {
     view_mask: u32 = 0,
 };
 
+pub const LegacyRenderPassCompatibility = struct {
+    render_pass: *const render_passes.RenderPass,
+    subpass: u32 = 0,
+};
+
+pub const GraphicsCompatibility = union(enum) {
+    dynamic_rendering: RenderingFormats,
+    render_pass: LegacyRenderPassCompatibility,
+};
+
 pub const GraphicsOptions = struct {
     stages: []const shader.StageOptions,
     layout: *const Layout,
@@ -371,7 +382,7 @@ pub const GraphicsOptions = struct {
     color_blend_attachments: []const ColorBlendAttachment = &.{},
     blend_constants: [4]f32 = .{ 0, 0, 0, 0 },
     dynamic_states: []const DynamicState = &.{ .viewport, .scissor },
-    rendering: RenderingFormats,
+    compatibility: GraphicsCompatibility = .{ .dynamic_rendering = .{} },
     fail_on_compile_required: bool = false,
 };
 
@@ -385,6 +396,9 @@ pub const Pipeline = struct {
     _handle: ?PipelineHandle,
     _device_handle: DeviceHandle,
     bind_point: BindPoint,
+    _dynamic_rendering: bool = false,
+    _render_pass_handle: raw.VkRenderPass = null,
+    _subpass: u32 = 0,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_pipeline: CommandFunction(raw.PFN_vkDestroyPipeline),
 
@@ -471,6 +485,9 @@ fn finishCreate(
     bind_point: BindPoint,
     result: raw.VkResult,
     handle: raw.VkPipeline,
+    dynamic_rendering: bool,
+    render_pass_handle: raw.VkRenderPass,
+    subpass: u32,
 ) core.Error!CreateResult {
     if (result == raw.VK_PIPELINE_COMPILE_REQUIRED) {
         if (handle) |provisional| destroy(device_handle, provisional, allocation_callbacks);
@@ -485,6 +502,9 @@ fn finishCreate(
         ._handle = handle orelse return error.InvalidHandle,
         ._device_handle = device_handle,
         .bind_point = bind_point,
+        ._dynamic_rendering = dynamic_rendering,
+        ._render_pass_handle = render_pass_handle,
+        ._subpass = subpass,
         .allocation_callbacks = allocation_callbacks,
         .destroy_pipeline = destroy,
     } };
@@ -507,7 +527,7 @@ pub fn createCompute(
     };
     var handle: raw.VkPipeline = null;
     const result = dispatch.create_compute(device_handle, null, 1, &info, allocation_callbacks, &handle);
-    return finishCreate(device_handle, allocation_callbacks, dispatch.destroy, .compute, result, handle);
+    return finishCreate(device_handle, allocation_callbacks, dispatch.destroy, .compute, result, handle, false, null, 0);
 }
 
 pub fn createGraphics(
@@ -520,12 +540,33 @@ pub fn createGraphics(
     if (options.vertex_bindings.len > 32 or options.vertex_attributes.len > 64 or
         options.viewports.len > 16 or options.scissors.len > 16 or
         options.color_blend_attachments.len > 16 or options.dynamic_states.len > 32 or
-        options.rendering.color.len > 16)
+        (switch (options.compatibility) {
+            .dynamic_rendering => |value| value.color.len,
+            .render_pass => 0,
+        }) > 16)
     {
         return error.CountOverflow;
     }
     if (options.viewports.len != options.scissors.len) return error.InvalidOptions;
-    if (options.color_blend_attachments.len != options.rendering.color.len) return error.InvalidOptions;
+    const dynamic_formats: RenderingFormats = switch (options.compatibility) {
+        .dynamic_rendering => |value| value,
+        .render_pass => .{},
+    };
+    var legacy_render_pass: raw.VkRenderPass = null;
+    var legacy_subpass: u32 = 0;
+    switch (options.compatibility) {
+        .dynamic_rendering => {
+            if (options.color_blend_attachments.len != dynamic_formats.color.len) return error.InvalidOptions;
+        },
+        .render_pass => |value| {
+            if (value.render_pass._device_handle != device_handle) return error.InvalidHandle;
+            legacy_render_pass = try value.render_pass.rawHandle();
+            legacy_subpass = value.subpass;
+            const color_count = value.render_pass.subpassColorAttachmentCount(value.subpass) orelse return error.InvalidOptions;
+            const samples = value.render_pass.subpassSamples(value.subpass) orelse return error.InvalidOptions;
+            if (options.color_blend_attachments.len != color_count or options.multisample.samples != samples) return error.InvalidOptions;
+        },
+    }
     if (!std.math.isFinite(options.rasterization.line_width) or options.rasterization.line_width <= 0) return error.InvalidOptions;
     if (options.multisample.minimum_sample_shading) |value| {
         if (!std.math.isFinite(value) or value < 0 or value > 1) return error.InvalidOptions;
@@ -629,18 +670,18 @@ pub fn createGraphics(
         .pDynamicStates = if (options.dynamic_states.len == 0) null else dynamic_states[0..options.dynamic_states.len].ptr,
     };
     var color_formats: [16]raw.VkFormat = undefined;
-    for (options.rendering.color, 0..) |format, index| color_formats[index] = format.toRaw();
-    const rendering: raw.VkPipelineRenderingCreateInfo = .{
+    for (dynamic_formats.color, 0..) |format, index| color_formats[index] = format.toRaw();
+    const dynamic_rendering: raw.VkPipelineRenderingCreateInfo = .{
         .sType = raw.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .viewMask = options.rendering.view_mask,
-        .colorAttachmentCount = @intCast(options.rendering.color.len),
-        .pColorAttachmentFormats = if (options.rendering.color.len == 0) null else color_formats[0..options.rendering.color.len].ptr,
-        .depthAttachmentFormat = if (options.rendering.depth) |format| format.toRaw() else raw.VK_FORMAT_UNDEFINED,
-        .stencilAttachmentFormat = if (options.rendering.stencil) |format| format.toRaw() else raw.VK_FORMAT_UNDEFINED,
+        .viewMask = dynamic_formats.view_mask,
+        .colorAttachmentCount = @intCast(dynamic_formats.color.len),
+        .pColorAttachmentFormats = if (dynamic_formats.color.len == 0) null else color_formats[0..dynamic_formats.color.len].ptr,
+        .depthAttachmentFormat = if (dynamic_formats.depth) |format| format.toRaw() else raw.VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = if (dynamic_formats.stencil) |format| format.toRaw() else raw.VK_FORMAT_UNDEFINED,
     };
     const info: raw.VkGraphicsPipelineCreateInfo = .{
         .sType = raw.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = &rendering,
+        .pNext = if (options.compatibility == .dynamic_rendering) &dynamic_rendering else null,
         .flags = creationFlags(options.fail_on_compile_required),
         .stageCount = @intCast(stages.len),
         .pStages = stages.ptr,
@@ -654,10 +695,22 @@ pub fn createGraphics(
         .pColorBlendState = &blend,
         .pDynamicState = &dynamic,
         .layout = try options.layout.rawHandle(),
+        .renderPass = legacy_render_pass,
+        .subpass = legacy_subpass,
     };
     var handle: raw.VkPipeline = null;
     const result = dispatch.create_graphics(device_handle, null, 1, &info, allocation_callbacks, &handle);
-    return finishCreate(device_handle, allocation_callbacks, dispatch.destroy, .graphics, result, handle);
+    return finishCreate(
+        device_handle,
+        allocation_callbacks,
+        dispatch.destroy,
+        .graphics,
+        result,
+        handle,
+        options.compatibility == .dynamic_rendering,
+        legacy_render_pass,
+        legacy_subpass,
+    );
 }
 
 pub fn createComputeBatch(
@@ -719,6 +772,8 @@ var test_layout_destroy_count: usize = 0;
 var test_pipeline_result: raw.VkResult = raw.VK_SUCCESS;
 var test_pipeline_destroy_count: usize = 0;
 var test_graphics_has_rendering = false;
+var test_graphics_render_pass: raw.VkRenderPass = null;
+var test_graphics_subpass: u32 = 0;
 
 fn testCreateLayout(
     _: raw.VkDevice,
@@ -769,8 +824,28 @@ fn testCreateGraphicsPipeline(
 ) callconv(.c) raw.VkResult {
     for (0..count) |index| output[index] = @ptrFromInt(0x6000 + index);
     test_graphics_has_rendering = infos[0].pNext != null;
+    test_graphics_render_pass = infos[0].renderPass;
+    test_graphics_subpass = infos[0].subpass;
     return test_pipeline_result;
 }
+
+fn testCreateRenderPass(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkRenderPassCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    output: [*c]raw.VkRenderPass,
+) callconv(.c) raw.VkResult {
+    output.* = @ptrFromInt(0x7000);
+    return raw.VK_SUCCESS;
+}
+
+fn testDestroyRenderPass(
+    _: raw.VkDevice,
+    _: raw.VkRenderPass,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+fn testRenderAreaGranularity(_: raw.VkDevice, _: raw.VkRenderPass, _: [*c]raw.VkExtent2D) callconv(.c) void {}
 
 fn testDestroyPipeline(
     _: raw.VkDevice,
@@ -866,11 +941,39 @@ test "compute pipeline batches preserve compile status and roll back earlier suc
         .stages = &.{.{ .stage = .vertex, .module = &module }},
         .layout = &layout,
         .color_blend_attachments = &.{.{}},
-        .rendering = .{ .color = &.{.b8g8r8a8_srgb} },
+        .compatibility = .{ .dynamic_rendering = .{ .color = &.{.b8g8r8a8_srgb} } },
     });
     try std.testing.expect(graphics_result == .success);
     try std.testing.expect(test_graphics_has_rendering);
     switch (graphics_result) {
+        .success => |*value| value.deinit(),
+        .compile_required => unreachable,
+    }
+
+    var render_pass = try render_passes.create(device_handle, null, .{
+        .create = testCreateRenderPass,
+        .create2 = null,
+        .destroy = testDestroyRenderPass,
+        .get_granularity = testRenderAreaGranularity,
+    }, .{
+        .attachments = &.{.{ .format = .b8g8r8a8_srgb, .final_layout = .color_attachment_optimal }},
+        .subpasses = &.{.{ .color_attachments = &.{.{ .attachment = .{ .index = 0, .layout = .color_attachment_optimal } }} }},
+    });
+    defer render_pass.deinit();
+    test_graphics_has_rendering = true;
+    test_graphics_render_pass = null;
+    test_graphics_subpass = 99;
+    var legacy_result = try createGraphics(device_handle, null, dispatch, .{
+        .stages = &.{.{ .stage = .vertex, .module = &module }},
+        .layout = &layout,
+        .color_blend_attachments = &.{.{}},
+        .compatibility = .{ .render_pass = .{ .render_pass = &render_pass } },
+    });
+    try std.testing.expect(legacy_result == .success);
+    try std.testing.expect(!test_graphics_has_rendering);
+    try std.testing.expectEqual(try render_pass.rawHandle(), test_graphics_render_pass);
+    try std.testing.expectEqual(@as(u32, 0), test_graphics_subpass);
+    switch (legacy_result) {
         .success => |*value| value.deinit(),
         .compile_required => unreachable,
     }
