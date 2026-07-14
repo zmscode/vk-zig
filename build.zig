@@ -379,6 +379,7 @@ const examples = [_]Example{
     .{ .name = "debug-utils", .path = "examples/debug_utils.zig" },
     .{ .name = "frame-resources", .path = "examples/frame_resources.zig" },
     .{ .name = "timeline-submit", .path = "examples/timeline_submit.zig" },
+    .{ .name = "buffer-setup", .path = "examples/buffer_setup.zig" },
 };
 
 fn addUpdateStep(

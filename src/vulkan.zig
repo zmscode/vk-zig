@@ -1,6 +1,24 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("vulkan_build_options");
+pub const core = @import("core.zig");
+pub const capabilities = @import("capabilities.zig");
+pub const configuration = @import("configuration.zig");
+pub const registry = @import("registry.zig");
+pub const physical_devices = @import("physical_device.zig");
+pub const formats = @import("format.zig");
+pub const memory = @import("memory.zig");
+pub const buffers = @import("buffer.zig");
+pub const images = @import("image.zig");
+pub const synchronization = @import("synchronization.zig");
+pub const commands = @import("command_buffer.zig");
+pub const presentation = @import("presentation.zig");
+pub const queues = @import("queue.zig");
+pub const debug_utils = @import("debug_utils.zig");
+
+/// Deprecated short name retained while applications migrate to `synchronization`.
+pub const sync = synchronization;
+/// Deprecated name retained while applications migrate to `formats`.
+pub const format_support = formats;
 
 /// Complete target-specific Vulkan ABI generated from the Khronos headers.
 pub const raw = @import("vulkan_raw");
@@ -38,6 +56,10 @@ pub const AccessBit = types.AccessBit;
 pub const AccessFlags = types.AccessFlags;
 pub const ImageUsageBit = types.ImageUsageBit;
 pub const ImageUsageFlags = types.ImageUsageFlags;
+pub const BufferUsageBit = types.BufferUsageBit;
+pub const BufferUsageFlags = types.BufferUsageFlags;
+pub const BufferCreateBit = types.BufferCreateBit;
+pub const BufferCreateFlags = types.BufferCreateFlags;
 pub const ImageCreateBit = types.ImageCreateBit;
 pub const ImageCreateFlags = types.ImageCreateFlags;
 pub const SampleCountBit = types.SampleCountBit;
@@ -85,499 +107,58 @@ pub const ImageSubresourceRange = types.ImageSubresourceRange;
 pub const ClearColor = types.ClearColor;
 pub const ClearDepthStencil = types.ClearDepthStencil;
 pub const ClearValue = types.ClearValue;
+pub const Error = core.Error;
+pub const LoaderError = core.LoaderError;
+pub const Version = core.Version;
+pub const QueueFamilyIndex = core.QueueFamilyIndex;
+pub const QueueIndex = core.QueueIndex;
+pub const SwapchainImageIndex = core.SwapchainImageIndex;
+pub const MemoryTypeIndex = core.MemoryTypeIndex;
+pub const MemoryHeapIndex = core.MemoryHeapIndex;
+pub const DeviceSize = core.DeviceSize;
+pub const DeviceOffset = core.DeviceOffset;
+pub const DeviceRange = core.DeviceRange;
+pub const Timeout = core.Timeout;
+pub const QueueFamilyOwnership = core.QueueFamilyOwnership;
+pub const checkSuccess = core.checkSuccess;
 
-/// A capability choice and whether the caller's preferred value was available.
-pub fn Choice(comptime T: type) type {
-    return struct {
-        value: T,
-        preferred: bool,
-    };
-}
+const NonNullHandle = core.NonNullHandle;
+const count32 = core.count32;
 
-pub fn clampSurfaceExtent(
-    capabilities: SurfaceCapabilities,
-    desired: Extent2D,
-) Extent2D {
-    return capabilities.extent_current orelse .{
-        .width = @min(
-            @max(desired.width, capabilities.extent_min.width),
-            capabilities.extent_max.width,
-        ),
-        .height = @min(
-            @max(desired.height, capabilities.extent_min.height),
-            capabilities.extent_max.height,
-        ),
-    };
-}
+pub const Choice = capabilities.Choice;
+pub const clampSurfaceExtent = capabilities.clampSurfaceExtent;
+pub const chooseSwapchainImageCount = capabilities.chooseSwapchainImageCount;
+pub const chooseSurfaceFormat = capabilities.chooseSurfaceFormat;
+pub const choosePresentMode = capabilities.choosePresentMode;
+pub const chooseSurfaceTransform = capabilities.chooseSurfaceTransform;
+pub const chooseCompositeAlpha = capabilities.chooseCompositeAlpha;
+pub const chooseImageUsage = capabilities.chooseImageUsage;
 
-pub fn chooseSwapchainImageCount(
-    capabilities: SurfaceCapabilities,
-    preferred: ?u32,
-) Choice(u32) {
-    const default_count = if (capabilities.image_count_min == std.math.maxInt(u32))
-        capabilities.image_count_min
-    else
-        capabilities.image_count_min + 1;
-    const requested = preferred orelse default_count;
-    const maximum = capabilities.image_count_max orelse std.math.maxInt(u32);
-    const selected = @min(@max(requested, capabilities.image_count_min), maximum);
-    return .{ .value = selected, .preferred = preferred == null or selected == requested };
-}
-
-pub fn chooseSurfaceFormat(
-    available: []const SurfaceFormat,
-    preferred: []const SurfaceFormat,
-) Error!Choice(SurfaceFormat) {
-    if (available.len == 0) return error.UnsupportedSurfaceConfiguration;
-    if (available.len == 1 and available[0].format == .undefined_) {
-        return .{
-            .value = if (preferred.len == 0) available[0] else preferred[0],
-            .preferred = preferred.len != 0,
-        };
-    }
-    for (preferred) |wanted| {
-        for (available) |candidate| {
-            if (candidate.format == wanted.format and
-                candidate.color_space == wanted.color_space)
-            {
-                return .{ .value = candidate, .preferred = true };
-            }
-        }
-    }
-    return .{ .value = available[0], .preferred = false };
-}
-
-pub fn choosePresentMode(
-    available: []const PresentMode,
-    preferred: []const PresentMode,
-) Error!Choice(PresentMode) {
-    if (available.len == 0) return error.UnsupportedSurfaceConfiguration;
-    for (preferred) |wanted| {
-        for (available) |candidate| {
-            if (candidate == wanted) return .{ .value = candidate, .preferred = true };
-        }
-    }
-    for (available) |candidate| {
-        if (candidate == .fifo) return .{ .value = candidate, .preferred = false };
-    }
-    return .{ .value = available[0], .preferred = false };
-}
-
-pub fn chooseSurfaceTransform(
-    capabilities: SurfaceCapabilities,
-    preferred: []const SurfaceTransformBit,
-) Choice(SurfaceTransformBit) {
-    for (preferred) |wanted| {
-        if (capabilities.transforms_supported.contains(wanted)) {
-            return .{ .value = wanted, .preferred = true };
-        }
-    }
-    return .{ .value = capabilities.transform_current, .preferred = false };
-}
-
-pub fn chooseCompositeAlpha(
-    supported: CompositeAlphaFlags,
-    preferred: []const CompositeAlphaBit,
-) Error!Choice(CompositeAlphaBit) {
-    for (preferred) |wanted| {
-        if (supported.contains(wanted)) return .{ .value = wanted, .preferred = true };
-    }
-    const fallback_order = [_]CompositeAlphaBit{
-        .opaque_,
-        .pre_multiplied,
-        .post_multiplied,
-        .inherit,
-    };
-    for (fallback_order) |candidate| {
-        if (supported.contains(candidate)) return .{ .value = candidate, .preferred = false };
-    }
-    return error.UnsupportedSurfaceConfiguration;
-}
-
-pub fn chooseImageUsage(
-    supported: ImageUsageFlags,
-    required: ImageUsageFlags,
-    preferred: ImageUsageFlags,
-) Error!Choice(ImageUsageFlags) {
-    if (!supported.containsAll(required)) return error.UnsupportedSurfaceConfiguration;
-    const optional_bits = supported.toRaw() & preferred.toRaw();
-    const selected = ImageUsageFlags.fromRaw(required.toRaw() | optional_bits);
-    return .{
-        .value = selected,
-        .preferred = supported.containsAll(preferred),
-    };
-}
-
-/// Index of a queue family reported by a physical device.
-pub const QueueFamilyIndex = enum(u32) {
-    _,
-
-    pub fn fromRaw(value: u32) QueueFamilyIndex {
-        return @enumFromInt(value);
-    }
-
-    pub fn toRaw(index: QueueFamilyIndex) u32 {
-        return @intFromEnum(index);
-    }
-};
-
-/// Index of a queue within a queue family.
-pub const QueueIndex = enum(u32) {
-    first = 0,
-    _,
-
-    pub fn fromRaw(value: u32) QueueIndex {
-        return @enumFromInt(value);
-    }
-
-    pub fn toRaw(index: QueueIndex) u32 {
-        return @intFromEnum(index);
-    }
-};
-
-/// Index of a borrowed image owned by a swapchain.
-pub const SwapchainImageIndex = enum(u32) {
-    _,
-
-    pub fn fromRaw(value: u32) SwapchainImageIndex {
-        return @enumFromInt(value);
-    }
-
-    pub fn toRaw(index: SwapchainImageIndex) u32 {
-        return @intFromEnum(index);
-    }
-};
-
-/// Index of a physical-device memory type.
-pub const MemoryTypeIndex = enum(u32) {
-    _,
-
-    pub fn fromRaw(value: u32) MemoryTypeIndex {
-        return @enumFromInt(value);
-    }
-
-    pub fn toRaw(index: MemoryTypeIndex) u32 {
-        return @intFromEnum(index);
-    }
-};
-
-/// Index of a physical-device memory heap.
-pub const MemoryHeapIndex = enum(u32) {
-    _,
-
-    pub fn fromRaw(value: u32) MemoryHeapIndex {
-        return @enumFromInt(value);
-    }
-
-    pub fn toRaw(index: MemoryHeapIndex) u32 {
-        return @intFromEnum(index);
-    }
-};
-
-/// Vulkan timeout without exposing the `maxInt(u64)` infinite-time sentinel.
-pub const Timeout = union(enum) {
-    infinite,
-    nanoseconds: u64,
-
-    pub const immediate: Timeout = .{ .nanoseconds = 0 };
-
-    fn toRaw(timeout: Timeout) u64 {
-        return switch (timeout) {
-            .infinite => std.math.maxInt(u64),
-            .nanoseconds => |value| value,
-        };
-    }
-};
-
-/// Queue-family ownership encoded without `VK_QUEUE_FAMILY_IGNORED` at call sites.
-pub const QueueFamilyOwnership = union(enum) {
-    ignored,
-    transfer: struct {
-        source: QueueFamilyIndex,
-        destination: QueueFamilyIndex,
-    },
-
-    fn sourceRaw(ownership: QueueFamilyOwnership) u32 {
-        return switch (ownership) {
-            .ignored => raw.VK_QUEUE_FAMILY_IGNORED,
-            .transfer => |transfer| transfer.source.toRaw(),
-        };
-    }
-
-    fn destinationRaw(ownership: QueueFamilyOwnership) u32 {
-        return switch (ownership) {
-            .ignored => raw.VK_QUEUE_FAMILY_IGNORED,
-            .transfer => |transfer| transfer.destination.toRaw(),
-        };
-    }
-};
-
-pub const Layer = struct {
-    name: [:0]const u8,
-};
-
-/// Well-known Vulkan layers that applications commonly request by name.
-pub const layer = struct {
-    pub const khronos_validation: Layer = .{ .name = "VK_LAYER_KHRONOS_validation" };
-};
-
-pub const platform = build_options.platform;
-pub const registry_commit = build_options.registry_commit;
+pub const Layer = configuration.Layer;
+pub const layer = configuration.layer;
+pub const platform = configuration.platform;
+pub const registry_commit = configuration.registry_commit;
 
 const enumeration_attempt_count_max = 4;
 const enumeration_item_count_max = 4096;
 const name_count_max = 256;
 const device_queue_count_max = 64;
 const submission_item_count_max = 64;
-const submission_batch_count_max = 16;
-const swapchain_image_count_max = 4096;
-const memory_type_count_max: usize = raw.VK_MAX_MEMORY_TYPES;
-const memory_heap_count_max: usize = raw.VK_MAX_MEMORY_HEAPS;
 
 const InstanceHandle = NonNullHandle(raw.VkInstance);
 const PhysicalDeviceHandle = NonNullHandle(raw.VkPhysicalDevice);
 const DeviceHandle = NonNullHandle(raw.VkDevice);
-const QueueHandle = NonNullHandle(raw.VkQueue);
-const SurfaceHandle = NonNullHandle(raw.VkSurfaceKHR);
-const DebugMessengerHandle = NonNullHandle(raw.VkDebugUtilsMessengerEXT);
-const SwapchainHandle = NonNullHandle(raw.VkSwapchainKHR);
-const ImageHandle = NonNullHandle(raw.VkImage);
-const ImageViewHandle = NonNullHandle(raw.VkImageView);
-const CommandPoolHandle = NonNullHandle(raw.VkCommandPool);
-const CommandBufferHandle = NonNullHandle(raw.VkCommandBuffer);
-const SemaphoreHandle = NonNullHandle(raw.VkSemaphore);
-const FenceHandle = NonNullHandle(raw.VkFence);
 
-pub const Error = error{
-    OutOfHostMemory,
-    OutOfDeviceMemory,
-    InitializationFailed,
-    DeviceLost,
-    MemoryMapFailed,
-    LayerNotPresent,
-    ExtensionNotPresent,
-    FeatureNotPresent,
-    IncompatibleDriver,
-    TooManyObjects,
-    FormatNotSupported,
-    FragmentedPool,
-    UnknownVulkanError,
-    UnexpectedVulkanResult,
-    MissingCommand,
-    EnumerationUnstable,
-    InactiveObject,
-    InvalidHandle,
-    InvalidOptions,
-    CountOverflow,
-    PortabilityNotSupported,
-    MemoryTypeNotFound,
-    SurfaceLost,
-    NativeWindowInUse,
-    FullScreenExclusiveLost,
-    BufferTooSmall,
-    InvalidProperties,
-    SizeOverflow,
-    UnsupportedSurfaceConfiguration,
-    QueueFamilyNotFound,
-};
-
-pub const LoaderError = error{
-    VulkanLoaderNotFound,
-    VulkanEntryPointMissing,
-};
-
-pub const Version = struct {
-    variant: u3 = 0,
-    major: u7,
-    minor: u10,
-    patch: u12,
-
-    pub fn encode(version: Version) u32 {
-        return (@as(u32, version.variant) << 29) |
-            (@as(u32, version.major) << 22) |
-            (@as(u32, version.minor) << 12) |
-            @as(u32, version.patch);
-    }
-
-    pub fn decode(encoded: u32) Version {
-        return .{
-            .variant = @truncate(encoded >> 29),
-            .major = @truncate(encoded >> 22),
-            .minor = @truncate(encoded >> 12),
-            .patch = @truncate(encoded),
-        };
-    }
-
-    pub fn lessThan(version: Version, other: Version) bool {
-        return version.encode() < other.encode();
-    }
-
-    pub fn atLeast(version: Version, minimum: Version) bool {
-        return !version.lessThan(minimum);
-    }
-
-    pub fn format(version: Version, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        if (version.variant != 0) try writer.print("{d}:", .{version.variant});
-        try writer.print("{d}.{d}.{d}", .{ version.major, version.minor, version.patch });
-    }
-
-    pub const v1_0: Version = .{ .major = 1, .minor = 0, .patch = 0 };
-    pub const v1_1: Version = .{ .major = 1, .minor = 1, .patch = 0 };
-    pub const v1_2: Version = .{ .major = 1, .minor = 2, .patch = 0 };
-    pub const v1_3: Version = .{ .major = 1, .minor = 3, .patch = 0 };
-    pub const v1_4: Version = .{ .major = 1, .minor = 4, .patch = 0 };
-};
-
-const portability_instance_extensions = [_][:0]const u8{
-    "VK_KHR_portability_enumeration",
-};
-const portability_device_extensions = [_][:0]const u8{
-    "VK_KHR_portability_subset",
-};
-
-pub const Portability = struct {
-    pub fn instanceExtensions() []const [:0]const u8 {
-        return if (platform == .metal) &portability_instance_extensions else &.{};
-    }
-
-    pub fn deviceExtensions() []const [:0]const u8 {
-        return if (platform == .metal) &portability_device_extensions else &.{};
-    }
-
-    pub fn instanceFlags() InstanceCreateFlags {
-        return if (platform == .metal)
-            .init(&.{.enumerate_portability_khr})
-        else
-            .empty;
-    }
-};
-
-/// A fixed-capacity, allocation-free set of unique extension names.
-pub fn ExtensionSet(comptime capacity: usize) type {
-    if (capacity > name_count_max) {
-        @compileError("extension-set capacity exceeds vk-zig's supported name count");
-    }
-    return struct {
-        names: [capacity][:0]const u8 = undefined,
-        count: usize = 0,
-
-        const Set = @This();
-
-        pub fn append(set: *Set, name: [:0]const u8) Error!void {
-            if (set.contains(name)) return;
-            if (set.count == capacity) return error.CountOverflow;
-            set.names[set.count] = name;
-            set.count += 1;
-        }
-
-        pub fn appendAll(set: *Set, names: []const [:0]const u8) Error!void {
-            for (names) |name| try set.append(name);
-        }
-
-        /// Converts foreign sentinel pointers while copying only their borrowed views.
-        pub fn appendPointerNames(
-            set: *Set,
-            names: []const [*:0]const u8,
-        ) Error!void {
-            for (names) |name| try set.append(std.mem.span(name));
-        }
-
-        pub fn contains(set: *const Set, expected: []const u8) bool {
-            return containsName(set.slice(), expected);
-        }
-
-        pub fn slice(set: *const Set) []const [:0]const u8 {
-            return set.names[0..set.count];
-        }
-    };
-}
-
-/// Returns the bytes before the first NUL, or the entire bounded input when none exists.
-pub fn boundedCString(bytes: []const u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
-    return bytes[0..end];
-}
-
-/// Borrows the extension name from `property`; the view lives as long as `property`.
-pub fn extensionName(property: *const raw.VkExtensionProperties) []const u8 {
-    return boundedCString(&property.extensionName);
-}
-
-/// Borrows the layer name from `property`; the view lives as long as `property`.
-pub fn layerName(property: *const raw.VkLayerProperties) []const u8 {
-    return boundedCString(&property.layerName);
-}
-
-/// Borrows the description from `property`; the view lives as long as `property`.
-pub fn layerDescription(property: *const raw.VkLayerProperties) []const u8 {
-    return boundedCString(&property.description);
-}
-
-/// Borrows the device name from `property`; the view lives as long as `property`.
-pub fn physicalDeviceName(property: *const raw.VkPhysicalDeviceProperties) []const u8 {
-    return boundedCString(&property.deviceName);
-}
-
-pub fn supportsExtension(
-    properties: []const raw.VkExtensionProperties,
-    expected: []const u8,
-) bool {
-    for (properties) |*property| {
-        if (std.mem.eql(u8, extensionName(property), expected)) return true;
-    }
-    return false;
-}
-
-pub fn supportsLayer(properties: []const raw.VkLayerProperties, expected: []const u8) bool {
-    for (properties) |*property| {
-        if (std.mem.eql(u8, layerName(property), expected)) return true;
-    }
-    return false;
-}
-
-/// Resolves optional validation and debug tooling without coupling independent requests.
-pub const diagnostics = struct {
-    pub const Requests = struct {
-        validation: bool = false,
-        debug_messenger: bool = false,
-        gpu_labels: bool = false,
-    };
-
-    pub const Availability = struct {
-        validation_enabled: bool,
-        debug_utils_enabled: bool,
-        debug_messenger_enabled: bool,
-        gpu_labels_enabled: bool,
-    };
-
-    pub fn resolve(
-        requests: Requests,
-        validation_layer_available: bool,
-        debug_utils_available: bool,
-    ) Availability {
-        const validation_enabled = requests.validation and validation_layer_available;
-        const debug_utils_requested = requests.debug_messenger or requests.gpu_labels;
-        const debug_utils_enabled = debug_utils_requested and debug_utils_available;
-        return .{
-            .validation_enabled = validation_enabled,
-            .debug_utils_enabled = debug_utils_enabled,
-            .debug_messenger_enabled = requests.debug_messenger and debug_utils_enabled,
-            .gpu_labels_enabled = requests.gpu_labels and debug_utils_enabled,
-        };
-    }
-
-    pub fn detect(
-        requests: Requests,
-        available_layers: []const raw.VkLayerProperties,
-        available_extensions: []const raw.VkExtensionProperties,
-    ) Availability {
-        return resolve(
-            requests,
-            supportsLayer(available_layers, layer.khronos_validation.name),
-            supportsExtension(available_extensions, extension.ext_debug_utils.name),
-        );
-    }
-};
+pub const Portability = configuration.Portability;
+pub const ExtensionSet = registry.NameSet;
+pub const boundedCString = registry.boundedCString;
+pub const extensionName = registry.extensionName;
+pub const layerName = registry.layerName;
+pub const layerDescription = registry.layerDescription;
+pub const physicalDeviceName = registry.physicalDeviceName;
+pub const supportsExtension = registry.supportsExtension;
+pub const supportsLayer = registry.supportsLayer;
+pub const diagnostics = configuration.diagnostics;
 
 pub const Loader = struct {
     library: NativeLibrary,
@@ -777,7 +358,7 @@ pub const Entry = struct {
         var flags = options.flags;
         if (options.enumerate_portability) {
             if (platform != .metal) return error.PortabilityNotSupported;
-            const portability_extension = portability_instance_extensions[0];
+            const portability_extension = Portability.instanceExtensions()[0];
             if (!containsName(options.extensions, portability_extension)) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
                 extension_pointers[extension_count] = portability_extension.ptr;
@@ -797,7 +378,7 @@ pub const Entry = struct {
         };
         var debug_create_info: raw.VkDebugUtilsMessengerCreateInfoEXT = undefined;
         const instance_next: ?*const anyopaque = if (options.debug_messenger) |config| next: {
-            debug_create_info = config.createInfo(options.next);
+            debug_create_info = config.createInfoRaw(options.next);
             break :next @ptrCast(&debug_create_info);
         } else options.next;
         const create_info: raw.VkInstanceCreateInfo = .{
@@ -813,8 +394,7 @@ pub const Entry = struct {
         var instance = try entry.createInstanceRaw(&create_info, options.allocation_callbacks);
         errdefer instance.deinit();
         if (options.debug_messenger) |config| {
-            instance._debug_messenger = try ext.debug_utils.Messenger.initConfig(
-                &instance,
+            instance._debug_messenger = try instance.createDebugMessenger(
                 config,
                 options.allocation_callbacks,
             );
@@ -868,12 +448,12 @@ pub const InstanceOptions = struct {
     application_next: ?*const anyopaque = null,
     next: ?*const anyopaque = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
-    debug_messenger: ?ext.debug_utils.MessengerConfig = null,
+    debug_messenger: ?debug_utils.Config = null,
 };
 
 pub const Instance = struct {
     _handle: ?InstanceHandle,
-    _debug_messenger: ?ext.debug_utils.Messenger,
+    _debug_messenger: ?debug_utils.Messenger,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: InstanceDispatch,
 
@@ -888,6 +468,26 @@ pub const Instance = struct {
     pub fn debugMessengerActive(instance: *const Instance) bool {
         if (instance._handle == null) return false;
         return instance._debug_messenger != null;
+    }
+
+    pub fn createDebugMessenger(
+        instance: *const Instance,
+        config: debug_utils.Config,
+        allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    ) Error!debug_utils.Messenger {
+        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const create = (try instance.load(command.create_debug_utils_messenger_ext)) orelse {
+            return error.MissingCommand;
+        };
+        const destroy = (try instance.load(command.destroy_debug_utils_messenger_ext)) orelse {
+            return error.MissingCommand;
+        };
+        return debug_utils.createMessenger(
+            instance_handle,
+            allocation_callbacks,
+            .{ .create = create, .destroy = destroy },
+            config,
+        );
     }
 
     /// Returns the live raw handle for explicit FFI integration.
@@ -1007,1024 +607,55 @@ pub const Instance = struct {
 };
 
 /// An owned `VkSurfaceKHR`. This wrapper must be destroyed before its parent instance.
-pub const Surface = struct {
-    _handle: ?SurfaceHandle,
-    _instance_handle: InstanceHandle,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-    destroy_surface: CommandFunction(raw.PFN_vkDestroySurfaceKHR),
-
-    pub fn deinit(surface: *Surface) void {
-        const handle = surface._handle orelse return;
-        surface.destroy_surface(
-            surface._instance_handle,
-            handle,
-            surface.allocation_callbacks,
-        );
-        surface._handle = null;
-    }
-
-    /// Returns the live raw handle for explicit FFI integration.
-    pub fn rawHandle(surface: *const Surface) Error!raw.VkSurfaceKHR {
-        return surface._handle orelse error.InactiveObject;
-    }
-};
-
-/// A non-owning image whose lifetime is controlled by its swapchain.
-pub const SwapchainImage = struct {
-    _handle: ImageHandle,
-    _device_handle: DeviceHandle,
-    _swapchain_handle: SwapchainHandle,
-    index: SwapchainImageIndex,
-
-    /// Returns the valid raw image handle for explicit FFI integration.
-    pub fn rawHandle(image: SwapchainImage) raw.VkImage {
-        return image._handle;
-    }
-};
-
-pub const ImageViewOptions = struct {
-    image: *const SwapchainImage,
-    format: Format,
-    view_type: ImageViewType = ._2d,
-    components: ComponentMapping = .{},
-    subresource_range: ImageSubresourceRange,
-};
-
-/// An owned image view. Destroy it before its parent device and source image.
-pub const ImageView = struct {
-    _handle: ?ImageViewHandle,
-    _device_handle: DeviceHandle,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-    destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
-
-    pub fn deinit(view: *ImageView) void {
-        const handle = view._handle orelse return;
-        view.destroy_image_view(view._device_handle, handle, view.allocation_callbacks);
-        view._handle = null;
-    }
-
-    /// Returns the live raw handle for explicit FFI integration.
-    pub fn rawHandle(view: *const ImageView) Error!raw.VkImageView {
-        return view._handle orelse error.InactiveObject;
-    }
-};
-
-pub const SemaphoreKind = enum {
-    binary,
-    timeline,
-};
-
-pub const SemaphoreOptions = struct {
-    kind: SemaphoreKind = .binary,
-    initial_value: u64 = 0,
-};
-
-pub const TimelineWaitStatus = enum {
-    success,
-    timeout,
-};
-
-/// An owned binary or timeline semaphore.
-pub const Semaphore = struct {
-    _handle: ?SemaphoreHandle,
-    _device_handle: DeviceHandle,
-    kind: SemaphoreKind,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-    destroy_semaphore: CommandFunction(raw.PFN_vkDestroySemaphore),
-    get_counter_value: ?CommandFunction(raw.PFN_vkGetSemaphoreCounterValue),
-    wait_semaphores: ?CommandFunction(raw.PFN_vkWaitSemaphores),
-    signal_semaphore: ?CommandFunction(raw.PFN_vkSignalSemaphore),
-
-    pub fn deinit(semaphore: *Semaphore) void {
-        const handle = semaphore._handle orelse return;
-        semaphore.destroy_semaphore(
-            semaphore._device_handle,
-            handle,
-            semaphore.allocation_callbacks,
-        );
-        semaphore._handle = null;
-    }
-
-    /// Returns the live raw handle for explicit FFI integration.
-    pub fn rawHandle(semaphore: *const Semaphore) Error!raw.VkSemaphore {
-        return semaphore._handle orelse error.InactiveObject;
-    }
-
-    pub fn counterValue(semaphore: *const Semaphore) Error!u64 {
-        if (semaphore.kind != .timeline) return error.InvalidOptions;
-        const handle = semaphore._handle orelse return error.InactiveObject;
-        const get_counter_value = semaphore.get_counter_value orelse {
-            return error.MissingCommand;
-        };
-        var value: u64 = 0;
-        try checkSuccess(get_counter_value(semaphore._device_handle, handle, &value));
-        return value;
-    }
-
-    /// Host-signals a timeline semaphore. Values must increase monotonically.
-    pub fn signal(semaphore: *const Semaphore, value: u64) Error!void {
-        if (value <= try semaphore.counterValue()) return error.InvalidOptions;
-        const signal_semaphore = semaphore.signal_semaphore orelse {
-            return error.MissingCommand;
-        };
-        const signal_info: raw.VkSemaphoreSignalInfo = .{
-            .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
-            .semaphore = try semaphore.rawHandle(),
-            .value = value,
-        };
-        try checkSuccess(signal_semaphore(semaphore._device_handle, &signal_info));
-    }
-
-    pub fn wait(
-        semaphore: *const Semaphore,
-        value: u64,
-        timeout: Timeout,
-    ) Error!TimelineWaitStatus {
-        if (semaphore.kind != .timeline) return error.InvalidOptions;
-        const handle = semaphore._handle orelse return error.InactiveObject;
-        const wait_semaphores = semaphore.wait_semaphores orelse {
-            return error.MissingCommand;
-        };
-        const wait_info: raw.VkSemaphoreWaitInfo = .{
-            .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-            .semaphoreCount = 1,
-            .pSemaphores = @ptrCast(&handle),
-            .pValues = @ptrCast(&value),
-        };
-        const result = wait_semaphores(
-            semaphore._device_handle,
-            &wait_info,
-            timeout.toRaw(),
-        );
-        if (result == raw.VK_SUCCESS) return .success;
-        if (result == raw.VK_TIMEOUT) return .timeout;
-        try checkSuccess(result);
-        unreachable;
-    }
-};
-
-pub const FenceOptions = struct {
-    signaled: bool = false,
-};
-
-pub const FenceWaitStatus = enum {
-    success,
-    timeout,
-};
-
-pub const FenceStatus = enum {
-    signaled,
-    unsignaled,
-};
-
-pub const WaitMode = enum {
-    all,
-    any,
-};
-
-pub const TimelineSemaphoreWait = struct {
-    semaphore: *const Semaphore,
-    value: u64,
-};
-
-/// An owned fence with operation-specific wait and reset behavior.
-pub const Fence = struct {
-    _handle: ?FenceHandle,
-    _device_handle: DeviceHandle,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-    destroy_fence: CommandFunction(raw.PFN_vkDestroyFence),
-    get_fence_status: CommandFunction(raw.PFN_vkGetFenceStatus),
-    reset_fences: CommandFunction(raw.PFN_vkResetFences),
-    wait_for_fences: CommandFunction(raw.PFN_vkWaitForFences),
-
-    pub fn deinit(fence: *Fence) void {
-        const handle = fence._handle orelse return;
-        fence.destroy_fence(fence._device_handle, handle, fence.allocation_callbacks);
-        fence._handle = null;
-    }
-
-    pub fn reset(fence: *const Fence) Error!void {
-        const handle = fence._handle orelse return error.InactiveObject;
-        try checkSuccess(fence.reset_fences(fence._device_handle, 1, @ptrCast(&handle)));
-    }
-
-    pub fn status(fence: *const Fence) Error!FenceStatus {
-        const handle = fence._handle orelse return error.InactiveObject;
-        const result = fence.get_fence_status(fence._device_handle, handle);
-        if (result == raw.VK_SUCCESS) return .signaled;
-        if (result == raw.VK_NOT_READY) return .unsignaled;
-        try checkSuccess(result);
-        unreachable;
-    }
-
-    pub fn wait(fence: *const Fence, timeout: Timeout) Error!FenceWaitStatus {
-        const handle = fence._handle orelse return error.InactiveObject;
-        const result = fence.wait_for_fences(
-            fence._device_handle,
-            1,
-            @ptrCast(&handle),
-            raw.VK_TRUE,
-            timeout.toRaw(),
-        );
-        if (result == raw.VK_SUCCESS) return .success;
-        if (result == raw.VK_TIMEOUT) return .timeout;
-        try checkSuccess(result);
-        unreachable;
-    }
-
-    /// Returns the live raw handle for explicit FFI integration.
-    pub fn rawHandle(fence: *const Fence) Error!raw.VkFence {
-        return fence._handle orelse error.InactiveObject;
-    }
-};
-
-pub const CommandPoolOptions = struct {
-    family_index: QueueFamilyIndex,
-    flags: CommandPoolCreateFlags = .empty,
-};
-
-pub const CommandBufferOptions = struct {
-    level: CommandBufferLevel = .primary,
-};
-
-/// Inheritance for a secondary command buffer recorded outside a render pass.
-/// Render-pass and dynamic-rendering inheritance are added by their typed APIs.
-pub const SecondaryCommandBufferInheritance = struct {
-    occlusion_query_enable: bool = false,
-};
-
-pub const CommandBufferBeginOptions = struct {
-    flags: CommandBufferUsageFlags = .empty,
-    inheritance: ?SecondaryCommandBufferInheritance = null,
-};
-
-pub const ImageBarrierOptions = struct {
-    source_stage: PipelineStageFlags,
-    destination_stage: PipelineStageFlags,
-    source_access: AccessFlags = .empty,
-    destination_access: AccessFlags = .empty,
-    old_layout: ImageLayout,
-    new_layout: ImageLayout,
-    ownership: QueueFamilyOwnership = .ignored,
-    image: *const SwapchainImage,
-    subresource_range: ImageSubresourceRange,
-};
-
-pub const ClearColorImageOptions = struct {
-    image: *const SwapchainImage,
-    layout: ImageLayout,
-    color: ClearColor,
-    subresource_range: ImageSubresourceRange,
-};
-
-const CommandBufferState = enum {
-    initial,
-    recording,
-    executable,
-    pending,
-};
-
-/// A command buffer allocated from and owned by a command pool.
-pub const CommandBuffer = struct {
-    _handle: ?CommandBufferHandle,
-    _device_handle: DeviceHandle,
-    _pool: *CommandPool,
-    _pool_generation: u64,
-    level: CommandBufferLevel,
-    can_reset: bool,
-    state: CommandBufferState = .initial,
-    simultaneous_use: bool = false,
-    pending_submissions: usize = 0,
-    begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
-    end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
-    reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
-    cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
-    cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
-    cmd_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdBeginDebugUtilsLabelEXT),
-    cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
-    cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
-
-    fn liveHandle(buffer: *CommandBuffer) Error!CommandBufferHandle {
-        const handle = buffer._handle orelse return error.InactiveObject;
-        _ = buffer._pool._handle orelse return error.InactiveObject;
-        if (buffer._pool_generation != buffer._pool.generation) {
-            buffer._pool_generation = buffer._pool.generation;
-            buffer.state = .initial;
-            buffer.simultaneous_use = false;
-            buffer.pending_submissions = 0;
-        }
-        return handle;
-    }
-
-    pub fn deinit(buffer: *CommandBuffer) void {
-        const handle = buffer._handle orelse return;
-        const pool_handle = buffer._pool._handle orelse {
-            buffer._handle = null;
-            return;
-        };
-        if (buffer._pool_generation != buffer._pool.generation) {
-            buffer._pool_generation = buffer._pool.generation;
-            buffer.state = .initial;
-            buffer.pending_submissions = 0;
-        }
-        // Pending buffers cannot be freed; synchronize and call `markComplete` first.
-        if (buffer.state == .pending) return;
-        buffer._pool.free_command_buffers(
-            buffer._device_handle,
-            pool_handle,
-            1,
-            @ptrCast(&handle),
-        );
-        buffer._handle = null;
-    }
-
-    pub fn begin(buffer: *CommandBuffer, options: CommandBufferBeginOptions) Error!void {
-        const handle = try buffer.liveHandle();
-        if (buffer.state != .initial) return error.InvalidOptions;
-        if ((buffer.level == .secondary) != (options.inheritance != null)) {
-            return error.InvalidOptions;
-        }
-        var inheritance_info: raw.VkCommandBufferInheritanceInfo = .{
-            .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO,
-            .occlusionQueryEnable = if (options.inheritance) |inheritance|
-                if (inheritance.occlusion_query_enable) raw.VK_TRUE else raw.VK_FALSE
-            else
-                raw.VK_FALSE,
-        };
-        const begin_info: raw.VkCommandBufferBeginInfo = .{
-            .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .flags = options.flags.toRaw(),
-            .pInheritanceInfo = if (options.inheritance != null) &inheritance_info else null,
-        };
-        try checkSuccess(buffer.begin_command_buffer(handle, &begin_info));
-        buffer.state = .recording;
-        buffer.simultaneous_use = options.flags.contains(.simultaneous_use);
-    }
-
-    pub fn end(buffer: *CommandBuffer) Error!void {
-        const handle = try buffer.liveHandle();
-        if (buffer.state != .recording) return error.InvalidOptions;
-        try checkSuccess(buffer.end_command_buffer(handle));
-        buffer.state = .executable;
-    }
-
-    pub fn reset(buffer: *CommandBuffer, release_resources: bool) Error!void {
-        const handle = try buffer.liveHandle();
-        if (buffer.state == .recording or buffer.state == .pending) {
-            return error.InvalidOptions;
-        }
-        if (!buffer.can_reset) return error.InvalidOptions;
-        const flags: raw.VkCommandBufferResetFlags = if (release_resources)
-            @intCast(raw.VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT)
-        else
-            0;
-        try checkSuccess(buffer.reset_command_buffer(handle, flags));
-        buffer.state = .initial;
-        buffer.simultaneous_use = false;
-        buffer.pending_submissions = 0;
-    }
-
-    /// Marks a submitted buffer executable again after its completion is synchronized.
-    pub fn markComplete(buffer: *CommandBuffer) Error!void {
-        _ = try buffer.liveHandle();
-        if (buffer.state != .pending) return error.InvalidOptions;
-        std.debug.assert(buffer.pending_submissions > 0);
-        buffer.pending_submissions -= 1;
-        if (buffer.pending_submissions == 0) buffer.state = .executable;
-    }
-
-    pub fn imageBarrier(buffer: *CommandBuffer, options: ImageBarrierOptions) Error!void {
-        const handle = try buffer.liveHandle();
-        if (buffer.state != .recording) return error.InvalidOptions;
-        if (options.image._device_handle != buffer._device_handle) return error.InvalidHandle;
-        const barrier: raw.VkImageMemoryBarrier = .{
-            .sType = raw.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .srcAccessMask = options.source_access.toRaw(),
-            .dstAccessMask = options.destination_access.toRaw(),
-            .oldLayout = options.old_layout.toRaw(),
-            .newLayout = options.new_layout.toRaw(),
-            .srcQueueFamilyIndex = options.ownership.sourceRaw(),
-            .dstQueueFamilyIndex = options.ownership.destinationRaw(),
-            .image = options.image._handle,
-            .subresourceRange = options.subresource_range.toRaw(),
-        };
-        buffer.cmd_pipeline_barrier(
-            handle,
-            options.source_stage.toRaw(),
-            options.destination_stage.toRaw(),
-            0,
-            0,
-            null,
-            0,
-            null,
-            1,
-            &barrier,
-        );
-    }
-
-    pub fn clearColorImage(
-        buffer: *CommandBuffer,
-        options: ClearColorImageOptions,
-    ) Error!void {
-        const handle = try buffer.liveHandle();
-        if (buffer.state != .recording) return error.InvalidOptions;
-        if (options.image._device_handle != buffer._device_handle) return error.InvalidHandle;
-        const color = options.color.toRaw();
-        const subresource_range = options.subresource_range.toRaw();
-        buffer.cmd_clear_color_image(
-            handle,
-            options.image._handle,
-            options.layout.toRaw(),
-            &color,
-            1,
-            &subresource_range,
-        );
-    }
-
-    pub fn beginLabel(
-        buffer: *CommandBuffer,
-        options: ext.debug_utils.LabelOptions,
-    ) Error!CommandBufferLabelScope {
-        const handle = try buffer.liveHandle();
-        if (buffer.state != .recording) return error.InvalidOptions;
-        const begin_label = buffer.cmd_begin_debug_utils_label_ext orelse {
-            return error.MissingCommand;
-        };
-        const end_label = buffer.cmd_end_debug_utils_label_ext orelse {
-            return error.MissingCommand;
-        };
-        const label = options.createInfo();
-        begin_label(handle, &label);
-        return .{ .command_buffer = handle, .end_label = end_label };
-    }
-
-    pub fn insertLabel(
-        buffer: *CommandBuffer,
-        options: ext.debug_utils.LabelOptions,
-    ) Error!void {
-        const handle = try buffer.liveHandle();
-        if (buffer.state != .recording) return error.InvalidOptions;
-        const insert_label = buffer.cmd_insert_debug_utils_label_ext orelse {
-            return error.MissingCommand;
-        };
-        const label = options.createInfo();
-        insert_label(handle, &label);
-    }
-
-    /// Returns the valid raw handle for explicit FFI integration.
-    pub fn rawHandle(buffer: *CommandBuffer) Error!raw.VkCommandBuffer {
-        return buffer.liveHandle();
-    }
-};
-
-/// An idempotent command-buffer label scope.
-pub const CommandBufferLabelScope = struct {
-    command_buffer: CommandBufferHandle,
-    end_label: CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
-    active: bool = true,
-
-    pub fn end(scope: *CommandBufferLabelScope) void {
-        if (!scope.active) return;
-        scope.end_label(scope.command_buffer);
-        scope.active = false;
-    }
-
-    pub fn deinit(scope: *CommandBufferLabelScope) void {
-        scope.end();
-    }
-};
-
-/// An externally synchronized command pool. Do not move it while child buffers live.
-/// Allocated command buffers are invalid after `deinit`.
-pub const CommandPool = struct {
-    _handle: ?CommandPoolHandle,
-    _device_handle: DeviceHandle,
-    buffers_can_reset: bool,
-    generation: u64 = 0,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-    destroy_command_pool: CommandFunction(raw.PFN_vkDestroyCommandPool),
-    allocate_command_buffers: CommandFunction(raw.PFN_vkAllocateCommandBuffers),
-    free_command_buffers: CommandFunction(raw.PFN_vkFreeCommandBuffers),
-    reset_command_pool: CommandFunction(raw.PFN_vkResetCommandPool),
-    begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
-    end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
-    reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
-    cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
-    cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
-    cmd_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdBeginDebugUtilsLabelEXT),
-    cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
-    cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
-
-    pub fn deinit(pool: *CommandPool) void {
-        const handle = pool._handle orelse return;
-        pool.destroy_command_pool(pool._device_handle, handle, pool.allocation_callbacks);
-        pool._handle = null;
-        pool.generation +%= 1;
-    }
-
-    /// Resets every buffer allocated from this externally synchronized pool.
-    pub fn reset(pool: *CommandPool, release_resources: bool) Error!void {
-        const handle = pool._handle orelse return error.InactiveObject;
-        const flags: raw.VkCommandPoolResetFlags = if (release_resources)
-            @intCast(raw.VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT)
-        else
-            0;
-        try checkSuccess(pool.reset_command_pool(pool._device_handle, handle, flags));
-        pool.generation +%= 1;
-    }
-
-    pub fn allocateCommandBuffer(
-        pool: *CommandPool,
-        options: CommandBufferOptions,
-    ) Error!CommandBuffer {
-        const pool_handle = pool._handle orelse return error.InactiveObject;
-        const allocate_info: raw.VkCommandBufferAllocateInfo = .{
-            .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .commandPool = pool_handle,
-            .level = options.level.toRaw(),
-            .commandBufferCount = 1,
-        };
-        var handle: raw.VkCommandBuffer = null;
-        try checkSuccess(pool.allocate_command_buffers(
-            pool._device_handle,
-            &allocate_info,
-            &handle,
-        ));
-        return .{
-            ._handle = handle orelse return error.InvalidHandle,
-            ._device_handle = pool._device_handle,
-            ._pool = pool,
-            ._pool_generation = pool.generation,
-            .level = options.level,
-            .can_reset = pool.buffers_can_reset,
-            .begin_command_buffer = pool.begin_command_buffer,
-            .end_command_buffer = pool.end_command_buffer,
-            .reset_command_buffer = pool.reset_command_buffer,
-            .cmd_pipeline_barrier = pool.cmd_pipeline_barrier,
-            .cmd_clear_color_image = pool.cmd_clear_color_image,
-            .cmd_begin_debug_utils_label_ext = pool.cmd_begin_debug_utils_label_ext,
-            .cmd_end_debug_utils_label_ext = pool.cmd_end_debug_utils_label_ext,
-            .cmd_insert_debug_utils_label_ext = pool.cmd_insert_debug_utils_label_ext,
-        };
-    }
-
-    pub fn freeCommandBuffer(pool: *CommandPool, buffer: *CommandBuffer) Error!void {
-        const pool_handle = pool._handle orelse return error.InactiveObject;
-        const handle = buffer._handle orelse return;
-        if (buffer._pool != pool or buffer._device_handle != pool._device_handle) {
-            return error.InvalidHandle;
-        }
-        if (buffer.state == .pending) return error.InvalidOptions;
-        pool.free_command_buffers(
-            pool._device_handle,
-            pool_handle,
-            1,
-            @ptrCast(&handle),
-        );
-        buffer._handle = null;
-    }
-
-    /// Returns the live raw handle for explicit FFI integration.
-    pub fn rawHandle(pool: *const CommandPool) Error!raw.VkCommandPool {
-        return pool._handle orelse error.InactiveObject;
-    }
-};
-
-pub const SwapchainOptions = struct {
-    surface: *const Surface,
-    min_image_count: u32,
-    image_format: Format,
-    image_color_space: ColorSpace,
-    image_extent: Extent2D,
-    image_usage: ImageUsageFlags,
-    image_array_layers: u32 = 1,
-    queue_family_indices: []const QueueFamilyIndex = &.{},
-    pre_transform: SurfaceTransformBit = .identity,
-    composite_alpha: CompositeAlphaBit = .opaque_,
-    present_mode: PresentMode = .fifo,
-    clipped: bool = true,
-    old_swapchain: ?*const Swapchain = null,
-    flags: SwapchainCreateFlags = .empty,
-    next: ?*const anyopaque = null,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
-
-    pub fn validate(options: SwapchainOptions, device: *const Device) Error!void {
-        const device_handle = device._handle orelse return error.InactiveObject;
-        if (options.surface._instance_handle != device._instance_handle) return error.InvalidHandle;
-        _ = try options.surface.rawHandle();
-        if (options.min_image_count == 0 or options.image_array_layers == 0) {
-            return error.InvalidOptions;
-        }
-        if (options.image_extent.width == 0 or options.image_extent.height == 0) {
-            return error.InvalidOptions;
-        }
-        _ = try count32(options.queue_family_indices.len);
-        if (options.queue_family_indices.len > device_queue_count_max) {
-            return error.CountOverflow;
-        }
-        for (options.queue_family_indices, 0..) |family_index, index| {
-            for (options.queue_family_indices[0..index]) |previous_index| {
-                if (family_index == previous_index) return error.InvalidOptions;
-            }
-        }
-        if (options.old_swapchain) |old| {
-            if (old._device_handle != device_handle) return error.InvalidHandle;
-            _ = try old.rawHandle();
-        }
-    }
-};
-
-pub const AcquireOptions = struct {
-    timeout: Timeout = .infinite,
-    semaphore: ?*const Semaphore = null,
-    fence: ?*const Fence = null,
-};
-
-pub const AcquireResult = union(enum) {
-    success: SwapchainImageIndex,
-    suboptimal: SwapchainImageIndex,
-    timeout,
-    not_ready,
-    out_of_date,
-};
-
-pub const PresentOptions = struct {
-    swapchain: *const Swapchain,
-    image_index: SwapchainImageIndex,
-    wait_semaphores: []const *const Semaphore = &.{},
-    next: ?*const anyopaque = null,
-};
-
-pub const PresentStatus = enum {
-    success,
-    suboptimal,
-    out_of_date,
-};
-
-/// An owned `VkSwapchainKHR`. Destroy it before its parent device.
-pub const Swapchain = struct {
-    _handle: ?SwapchainHandle,
-    _device_handle: DeviceHandle,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-    destroy_swapchain: CommandFunction(raw.PFN_vkDestroySwapchainKHR),
-    get_swapchain_images: CommandFunction(raw.PFN_vkGetSwapchainImagesKHR),
-    acquire_next_image: CommandFunction(raw.PFN_vkAcquireNextImageKHR),
-
-    pub fn deinit(swapchain: *Swapchain) void {
-        const handle = swapchain._handle orelse return;
-        swapchain.destroy_swapchain(
-            swapchain._device_handle,
-            handle,
-            swapchain.allocation_callbacks,
-        );
-        swapchain._handle = null;
-    }
-
-    pub fn rawHandle(swapchain: *const Swapchain) Error!raw.VkSwapchainKHR {
-        return swapchain._handle orelse error.InactiveObject;
-    }
-
-    pub fn imageCount(swapchain: *const Swapchain) Error!u32 {
-        const handle = try swapchain.rawHandle();
-        var count: u32 = 0;
-        try checkSuccess(swapchain.get_swapchain_images(
-            swapchain._device_handle,
-            handle,
-            &count,
-            null,
-        ));
-        try validateEnumerationCount(count);
-        return count;
-    }
-
-    /// Returns non-owning images whose lifetime is controlled by the swapchain.
-    pub fn images(
-        swapchain: *const Swapchain,
-        gpa: std.mem.Allocator,
-    ) (Error || std.mem.Allocator.Error)![]SwapchainImage {
-        var images_buffer = try gpa.alloc(SwapchainImage, try swapchain.imageCount());
-        errdefer gpa.free(images_buffer);
-        for (0..enumeration_attempt_count_max) |_| {
-            const written = swapchain.imagesInto(images_buffer) catch |err| switch (err) {
-                error.BufferTooSmall => {
-                    const count = try nextEnumerationCapacity(
-                        try swapchain.imageCount(),
-                        images_buffer.len,
-                    );
-                    images_buffer = try gpa.realloc(images_buffer, count);
-                    continue;
-                },
-                else => |other| return other,
-            };
-            return gpa.realloc(images_buffer, written.len);
-        }
-        return error.EnumerationUnstable;
-    }
-
-    /// Writes borrowed swapchain images into caller-owned storage without allocation.
-    pub fn imagesInto(
-        swapchain: *const Swapchain,
-        storage: []SwapchainImage,
-    ) Error![]SwapchainImage {
-        if (storage.len > swapchain_image_count_max) return error.CountOverflow;
-        const handle = try swapchain.rawHandle();
-        const live_handle = handle orelse return error.InvalidHandle;
-        var raw_images: [swapchain_image_count_max]raw.VkImage = undefined;
-        var written: u32 = @intCast(storage.len);
-        const output: [*c]raw.VkImage = if (storage.len == 0) null else &raw_images;
-        const result = swapchain.get_swapchain_images(
-            swapchain._device_handle,
-            handle,
-            &written,
-            output,
-        );
-        if (result == raw.VK_INCOMPLETE) return error.BufferTooSmall;
-        try checkSuccess(result);
-        if (written > storage.len) return error.BufferTooSmall;
-        for (storage[0..written], raw_images[0..written], 0..) |*image, raw_image, index| {
-            image.* = .{
-                ._handle = raw_image orelse return error.InvalidHandle,
-                ._device_handle = swapchain._device_handle,
-                ._swapchain_handle = live_handle,
-                .index = .fromRaw(@intCast(index)),
-            };
-        }
-        return storage[0..written];
-    }
-
-    pub fn acquireNextImage(
-        swapchain: *const Swapchain,
-        options: AcquireOptions,
-    ) Error!AcquireResult {
-        if (options.semaphore == null and options.fence == null) return error.InvalidOptions;
-        const semaphore = if (options.semaphore) |semaphore| blk: {
-            if (semaphore._device_handle != swapchain._device_handle) return error.InvalidHandle;
-            if (semaphore.kind != .binary) return error.InvalidOptions;
-            break :blk try semaphore.rawHandle();
-        } else null;
-        const fence = if (options.fence) |fence| blk: {
-            if (fence._device_handle != swapchain._device_handle) return error.InvalidHandle;
-            break :blk try fence.rawHandle();
-        } else null;
-        var image_index: u32 = 0;
-        const result = swapchain.acquire_next_image(
-            swapchain._device_handle,
-            try swapchain.rawHandle(),
-            options.timeout.toRaw(),
-            semaphore,
-            fence,
-            &image_index,
-        );
-        if (result == raw.VK_SUCCESS) return .{ .success = .fromRaw(image_index) };
-        if (result == raw.VK_SUBOPTIMAL_KHR) return .{ .suboptimal = .fromRaw(image_index) };
-        if (result == raw.VK_TIMEOUT) return .timeout;
-        if (result == raw.VK_NOT_READY) return .not_ready;
-        if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
-        try checkSuccess(result);
-        unreachable;
-    }
-};
-
-pub const PhysicalDeviceLimits = struct {
-    max_image_dimension_2d: u32,
-    max_image_dimension_3d: u32,
-    max_image_dimension_cube: u32,
-    max_memory_allocation_count: u32,
-    max_sampler_allocation_count: u32,
-    buffer_image_granularity: u64,
-    sparse_address_space_size: u64,
-    max_bound_descriptor_sets: u32,
-    max_push_constants_size: u32,
-    max_compute_shared_memory_size: u32,
-    max_compute_work_group_count: [3]u32,
-    max_compute_work_group_invocations: u32,
-    max_compute_work_group_size: [3]u32,
-    max_sampler_anisotropy: f32,
-    max_viewports: u32,
-    max_viewport_dimensions: [2]u32,
-    viewport_bounds_range: [2]f32,
-    min_uniform_buffer_offset_alignment: u64,
-    min_storage_buffer_offset_alignment: u64,
-    non_coherent_atom_size: u64,
-    max_framebuffer_width: u32,
-    max_framebuffer_height: u32,
-    max_framebuffer_layers: u32,
-    max_color_attachments: u32,
-    timestamp_period_nanoseconds: f32,
-
-    pub fn fromRaw(value: *const raw.VkPhysicalDeviceLimits) PhysicalDeviceLimits {
-        return .{
-            .max_image_dimension_2d = value.maxImageDimension2D,
-            .max_image_dimension_3d = value.maxImageDimension3D,
-            .max_image_dimension_cube = value.maxImageDimensionCube,
-            .max_memory_allocation_count = value.maxMemoryAllocationCount,
-            .max_sampler_allocation_count = value.maxSamplerAllocationCount,
-            .buffer_image_granularity = value.bufferImageGranularity,
-            .sparse_address_space_size = value.sparseAddressSpaceSize,
-            .max_bound_descriptor_sets = value.maxBoundDescriptorSets,
-            .max_push_constants_size = value.maxPushConstantsSize,
-            .max_compute_shared_memory_size = value.maxComputeSharedMemorySize,
-            .max_compute_work_group_count = value.maxComputeWorkGroupCount,
-            .max_compute_work_group_invocations = value.maxComputeWorkGroupInvocations,
-            .max_compute_work_group_size = value.maxComputeWorkGroupSize,
-            .max_sampler_anisotropy = value.maxSamplerAnisotropy,
-            .max_viewports = value.maxViewports,
-            .max_viewport_dimensions = value.maxViewportDimensions,
-            .viewport_bounds_range = value.viewportBoundsRange,
-            .min_uniform_buffer_offset_alignment = value.minUniformBufferOffsetAlignment,
-            .min_storage_buffer_offset_alignment = value.minStorageBufferOffsetAlignment,
-            .non_coherent_atom_size = value.nonCoherentAtomSize,
-            .max_framebuffer_width = value.maxFramebufferWidth,
-            .max_framebuffer_height = value.maxFramebufferHeight,
-            .max_framebuffer_layers = value.maxFramebufferLayers,
-            .max_color_attachments = value.maxColorAttachments,
-            .timestamp_period_nanoseconds = value.timestampPeriod,
-        };
-    }
-};
-
-pub const SparseProperties = struct {
-    standard_2d_block_shape: bool,
-    standard_2d_multisample_block_shape: bool,
-    standard_3d_block_shape: bool,
-    aligned_mip_size: bool,
-    non_resident_strict: bool,
-
-    pub fn fromRaw(value: *const raw.VkPhysicalDeviceSparseProperties) SparseProperties {
-        return .{
-            .standard_2d_block_shape = value.residencyStandard2DBlockShape != raw.VK_FALSE,
-            .standard_2d_multisample_block_shape = value.residencyStandard2DMultisampleBlockShape != raw.VK_FALSE,
-            .standard_3d_block_shape = value.residencyStandard3DBlockShape != raw.VK_FALSE,
-            .aligned_mip_size = value.residencyAlignedMipSize != raw.VK_FALSE,
-            .non_resident_strict = value.residencyNonResidentStrict != raw.VK_FALSE,
-        };
-    }
-};
-
-pub const PhysicalDeviceProperties = struct {
-    api_version: Version,
-    driver_version_raw: u32,
-    vendor_id: u32,
-    device_id: u32,
-    device_type: PhysicalDeviceType,
-    device_name: [raw.VK_MAX_PHYSICAL_DEVICE_NAME_SIZE]u8,
-    pipeline_cache_uuid: [raw.VK_UUID_SIZE]u8,
-    limits: PhysicalDeviceLimits,
-    sparse: SparseProperties,
-
-    pub fn fromRaw(value: *const raw.VkPhysicalDeviceProperties) PhysicalDeviceProperties {
-        return .{
-            .api_version = .decode(value.apiVersion),
-            .driver_version_raw = value.driverVersion,
-            .vendor_id = value.vendorID,
-            .device_id = value.deviceID,
-            .device_type = .fromRaw(value.deviceType),
-            .device_name = value.deviceName,
-            .pipeline_cache_uuid = value.pipelineCacheUUID,
-            .limits = .fromRaw(&value.limits),
-            .sparse = .fromRaw(&value.sparseProperties),
-        };
-    }
-
-    pub fn name(properties: *const PhysicalDeviceProperties) []const u8 {
-        return boundedCString(&properties.device_name);
-    }
-
-    pub fn isDiscrete(properties: PhysicalDeviceProperties) bool {
-        return properties.device_type == .discrete_gpu;
-    }
-
-    pub fn supportsApiVersion(
-        properties: PhysicalDeviceProperties,
-        minimum: Version,
-    ) bool {
-        return properties.api_version.atLeast(minimum);
-    }
-};
-
-pub const FormatProperties = struct {
-    linear_tiling_features: FormatFeatureFlags,
-    optimal_tiling_features: FormatFeatureFlags,
-    buffer_features: FormatFeatureFlags,
-
-    pub fn fromRaw(value: raw.VkFormatProperties) FormatProperties {
-        return .{
-            .linear_tiling_features = .fromRaw(value.linearTilingFeatures),
-            .optimal_tiling_features = .fromRaw(value.optimalTilingFeatures),
-            .buffer_features = .fromRaw(value.bufferFeatures),
-        };
-    }
-};
-
-pub const ImageFormatOptions = struct {
-    format: Format,
-    image_type: ImageType,
-    tiling: ImageTiling,
-    usage: ImageUsageFlags,
-    flags: ImageCreateFlags = .empty,
-};
-
-pub const DrmFormatModifierQuery = struct {
-    modifier: u64,
-    queue_family_indices: []const QueueFamilyIndex = &.{},
-};
-
-pub const ImageFormatQueryOptions = struct {
-    format: Format,
-    image_type: ImageType,
-    tiling: ImageTiling,
-    usage: ImageUsageFlags,
-    flags: ImageCreateFlags = .empty,
-    external_memory_handle_type: ?ExternalMemoryHandleTypeBit = null,
-    drm_format_modifier: ?DrmFormatModifierQuery = null,
-};
-
-pub const ImageFormatProperties = struct {
-    extent_max: Extent3D,
-    mip_level_count_max: u32,
-    array_layer_count_max: u32,
-    sample_counts: SampleCountFlags,
-    resource_size_max: u64,
-
-    pub fn fromRaw(value: raw.VkImageFormatProperties) ImageFormatProperties {
-        return .{
-            .extent_max = .fromRaw(value.maxExtent),
-            .mip_level_count_max = value.maxMipLevels,
-            .array_layer_count_max = value.maxArrayLayers,
-            .sample_counts = .fromRaw(value.sampleCounts),
-            .resource_size_max = value.maxResourceSize,
-        };
-    }
-};
-
-pub const ExternalMemoryProperties = struct {
-    features: ExternalMemoryFeatureFlags,
-    export_from_imported_handle_types: ExternalMemoryHandleTypeFlags,
-    compatible_handle_types: ExternalMemoryHandleTypeFlags,
-
-    pub fn fromRaw(value: raw.VkExternalMemoryProperties) ExternalMemoryProperties {
-        return .{
-            .features = .fromRaw(value.externalMemoryFeatures),
-            .export_from_imported_handle_types = .fromRaw(value.exportFromImportedHandleTypes),
-            .compatible_handle_types = .fromRaw(value.compatibleHandleTypes),
-        };
-    }
-};
-
-pub const ImageFormatQueryResult = struct {
-    properties: ImageFormatProperties,
-    external_memory: ?ExternalMemoryProperties,
-};
-
-pub const DrmFormatModifierProperties = struct {
-    modifier: u64,
-    plane_count: u32,
-    tiling_features: FormatFeatureFlags,
-
-    pub fn fromRaw(value: raw.VkDrmFormatModifierPropertiesEXT) DrmFormatModifierProperties {
-        return .{
-            .modifier = value.drmFormatModifier,
-            .plane_count = value.drmFormatModifierPlaneCount,
-            .tiling_features = .fromRaw(value.drmFormatModifierTilingFeatures),
-        };
-    }
-};
-
-pub const SparseImageFormatOptions = struct {
-    format: Format,
-    image_type: ImageType,
-    sample_count: SampleCountBit,
-    usage: ImageUsageFlags,
-    tiling: ImageTiling,
-
-    fn toRaw(options: SparseImageFormatOptions) raw.VkPhysicalDeviceSparseImageFormatInfo2 {
-        return .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SPARSE_IMAGE_FORMAT_INFO_2,
-            .format = options.format.toRaw(),
-            .type = options.image_type.toRaw(),
-            .samples = options.sample_count.toRaw(),
-            .usage = options.usage.toRaw(),
-            .tiling = options.tiling.toRaw(),
-        };
-    }
-};
-
-pub const SparseImageFormatProperties = struct {
-    aspect_mask: ImageAspectFlags,
-    image_granularity: Extent3D,
-    flags: SparseImageFormatFlags,
-
-    pub fn fromRaw(value: raw.VkSparseImageFormatProperties) SparseImageFormatProperties {
-        return .{
-            .aspect_mask = .fromRaw(value.aspectMask),
-            .image_granularity = .fromRaw(value.imageGranularity),
-            .flags = .fromRaw(value.flags),
-        };
-    }
-};
-
-pub const sparse_image_format_property_count_max = 256;
-pub const drm_format_modifier_property_count_max = 256;
+pub const Surface = presentation.Surface;
+pub const SwapchainImage = images.SwapchainImage;
+pub const ImageViewOptions = images.ViewOptions;
+pub const ImageView = images.View;
+
+pub const SemaphoreKind = sync.SemaphoreKind;
+pub const SemaphoreOptions = sync.SemaphoreOptions;
+pub const TimelineWaitStatus = sync.TimelineWaitStatus;
+pub const Semaphore = sync.Semaphore;
+pub const FenceOptions = sync.FenceOptions;
+pub const FenceWaitStatus = sync.FenceWaitStatus;
+pub const FenceStatus = sync.FenceStatus;
+pub const WaitMode = sync.WaitMode;
+pub const TimelineSemaphoreWait = sync.TimelineSemaphoreWait;
+pub const Fence = sync.Fence;
+
+pub const CommandPoolOptions = commands.PoolOptions;
+pub const CommandBufferOptions = commands.Options;
+pub const SecondaryCommandBufferInheritance = commands.SecondaryInheritance;
+pub const CommandBufferBeginOptions = commands.BeginOptions;
+pub const ImageBarrierOptions = commands.ImageBarrierOptions;
+pub const ClearColorImageOptions = commands.ClearColorImageOptions;
+pub const CommandBuffer = commands.Buffer;
+pub const CommandBufferLabelScope = commands.LabelScope;
+pub const CommandPool = commands.Pool;
+
+pub const SwapchainOptions = presentation.Options;
+pub const AcquireOptions = presentation.AcquireOptions;
+pub const AcquireResult = presentation.AcquireResult;
+pub const PresentOptions = presentation.PresentOptions;
+pub const PresentStatus = presentation.PresentStatus;
+pub const Swapchain = presentation.Swapchain;
+
+pub const PhysicalDeviceLimits = physical_devices.Limits;
+pub const SparseProperties = physical_devices.SparseProperties;
+pub const PhysicalDeviceProperties = physical_devices.Properties;
+
+pub const FormatProperties = format_support.Properties;
+pub const ImageFormatOptions = format_support.ImageOptions;
+pub const DrmFormatModifierQuery = format_support.DrmModifierQuery;
+pub const ImageFormatQueryOptions = format_support.ImageQueryOptions;
+pub const ImageFormatProperties = format_support.ImageProperties;
+pub const ExternalMemoryProperties = format_support.ExternalMemoryProperties;
+pub const ImageFormatQueryResult = format_support.ImageQueryResult;
+pub const DrmFormatModifierProperties = format_support.DrmModifierProperties;
+pub const SparseImageFormatOptions = format_support.SparseImageOptions;
+pub const SparseImageFormatProperties = format_support.SparseImageProperties;
+pub const sparse_image_format_property_count_max = format_support.sparse_image_property_count_max;
+pub const drm_format_modifier_property_count_max = format_support.drm_modifier_property_count_max;
 
 pub const PhysicalDevice = struct {
     _handle: PhysicalDeviceHandle,
@@ -2311,18 +942,18 @@ pub const PhysicalDevice = struct {
 
     /// Returns an owned typed snapshot whose slices borrow from the returned value.
     pub fn memoryProperties(device: *const PhysicalDevice) Error!MemoryProperties {
-        var memory: MemoryProperties = undefined;
-        try device.memoryPropertiesInto(&memory);
-        return memory;
+        var snapshot: MemoryProperties = undefined;
+        try device.memoryPropertiesInto(&snapshot);
+        return snapshot;
     }
 
     /// Initializes caller-owned typed storage without returning a large intermediate value.
     pub fn memoryPropertiesInto(
         device: *const PhysicalDevice,
-        memory: *MemoryProperties,
+        output: *MemoryProperties,
     ) Error!void {
         const raw_properties = device.memoryPropertiesRaw();
-        try memory.initFromRaw(&raw_properties);
+        try output.initFromRaw(&raw_properties);
     }
 
     pub fn queueFamilyProperties(
@@ -2419,13 +1050,13 @@ pub const PhysicalDevice = struct {
             device.dispatch.get_physical_device_surface_capabilities_khr orelse {
                 return error.MissingCommand;
             };
-        var capabilities: raw.VkSurfaceCapabilitiesKHR = .{};
+        var surface_capabilities: raw.VkSurfaceCapabilitiesKHR = .{};
         try checkSuccess(get_capabilities(
             device._handle,
             try surface.rawHandle(),
-            &capabilities,
+            &surface_capabilities,
         ));
-        return .fromRaw(capabilities);
+        return .fromRaw(surface_capabilities);
     }
 
     pub fn surfaceFormatCount(
@@ -2533,8 +1164,8 @@ pub const PhysicalDevice = struct {
         device: *const PhysicalDevice,
         options: MemoryTypeOptions,
     ) Error!MemoryTypeIndex {
-        const memory = try device.memoryProperties();
-        return memory.findType(options);
+        const snapshot = try device.memoryProperties();
+        return snapshot.findType(options);
     }
 
     pub fn createDevice(
@@ -2559,7 +1190,7 @@ pub const PhysicalDevice = struct {
         var extension_count = try fillNamePointers(options.extensions, &extension_pointers);
         if (options.enable_portability_subset) {
             if (platform != .metal) return error.PortabilityNotSupported;
-            const portability_extension = portability_device_extensions[0];
+            const portability_extension = Portability.deviceExtensions()[0];
             if (!containsName(options.extensions, portability_extension)) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
                 extension_pointers[extension_count] = portability_extension.ptr;
@@ -2617,245 +1248,20 @@ pub const PhysicalDevice = struct {
     }
 };
 
-pub const QueueCapability = enum {
-    graphics,
-    compute,
-    transfer,
-    sparse_binding,
-    protected,
-};
+pub const QueueCapability = physical_devices.QueueCapability;
+pub const QueueFamily = physical_devices.QueueFamily;
+pub const QueueFamilySelectionOptions = physical_devices.QueueSelectionOptions;
+pub const selectQueueFamily = physical_devices.selectQueueFamily;
+pub const selectQueueFamilyForSurface = physical_devices.selectQueueFamilyForSurface;
 
-pub const QueueFamily = struct {
-    index: QueueFamilyIndex,
-    flags: QueueFlags,
-    queue_count: u32,
-    timestamp_valid_bits: u32,
-    minimum_image_transfer_granularity: Extent3D,
-
-    pub fn queueCount(family: QueueFamily) u32 {
-        return family.queue_count;
-    }
-
-    pub fn supports(family: QueueFamily, capability: QueueCapability) bool {
-        if (family.queue_count == 0) return false;
-        const bit: QueueBit = switch (capability) {
-            .graphics => .graphics,
-            .compute => .compute,
-            .transfer => .transfer,
-            .sparse_binding => .sparse_binding,
-            .protected => .protected,
-        };
-        return family.flags.contains(bit);
-    }
-
-    pub fn presentationSupport(
-        family: QueueFamily,
-        device: *const PhysicalDevice,
-        surface: *const Surface,
-    ) Error!bool {
-        return device.surfaceSupport(surface, family.index);
-    }
-};
-
-pub const QueueFamilySelectionOptions = struct {
-    required: QueueFlags,
-    preferred: QueueFlags = .empty,
-};
-
-pub fn selectQueueFamily(
-    families: []const QueueFamily,
-    options: QueueFamilySelectionOptions,
-) Error!QueueFamilyIndex {
-    var selected: ?QueueFamilyIndex = null;
-    var selected_score: u32 = 0;
-    for (families) |family| {
-        if (family.queue_count == 0) continue;
-        if (!family.flags.containsAll(options.required)) continue;
-        const score: u32 = @intCast(@popCount(
-            family.flags.toRaw() & options.preferred.toRaw(),
-        ));
-        if (selected == null or score > selected_score) {
-            selected = family.index;
-            selected_score = score;
-        }
-    }
-    return selected orelse error.QueueFamilyNotFound;
-}
-
-pub fn selectQueueFamilyForSurface(
-    device: *const PhysicalDevice,
-    families: []const QueueFamily,
-    surface: *const Surface,
-    options: QueueFamilySelectionOptions,
-) Error!QueueFamilyIndex {
-    var selected: ?QueueFamilyIndex = null;
-    var selected_score: u32 = 0;
-    for (families) |family| {
-        if (family.queue_count == 0) continue;
-        if (!family.flags.containsAll(options.required)) continue;
-        if (!try family.presentationSupport(device, surface)) continue;
-        const score: u32 = @intCast(@popCount(
-            family.flags.toRaw() & options.preferred.toRaw(),
-        ));
-        if (selected == null or score > selected_score) {
-            selected = family.index;
-            selected_score = score;
-        }
-    }
-    return selected orelse error.QueueFamilyNotFound;
-}
-
-pub const MemoryTypeOptions = struct {
-    type_bits: u32,
-    required_flags: MemoryPropertyFlags,
-    preferred_flags: MemoryPropertyFlags = .empty,
-};
-
-pub const MemoryType = struct {
-    index: MemoryTypeIndex,
-    heap_index: MemoryHeapIndex,
-    flags: MemoryPropertyFlags,
-
-    pub fn supports(memory_type: MemoryType, required_flags: MemoryPropertyFlags) bool {
-        return memory_type.flags.containsAll(required_flags);
-    }
-};
-
-pub const MemoryHeap = struct {
-    index: MemoryHeapIndex,
-    size_bytes: u64,
-    flags: MemoryHeapFlags,
-
-    pub fn isDeviceLocal(heap: MemoryHeap) bool {
-        return heap.flags.contains(.device_local);
-    }
-};
-
-/// An owned typed snapshot of a physical device's bounded memory properties.
-/// Slices returned by `types` and `heaps` borrow from this value.
-pub const MemoryProperties = struct {
-    _memory_types: [memory_type_count_max]MemoryType,
-    _memory_heaps: [memory_heap_count_max]MemoryHeap,
-    _memory_type_count: u32,
-    _memory_heap_count: u32,
-
-    pub fn fromRaw(
-        raw_properties: *const raw.VkPhysicalDeviceMemoryProperties,
-    ) Error!MemoryProperties {
-        var properties: MemoryProperties = undefined;
-        try properties.initFromRaw(raw_properties);
-        return properties;
-    }
-
-    pub fn initFromRaw(
-        properties: *MemoryProperties,
-        raw_properties: *const raw.VkPhysicalDeviceMemoryProperties,
-    ) Error!void {
-        if (raw_properties.memoryTypeCount > memory_type_count_max) {
-            return error.InvalidProperties;
-        }
-        if (raw_properties.memoryHeapCount > memory_heap_count_max) {
-            return error.InvalidProperties;
-        }
-
-        properties._memory_type_count = raw_properties.memoryTypeCount;
-        properties._memory_heap_count = raw_properties.memoryHeapCount;
-        for (
-            raw_properties.memoryHeaps[0..raw_properties.memoryHeapCount],
-            properties._memory_heaps[0..raw_properties.memoryHeapCount],
-            0..,
-        ) |raw_heap, *memory_heap, index| {
-            memory_heap.* = .{
-                .index = .fromRaw(@intCast(index)),
-                .size_bytes = raw_heap.size,
-                .flags = .fromRaw(raw_heap.flags),
-            };
-        }
-        for (
-            raw_properties.memoryTypes[0..raw_properties.memoryTypeCount],
-            properties._memory_types[0..raw_properties.memoryTypeCount],
-            0..,
-        ) |raw_type, *memory_type, index| {
-            if (raw_type.heapIndex >= raw_properties.memoryHeapCount) {
-                return error.InvalidProperties;
-            }
-            memory_type.* = .{
-                .index = .fromRaw(@intCast(index)),
-                .heap_index = .fromRaw(raw_type.heapIndex),
-                .flags = .fromRaw(raw_type.propertyFlags),
-            };
-        }
-    }
-
-    pub fn types(properties: *const MemoryProperties) []const MemoryType {
-        return properties._memory_types[0..properties._memory_type_count];
-    }
-
-    pub fn heaps(properties: *const MemoryProperties) []const MemoryHeap {
-        return properties._memory_heaps[0..properties._memory_heap_count];
-    }
-
-    pub fn heap(
-        properties: *const MemoryProperties,
-        index: MemoryHeapIndex,
-    ) ?*const MemoryHeap {
-        const offset: usize = index.toRaw();
-        if (offset >= properties._memory_heap_count) return null;
-        return &properties._memory_heaps[offset];
-    }
-
-    pub fn deviceLocalBytes(properties: *const MemoryProperties) Error!u64 {
-        var size_bytes_total: u64 = 0;
-        for (properties.heaps()) |memory_heap| {
-            if (!memory_heap.isDeviceLocal()) continue;
-            size_bytes_total = std.math.add(u64, size_bytes_total, memory_heap.size_bytes) catch {
-                return error.SizeOverflow;
-            };
-        }
-        return size_bytes_total;
-    }
-
-    /// Selects a compatible type, preferring the candidate with the most preferred flags.
-    pub fn findType(
-        properties: *const MemoryProperties,
-        options: MemoryTypeOptions,
-    ) Error!MemoryTypeIndex {
-        var best_index: ?MemoryTypeIndex = null;
-        var best_score: u32 = 0;
-        for (properties.types()) |memory_type| {
-            const index_u32 = memory_type.index.toRaw();
-            const type_bit = @as(u32, 1) << @intCast(index_u32);
-            if ((options.type_bits & type_bit) == 0) continue;
-            if (!memory_type.supports(options.required_flags)) continue;
-
-            const score: u32 = @intCast(@popCount(
-                memory_type.flags.toRaw() & options.preferred_flags.toRaw(),
-            ));
-            if (best_index == null or score > best_score) {
-                best_index = memory_type.index;
-                best_score = score;
-            }
-        }
-        return best_index orelse error.MemoryTypeNotFound;
-    }
-};
-
-/// Selects a compatible type from typed memory properties.
-pub fn selectMemoryTypeIndex(
-    properties: *const MemoryProperties,
-    options: MemoryTypeOptions,
-) Error!MemoryTypeIndex {
-    return properties.findType(options);
-}
-
-/// Performs typed selection from a raw snapshot for advanced diagnostics and interop.
-pub fn selectMemoryTypeIndexRaw(
-    raw_properties: *const raw.VkPhysicalDeviceMemoryProperties,
-    options: MemoryTypeOptions,
-) Error!MemoryTypeIndex {
-    const properties = try MemoryProperties.fromRaw(raw_properties);
-    return properties.findType(options);
-}
+pub const MemoryTypeOptions = memory.TypeOptions;
+pub const MemoryType = memory.Type;
+pub const MemoryHeap = memory.Heap;
+pub const MemoryProperties = memory.Properties;
+pub const MemoryAllocationOptions = memory.AllocationOptions;
+pub const MemoryAllocation = memory.Allocation;
+pub const selectMemoryTypeIndex = memory.selectTypeIndex;
+pub const selectMemoryTypeIndexRaw = memory.selectTypeIndexRaw;
 
 pub const DeviceQueueOptions = struct {
     family_index: QueueFamilyIndex,
@@ -2913,6 +1319,11 @@ pub const Device = struct {
     /// Returns the live raw handle for explicit FFI integration.
     pub fn rawHandle(device: *const Device) Error!raw.VkDevice {
         return device._handle orelse error.InactiveObject;
+    }
+
+    pub fn debugObject(device: *const Device) Error!debug_utils.Object {
+        const handle = device._handle orelse return error.InactiveObject;
+        return .forDevice(.device, handle, handle);
     }
 
     pub fn waitIdle(device: *const Device) Error!void {
@@ -2978,22 +1389,114 @@ pub const Device = struct {
 
     pub fn setObjectName(
         device: *const Device,
-        object: ext.debug_utils.Object,
+        object: anytype,
         name: [:0]const u8,
     ) Error!void {
         const device_handle = device._handle orelse return error.InactiveObject;
         const set_name = device.dispatch.set_debug_utils_object_name_ext orelse {
             return error.MissingCommand;
         };
-        try object.validateParent(device);
-        const object_info = try object.info();
+        const object_info = try object.debugObject();
+        try object_info.validateParent(device_handle, device._instance_handle);
         const name_info: raw.VkDebugUtilsObjectNameInfoEXT = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
-            .objectType = object_info.object_type,
+            .objectType = object_info.object_type.toRaw(),
             .objectHandle = object_info.handle,
             .pObjectName = name.ptr,
         };
         try checkSuccess(set_name(device_handle, &name_info));
+    }
+
+    pub fn createBuffer(
+        device: *const Device,
+        options: buffers.Options,
+    ) Error!buffers.Buffer {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        return buffers.create(
+            device_handle,
+            device.allocation_callbacks,
+            .{
+                .create_buffer = device.dispatch.create_buffer,
+                .destroy_buffer = device.dispatch.destroy_buffer,
+                .get_buffer_memory_requirements = device.dispatch.get_buffer_memory_requirements,
+                .get_buffer_memory_requirements2 = device.dispatch.get_buffer_memory_requirements2,
+                .get_buffer_device_address = device.dispatch.get_buffer_device_address,
+                .get_buffer_opaque_capture_address = device.dispatch.get_buffer_opaque_capture_address,
+                .create_buffer_view = device.dispatch.create_buffer_view,
+                .destroy_buffer_view = device.dispatch.destroy_buffer_view,
+                .bind_buffer_memory = device.dispatch.bind_buffer_memory,
+                .bind_buffer_memory2 = device.dispatch.bind_buffer_memory2,
+            },
+            options,
+        );
+    }
+
+    pub fn createBufferView(
+        device: *const Device,
+        buffer: *const buffers.Buffer,
+        options: buffers.ViewOptions,
+    ) Error!buffers.View {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        if (buffer._device_handle != device_handle) return error.InvalidHandle;
+        return buffers.createView(buffer, options);
+    }
+
+    pub fn allocateMemory(
+        device: *const Device,
+        options: memory.AllocationOptions,
+    ) Error!memory.Allocation {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        return memory.allocate(
+            device_handle,
+            device.allocation_callbacks,
+            .{
+                .allocate = device.dispatch.allocate_memory,
+                .free = device.dispatch.free_memory,
+                .get_opaque_capture_address = device.dispatch.get_device_memory_opaque_capture_address,
+            },
+            options,
+        );
+    }
+
+    pub fn createAllocatedBuffer(
+        device: *const Device,
+        options: buffers.AllocatedOptions,
+    ) Error!buffers.Allocated {
+        var buffer = try device.createBuffer(options.buffer);
+        errdefer buffer.deinit();
+        const requirements = try buffer.memoryRequirements();
+        var allocation = try device.allocateMemory(.{
+            .size = requirements.size,
+            .memory_type_index = options.memory.memory_type_index,
+            .device_address = options.memory.device_address,
+            .opaque_capture_address = options.memory.opaque_capture_address,
+        });
+        errdefer allocation.deinit();
+        try buffer.bindMemory(&allocation, .zero);
+        return .{ .buffer = buffer, .memory = allocation };
+    }
+
+    pub fn createAllocatedBufferForProperties(
+        device: *const Device,
+        options: buffers.AutoAllocatedOptions,
+    ) Error!buffers.Allocated {
+        var buffer = try device.createBuffer(options.buffer);
+        errdefer buffer.deinit();
+        const requirements = try buffer.memoryRequirements();
+        const memory_type_index = try options.memory_properties.findType(.{
+            .type_bits = requirements.memory_type_bits,
+            .required_flags = options.required_memory_flags,
+            .preferred_flags = options.preferred_memory_flags,
+        });
+        var allocation = try device.allocateMemory(.{
+            .size = requirements.size,
+            .memory_type_index = memory_type_index,
+            .device_address = options.device_address,
+            .opaque_capture_address = options.opaque_capture_address,
+        });
+        errdefer allocation.deinit();
+        try buffer.bindMemory(&allocation, .zero);
+        return .{ .buffer = buffer, .memory = allocation };
     }
 
     pub fn createImageView(
@@ -3001,39 +1504,13 @@ pub const Device = struct {
         options: ImageViewOptions,
     ) Error!ImageView {
         const device_handle = device._handle orelse return error.InactiveObject;
-        if (options.image._device_handle != device_handle) return error.InvalidHandle;
-        const create_info: raw.VkImageViewCreateInfo = .{
-            .sType = raw.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = options.image._handle,
-            .viewType = options.view_type.toRaw(),
-            .format = options.format.toRaw(),
-            .components = options.components.toRaw(),
-            .subresourceRange = options.subresource_range.toRaw(),
-        };
-        var handle: raw.VkImageView = null;
-        const result = device.dispatch.create_image_view(
+        return images.createView(
             device_handle,
-            &create_info,
             device.allocation_callbacks,
-            &handle,
+            device.dispatch.create_image_view,
+            device.dispatch.destroy_image_view,
+            options,
         );
-        if (result != raw.VK_SUCCESS) {
-            if (handle) |provisional_handle| {
-                device.dispatch.destroy_image_view(
-                    device_handle,
-                    provisional_handle,
-                    device.allocation_callbacks,
-                );
-            }
-            try checkSuccess(result);
-            unreachable;
-        }
-        return .{
-            ._handle = handle orelse return error.InvalidHandle,
-            ._device_handle = device_handle,
-            .allocation_callbacks = device.allocation_callbacks,
-            .destroy_image_view = device.dispatch.destroy_image_view,
-        };
     }
 
     pub fn createSemaphore(
@@ -3255,7 +1732,7 @@ pub const Device = struct {
         options: SwapchainOptions,
     ) Error!Swapchain {
         const device_handle = device._handle orelse return error.InactiveObject;
-        try options.validate(device);
+        try options.validate(device_handle, device._instance_handle);
         const create_swapchain = device.dispatch.create_swapchain_khr orelse {
             return error.MissingCommand;
         };
@@ -3334,14 +1811,14 @@ pub const Device = struct {
     pub fn beginCommandBufferLabelRaw(
         device: *const Device,
         command_buffer: raw.VkCommandBuffer,
-        options: ext.debug_utils.LabelOptions,
+        options: debug_utils.LabelOptions,
     ) Error!void {
         _ = device._handle orelse return error.InactiveObject;
         const begin_label = device.dispatch.cmd_begin_debug_utils_label_ext orelse {
             return error.MissingCommand;
         };
         const live_command_buffer = command_buffer orelse return error.InvalidHandle;
-        const label = options.createInfo();
+        const label = options.toRaw();
         begin_label(live_command_buffer, &label);
     }
 
@@ -3359,969 +1836,26 @@ pub const Device = struct {
     pub fn insertCommandBufferLabelRaw(
         device: *const Device,
         command_buffer: raw.VkCommandBuffer,
-        options: ext.debug_utils.LabelOptions,
+        options: debug_utils.LabelOptions,
     ) Error!void {
         _ = device._handle orelse return error.InactiveObject;
         const insert_label = device.dispatch.cmd_insert_debug_utils_label_ext orelse {
             return error.MissingCommand;
         };
         const live_command_buffer = command_buffer orelse return error.InvalidHandle;
-        const label = options.createInfo();
+        const label = options.toRaw();
         insert_label(live_command_buffer, &label);
     }
 };
 
-pub const SemaphoreWait = struct {
-    semaphore: *const Semaphore,
-    stage: PipelineStageFlags,
-};
-
-pub const SubmitOptions = struct {
-    waits: []const SemaphoreWait = &.{},
-    command_buffers: []const *CommandBuffer = &.{},
-    signals: []const *const Semaphore = &.{},
-    fence: ?*const Fence = null,
-};
-
-pub const SemaphoreSubmit = struct {
-    semaphore: *const Semaphore,
-    value: u64 = 0,
-    stage: PipelineStage2Flags = .empty,
-    device_index: u32 = 0,
-};
-
-pub const CommandBufferSubmit = struct {
-    command_buffer: *CommandBuffer,
-    device_mask: u32 = 1,
-};
-
-pub const Submit2Options = struct {
-    flags: SubmitFlags = .empty,
-    performance_query_pass: ?u32 = null,
-    waits: []const SemaphoreSubmit = &.{},
-    command_buffers: []const CommandBufferSubmit = &.{},
-    signals: []const SemaphoreSubmit = &.{},
-};
-
-pub const Submit2BatchOptions = struct {
-    submits: []const Submit2Options = &.{},
-    fence: ?*const Fence = null,
-};
-
-pub const QueueLabelScope = struct {
-    queue: QueueHandle,
-    end_label: CommandFunction(raw.PFN_vkQueueEndDebugUtilsLabelEXT),
-    active: bool = true,
-
-    pub fn end(scope: *QueueLabelScope) void {
-        if (!scope.active) return;
-        scope.end_label(scope.queue);
-        scope.active = false;
-    }
-
-    pub fn deinit(scope: *QueueLabelScope) void {
-        scope.end();
-    }
-};
-
-pub const Queue = struct {
-    _handle: QueueHandle,
-    _device_handle: DeviceHandle,
-    queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
-    queue_submit2: ?CommandFunction(raw.PFN_vkQueueSubmit2),
-    queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
-    queue_present_khr: ?CommandFunction(raw.PFN_vkQueuePresentKHR),
-    queue_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueBeginDebugUtilsLabelEXT),
-    queue_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueEndDebugUtilsLabelEXT),
-    queue_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueInsertDebugUtilsLabelEXT),
-
-    /// Returns the valid raw queue handle for explicit FFI integration.
-    pub fn rawHandle(queue: *const Queue) raw.VkQueue {
-        return queue._handle;
-    }
-
-    pub fn submit(
-        queue: *const Queue,
-        options: SubmitOptions,
-    ) Error!void {
-        if (options.waits.len > submission_item_count_max or
-            options.command_buffers.len > submission_item_count_max or
-            options.signals.len > submission_item_count_max)
-        {
-            return error.CountOverflow;
-        }
-
-        var wait_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
-        var wait_stages: [submission_item_count_max]raw.VkPipelineStageFlags = undefined;
-        for (options.waits, wait_handles[0..options.waits.len], wait_stages[0..options.waits.len]) |wait, *handle, *stage| {
-            if (wait.semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
-            if (wait.semaphore.kind != .binary) return error.InvalidOptions;
-            handle.* = try wait.semaphore.rawHandle();
-            stage.* = wait.stage.toRaw();
-        }
-
-        var command_handles: [submission_item_count_max]raw.VkCommandBuffer = undefined;
-        for (options.command_buffers, command_handles[0..options.command_buffers.len]) |command_buffer, *handle| {
-            if (command_buffer._device_handle != queue._device_handle) return error.InvalidHandle;
-            handle.* = try command_buffer.rawHandle();
-            if (command_buffer.state != .executable and
-                !(command_buffer.state == .pending and command_buffer.simultaneous_use))
-            {
-                return error.InvalidOptions;
-            }
-            if (command_buffer.pending_submissions == std.math.maxInt(usize)) {
-                return error.CountOverflow;
-            }
-        }
-
-        var signal_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
-        for (options.signals, signal_handles[0..options.signals.len]) |semaphore, *handle| {
-            if (semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
-            if (semaphore.kind != .binary) return error.InvalidOptions;
-            handle.* = try semaphore.rawHandle();
-        }
-
-        const fence_handle = if (options.fence) |fence| blk: {
-            if (fence._device_handle != queue._device_handle) return error.InvalidHandle;
-            break :blk try fence.rawHandle();
-        } else null;
-        const submit_info: raw.VkSubmitInfo = .{
-            .sType = raw.VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .waitSemaphoreCount = @intCast(options.waits.len),
-            .pWaitSemaphores = if (options.waits.len == 0) null else wait_handles[0..options.waits.len].ptr,
-            .pWaitDstStageMask = if (options.waits.len == 0) null else wait_stages[0..options.waits.len].ptr,
-            .commandBufferCount = @intCast(options.command_buffers.len),
-            .pCommandBuffers = if (options.command_buffers.len == 0) null else command_handles[0..options.command_buffers.len].ptr,
-            .signalSemaphoreCount = @intCast(options.signals.len),
-            .pSignalSemaphores = if (options.signals.len == 0) null else signal_handles[0..options.signals.len].ptr,
-        };
-        try checkSuccess(queue.queue_submit(queue._handle, 1, &submit_info, fence_handle));
-        for (options.command_buffers) |command_buffer| {
-            command_buffer.state = .pending;
-            command_buffer.pending_submissions += 1;
-        }
-    }
-
-    pub fn submit2(queue: *const Queue, options: Submit2BatchOptions) Error!void {
-        if (options.submits.len > submission_batch_count_max) return error.CountOverflow;
-        const fence_handle = if (options.fence) |fence| blk: {
-            if (fence._device_handle != queue._device_handle) return error.InvalidHandle;
-            break :blk try fence.rawHandle();
-        } else null;
-        if (options.submits.len == 0 and fence_handle == null) return;
-        const queue_submit2 = queue.queue_submit2 orelse return error.MissingCommand;
-
-        var wait_infos: [submission_batch_count_max][submission_item_count_max]raw.VkSemaphoreSubmitInfo = undefined;
-        var command_infos: [submission_batch_count_max][submission_item_count_max]raw.VkCommandBufferSubmitInfo = undefined;
-        var signal_infos: [submission_batch_count_max][submission_item_count_max]raw.VkSemaphoreSubmitInfo = undefined;
-        var performance_query_infos: [submission_batch_count_max]raw.VkPerformanceQuerySubmitInfoKHR = undefined;
-        var submit_infos: [submission_batch_count_max]raw.VkSubmitInfo2 = undefined;
-
-        for (options.submits, 0..) |submit_options, submit_index| {
-            if (submit_options.waits.len > submission_item_count_max or
-                submit_options.command_buffers.len > submission_item_count_max or
-                submit_options.signals.len > submission_item_count_max)
-            {
-                return error.CountOverflow;
-            }
-            for (submit_options.waits, 0..) |wait, index| {
-                if (wait.semaphore._device_handle != queue._device_handle) {
-                    return error.InvalidHandle;
-                }
-                if (wait.semaphore.kind == .binary and wait.value != 0) {
-                    return error.InvalidOptions;
-                }
-                const wait_handle = try wait.semaphore.rawHandle();
-                for (submit_options.waits[0..index]) |previous| {
-                    if (try previous.semaphore.rawHandle() == wait_handle) {
-                        return error.InvalidOptions;
-                    }
-                }
-                wait_infos[submit_index][index] = .{
-                    .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-                    .semaphore = wait_handle,
-                    .value = wait.value,
-                    .stageMask = wait.stage.toRaw(),
-                    .deviceIndex = wait.device_index,
-                };
-            }
-            for (submit_options.command_buffers, 0..) |command_buffer, index| {
-                const buffer = command_buffer.command_buffer;
-                if (buffer._device_handle != queue._device_handle) return error.InvalidHandle;
-                if (command_buffer.device_mask == 0) return error.InvalidOptions;
-                const handle = try buffer.rawHandle();
-                if (buffer.state != .executable) return error.InvalidOptions;
-                for (options.submits[0..submit_index]) |previous_submit| {
-                    for (previous_submit.command_buffers) |previous| {
-                        if (try previous.command_buffer.rawHandle() == handle) {
-                            return error.InvalidOptions;
-                        }
-                    }
-                }
-                for (submit_options.command_buffers[0..index]) |previous| {
-                    if (try previous.command_buffer.rawHandle() == handle) {
-                        return error.InvalidOptions;
-                    }
-                }
-                command_infos[submit_index][index] = .{
-                    .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-                    .commandBuffer = handle,
-                    .deviceMask = command_buffer.device_mask,
-                };
-            }
-            for (submit_options.signals, 0..) |signal, index| {
-                if (signal.semaphore._device_handle != queue._device_handle) {
-                    return error.InvalidHandle;
-                }
-                if (signal.semaphore.kind == .binary and signal.value != 0) {
-                    return error.InvalidOptions;
-                }
-                if (signal.semaphore.kind == .timeline and signal.value == 0) {
-                    return error.InvalidOptions;
-                }
-                const signal_handle = try signal.semaphore.rawHandle();
-                for (submit_options.signals[0..index]) |previous| {
-                    if (try previous.semaphore.rawHandle() == signal_handle) {
-                        return error.InvalidOptions;
-                    }
-                }
-                for (submit_options.waits) |wait| {
-                    if (try wait.semaphore.rawHandle() != signal_handle) continue;
-                    if (signal.semaphore.kind == .binary or signal.value <= wait.value) {
-                        return error.InvalidOptions;
-                    }
-                }
-                signal_infos[submit_index][index] = .{
-                    .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-                    .semaphore = signal_handle,
-                    .value = signal.value,
-                    .stageMask = signal.stage.toRaw(),
-                    .deviceIndex = signal.device_index,
-                };
-            }
-            if (submit_options.performance_query_pass) |counter_pass_index| {
-                performance_query_infos[submit_index] = .{
-                    .sType = raw.VK_STRUCTURE_TYPE_PERFORMANCE_QUERY_SUBMIT_INFO_KHR,
-                    .counterPassIndex = counter_pass_index,
-                };
-            }
-            submit_infos[submit_index] = .{
-                .sType = raw.VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-                .pNext = if (submit_options.performance_query_pass != null)
-                    &performance_query_infos[submit_index]
-                else
-                    null,
-                .flags = submit_options.flags.toRaw(),
-                .waitSemaphoreInfoCount = @intCast(submit_options.waits.len),
-                .pWaitSemaphoreInfos = if (submit_options.waits.len == 0)
-                    null
-                else
-                    wait_infos[submit_index][0..submit_options.waits.len].ptr,
-                .commandBufferInfoCount = @intCast(submit_options.command_buffers.len),
-                .pCommandBufferInfos = if (submit_options.command_buffers.len == 0)
-                    null
-                else
-                    command_infos[submit_index][0..submit_options.command_buffers.len].ptr,
-                .signalSemaphoreInfoCount = @intCast(submit_options.signals.len),
-                .pSignalSemaphoreInfos = if (submit_options.signals.len == 0)
-                    null
-                else
-                    signal_infos[submit_index][0..submit_options.signals.len].ptr,
-            };
-        }
-
-        try checkSuccess(queue_submit2(
-            queue._handle,
-            @intCast(options.submits.len),
-            if (options.submits.len == 0) null else submit_infos[0..options.submits.len].ptr,
-            fence_handle,
-        ));
-        for (options.submits) |submit_options| {
-            for (submit_options.command_buffers) |command_buffer| {
-                command_buffer.command_buffer.state = .pending;
-                command_buffer.command_buffer.pending_submissions += 1;
-            }
-        }
-    }
-
-    /// Submits raw Vulkan structures for advanced extension or interop use.
-    pub fn submitRaw(
-        queue: *const Queue,
-        submit_infos: []const raw.VkSubmitInfo,
-        fence: raw.VkFence,
-    ) Error!void {
-        const submit_info_count = try count32(submit_infos.len);
-        try checkSuccess(queue.queue_submit(
-            queue._handle,
-            submit_info_count,
-            if (submit_infos.len == 0) null else submit_infos.ptr,
-            fence,
-        ));
-    }
-
-    pub fn waitIdle(queue: *const Queue) Error!void {
-        try checkSuccess(queue.queue_wait_idle(queue._handle));
-    }
-
-    pub fn beginLabel(queue: *const Queue, options: ext.debug_utils.LabelOptions) Error!void {
-        const begin_label = queue.queue_begin_debug_utils_label_ext orelse {
-            return error.MissingCommand;
-        };
-        const label = options.createInfo();
-        begin_label(queue._handle, &label);
-    }
-
-    pub fn beginLabelScope(
-        queue: *const Queue,
-        options: ext.debug_utils.LabelOptions,
-    ) Error!QueueLabelScope {
-        const end_label = queue.queue_end_debug_utils_label_ext orelse {
-            return error.MissingCommand;
-        };
-        try queue.beginLabel(options);
-        return .{ .queue = queue._handle, .end_label = end_label };
-    }
-
-    pub fn endLabel(queue: *const Queue) Error!void {
-        const end_label = queue.queue_end_debug_utils_label_ext orelse {
-            return error.MissingCommand;
-        };
-        end_label(queue._handle);
-    }
-
-    pub fn insertLabel(queue: *const Queue, options: ext.debug_utils.LabelOptions) Error!void {
-        const insert_label = queue.queue_insert_debug_utils_label_ext orelse {
-            return error.MissingCommand;
-        };
-        const label = options.createInfo();
-        insert_label(queue._handle, &label);
-    }
-
-    pub fn present(queue: *const Queue, options: PresentOptions) Error!PresentStatus {
-        const present_command = queue.queue_present_khr orelse return error.MissingCommand;
-        if (options.swapchain._device_handle != queue._device_handle) return error.InvalidHandle;
-        if (options.wait_semaphores.len > submission_item_count_max) return error.CountOverflow;
-        const wait_count = try count32(options.wait_semaphores.len);
-        var wait_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
-        for (options.wait_semaphores, wait_handles[0..options.wait_semaphores.len]) |semaphore, *handle| {
-            if (semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
-            if (semaphore.kind != .binary) return error.InvalidOptions;
-            handle.* = try semaphore.rawHandle();
-        }
-        const swapchain_handle = try options.swapchain.rawHandle();
-        const image_index = options.image_index.toRaw();
-        const present_info: raw.VkPresentInfoKHR = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = options.next,
-            .waitSemaphoreCount = wait_count,
-            .pWaitSemaphores = if (options.wait_semaphores.len == 0)
-                null
-            else
-                wait_handles[0..options.wait_semaphores.len].ptr,
-            .swapchainCount = 1,
-            .pSwapchains = @ptrCast(&swapchain_handle),
-            .pImageIndices = @ptrCast(&image_index),
-            .pResults = null,
-        };
-        const result = present_command(queue._handle, &present_info);
-        if (result == raw.VK_SUCCESS) return .success;
-        if (result == raw.VK_SUBOPTIMAL_KHR) return .suboptimal;
-        if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
-        try checkSuccess(result);
-        unreachable;
-    }
-};
-
-pub const ext = struct {
-    pub const debug_utils = struct {
-        pub const severity_flags = struct {
-            pub const verbose: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
-            );
-            pub const info: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
-            );
-            pub const warning: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
-            );
-            pub const err: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-            );
-            pub const warning_and_error: raw.VkDebugUtilsMessageSeverityFlagsEXT =
-                warning | err;
-            pub const all: raw.VkDebugUtilsMessageSeverityFlagsEXT =
-                verbose | info | warning | err;
-        };
-
-        pub const message_type_flags = struct {
-            pub const general: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT,
-            );
-            pub const validation: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
-            );
-            pub const performance: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-            );
-            pub const device_address_binding: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT,
-            );
-            pub const standard: raw.VkDebugUtilsMessageTypeFlagsEXT =
-                general | validation | performance;
-            pub const all: raw.VkDebugUtilsMessageTypeFlagsEXT =
-                standard | device_address_binding;
-        };
-
-        pub const HandlerResult = enum {
-            continue_,
-            abort,
-        };
-
-        pub const MessengerConfigOptions = struct {
-            severity: raw.VkDebugUtilsMessageSeverityFlagsEXT =
-                severity_flags.warning_and_error,
-            message_types: raw.VkDebugUtilsMessageTypeFlagsEXT =
-                message_type_flags.standard,
-        };
-
-        /// Type-erased configuration whose generated C trampoline remains private to vk-zig.
-        pub const MessengerConfig = struct {
-            _callback: CommandFunction(raw.PFN_vkDebugUtilsMessengerCallbackEXT),
-            _handler: *const fn (?*anyopaque, Message) HandlerResult,
-            _user_data: ?*anyopaque,
-            _severity: raw.VkDebugUtilsMessageSeverityFlagsEXT,
-            _message_types: raw.VkDebugUtilsMessageTypeFlagsEXT,
-
-            /// The handler may return `void` to continue, or `HandlerResult` to allow aborting.
-            /// Vulkan can invoke it concurrently, so captured global state must be synchronized.
-            pub fn fromHandler(
-                comptime handler: anytype,
-                options: MessengerConfigOptions,
-            ) MessengerConfig {
-                validateHandler(@TypeOf(handler), null);
-                const Adapter = HandlerAdapter(handler);
-                return .{
-                    ._callback = Adapter.callback,
-                    ._handler = Adapter.handle,
-                    ._user_data = null,
-                    ._severity = options.severity,
-                    ._message_types = options.message_types,
-                };
-            }
-
-            /// The context pointer must remain valid until the parent instance is deinitialized.
-            pub fn fromHandlerWithContext(
-                context: anytype,
-                options: MessengerConfigOptions,
-                comptime handler: anytype,
-            ) MessengerConfig {
-                const ContextPointer = @TypeOf(context);
-                const pointer_info = switch (@typeInfo(ContextPointer)) {
-                    .pointer => |pointer| pointer,
-                    else => @compileError("debug messenger context must be a pointer"),
-                };
-                if (pointer_info.size != .one) {
-                    @compileError("debug messenger context must be a single-item pointer");
-                }
-                if (pointer_info.is_allowzero) {
-                    @compileError("debug messenger context must not allow a zero address");
-                }
-                validateHandler(@TypeOf(handler), ContextPointer);
-
-                const Adapter = ContextHandlerAdapter(ContextPointer, handler);
-                const user_data: *anyopaque = if (pointer_info.is_const)
-                    @ptrCast(@constCast(context))
-                else
-                    @ptrCast(context);
-                return .{
-                    ._callback = Adapter.callback,
-                    ._handler = Adapter.handle,
-                    ._user_data = user_data,
-                    ._severity = options.severity,
-                    ._message_types = options.message_types,
-                };
-            }
-
-            /// Invokes the typed handler directly, primarily for application-level tests.
-            pub fn dispatch(config: MessengerConfig, message: Message) HandlerResult {
-                return config._handler(config._user_data, message);
-            }
-
-            fn createInfo(
-                config: MessengerConfig,
-                next: ?*const anyopaque,
-            ) raw.VkDebugUtilsMessengerCreateInfoEXT {
-                return .{
-                    .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-                    .pNext = next,
-                    .messageSeverity = config._severity,
-                    .messageType = config._message_types,
-                    .pfnUserCallback = config._callback,
-                    .pUserData = config._user_data,
-                };
-            }
-
-            fn rawOptions(
-                config: MessengerConfig,
-                allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-            ) MessengerOptions {
-                return .{
-                    .callback = config._callback,
-                    .user_data = config._user_data,
-                    .severity = config._severity,
-                    .message_type = config._message_types,
-                    .allocation_callbacks = allocation_callbacks,
-                };
-            }
-        };
-
-        /// Advanced raw-ABI configuration. Prefer `MessengerConfig` for normal Zig code.
-        pub const MessengerOptions = struct {
-            callback: CommandFunction(raw.PFN_vkDebugUtilsMessengerCallbackEXT),
-            user_data: ?*anyopaque = null,
-            severity: raw.VkDebugUtilsMessageSeverityFlagsEXT = severity_flags.warning_and_error,
-            message_type: raw.VkDebugUtilsMessageTypeFlagsEXT = message_type_flags.standard,
-            flags: raw.VkDebugUtilsMessengerCreateFlagsEXT = 0,
-            next: ?*const anyopaque = null,
-            allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
-
-            /// Produces the same create info used by `Messenger.init`, suitable for
-            /// chaining through `InstanceOptions.next` to receive creation messages.
-            pub fn createInfo(options: MessengerOptions) raw.VkDebugUtilsMessengerCreateInfoEXT {
-                return .{
-                    .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-                    .pNext = options.next,
-                    .flags = options.flags,
-                    .messageSeverity = options.severity,
-                    .messageType = options.message_type,
-                    .pfnUserCallback = options.callback,
-                    .pUserData = options.user_data,
-                };
-            }
-        };
-
-        /// A safe borrowed view over callback data. It is valid only during the callback.
-        pub const Message = struct {
-            severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
-            message_type: raw.VkDebugUtilsMessageTypeFlagsEXT,
-            data: *const raw.VkDebugUtilsMessengerCallbackDataEXT,
-
-            pub fn fromCallback(
-                severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
-                message_type: raw.VkDebugUtilsMessageTypeFlagsEXT,
-                data: [*c]const raw.VkDebugUtilsMessengerCallbackDataEXT,
-            ) ?Message {
-                if (data == null) return null;
-                return .{
-                    .severity = severity,
-                    .message_type = message_type,
-                    .data = @ptrCast(data),
-                };
-            }
-
-            pub fn text(message: Message) ?[]const u8 {
-                return optionalCString(message.data.pMessage);
-            }
-
-            pub fn idName(message: Message) ?[]const u8 {
-                return optionalCString(message.data.pMessageIdName);
-            }
-
-            pub fn isError(message: Message) bool {
-                return (message.severity & severity_flags.err) != 0;
-            }
-
-            pub fn isWarning(message: Message) bool {
-                return (message.severity & severity_flags.warning) != 0;
-            }
-
-            pub fn isInfo(message: Message) bool {
-                return (message.severity & severity_flags.info) != 0;
-            }
-
-            pub fn isVerbose(message: Message) bool {
-                return (message.severity & severity_flags.verbose) != 0;
-            }
-
-            pub fn objects(message: Message) []const raw.VkDebugUtilsObjectNameInfoEXT {
-                if (message.data.objectCount == 0 or message.data.pObjects == null) return &.{};
-                return message.data.pObjects[0..message.data.objectCount];
-            }
-
-            pub fn queueLabels(message: Message) []const raw.VkDebugUtilsLabelEXT {
-                if (message.data.queueLabelCount == 0 or
-                    message.data.pQueueLabels == null) return &.{};
-                return message.data.pQueueLabels[0..message.data.queueLabelCount];
-            }
-
-            pub fn commandBufferLabels(message: Message) []const raw.VkDebugUtilsLabelEXT {
-                if (message.data.cmdBufLabelCount == 0 or
-                    message.data.pCmdBufLabels == null) return &.{};
-                return message.data.pCmdBufLabels[0..message.data.cmdBufLabelCount];
-            }
-        };
-
-        fn validateHandler(
-            comptime Handler: type,
-            comptime ContextPointer: ?type,
-        ) void {
-            const function_info = switch (@typeInfo(Handler)) {
-                .@"fn" => |function| function,
-                else => @compileError("debug message handler must be a function"),
-            };
-            const parameter_count: usize = if (ContextPointer == null) 1 else 2;
-            if (function_info.params.len != parameter_count) {
-                @compileError("debug message handler has the wrong parameter count");
-            }
-            if (ContextPointer) |ExpectedContext| {
-                const actual_context = function_info.params[0].type orelse {
-                    @compileError("debug message handler context type must be explicit");
-                };
-                if (actual_context != ExpectedContext) {
-                    @compileError("debug message handler context type does not match its pointer");
-                }
-            }
-            const message_index: usize = if (ContextPointer == null) 0 else 1;
-            const actual_message = function_info.params[message_index].type orelse {
-                @compileError("debug message handler message type must be explicit");
-            };
-            if (actual_message != Message) {
-                @compileError("debug message handler must accept debug_utils.Message");
-            }
-            const Return = function_info.return_type orelse {
-                @compileError("debug message handler must have an explicit return type");
-            };
-            if (Return != void and Return != HandlerResult) {
-                @compileError("debug message handler must return void or HandlerResult");
-            }
-        }
-
-        fn invokeHandler(
-            comptime handler: anytype,
-            arguments: anytype,
-        ) HandlerResult {
-            const Return = @typeInfo(@TypeOf(handler)).@"fn".return_type.?;
-            if (Return == void) {
-                @call(.auto, handler, arguments);
-                return .continue_;
-            }
-            return @call(.auto, handler, arguments);
-        }
-
-        fn rawHandlerResult(result: HandlerResult) raw.VkBool32 {
-            return switch (result) {
-                .continue_ => raw.VK_FALSE,
-                .abort => raw.VK_TRUE,
-            };
-        }
-
-        fn HandlerAdapter(comptime handler: anytype) type {
-            return struct {
-                fn handle(_: ?*anyopaque, message: Message) HandlerResult {
-                    return invokeHandler(handler, .{message});
-                }
-
-                fn callback(
-                    severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
-                    message_type: raw.VkDebugUtilsMessageTypeFlagsEXT,
-                    callback_data: [*c]const raw.VkDebugUtilsMessengerCallbackDataEXT,
-                    _: ?*anyopaque,
-                ) callconv(.c) raw.VkBool32 {
-                    const message = Message.fromCallback(
-                        severity,
-                        message_type,
-                        callback_data,
-                    ) orelse return raw.VK_FALSE;
-                    return rawHandlerResult(handle(null, message));
-                }
-            };
-        }
-
-        fn ContextHandlerAdapter(
-            comptime ContextPointer: type,
-            comptime handler: anytype,
-        ) type {
-            return struct {
-                fn handle(user_data: ?*anyopaque, message: Message) HandlerResult {
-                    const opaque_context = user_data orelse return .continue_;
-                    const context: ContextPointer = @ptrCast(@alignCast(opaque_context));
-                    return invokeHandler(handler, .{ context, message });
-                }
-
-                fn callback(
-                    severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
-                    message_type: raw.VkDebugUtilsMessageTypeFlagsEXT,
-                    callback_data: [*c]const raw.VkDebugUtilsMessengerCallbackDataEXT,
-                    user_data: ?*anyopaque,
-                ) callconv(.c) raw.VkBool32 {
-                    const message = Message.fromCallback(
-                        severity,
-                        message_type,
-                        callback_data,
-                    ) orelse return raw.VK_FALSE;
-                    return rawHandlerResult(handle(user_data, message));
-                }
-            };
-        }
-
-        pub const LabelOptions = struct {
-            name: [:0]const u8,
-            color: [4]f32 = .{ 0.0, 0.0, 0.0, 0.0 },
-            next: ?*const anyopaque = null,
-
-            pub fn createInfo(options: LabelOptions) raw.VkDebugUtilsLabelEXT {
-                return .{
-                    .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
-                    .pNext = options.next,
-                    .pLabelName = options.name.ptr,
-                    .color = options.color,
-                };
-            }
-        };
-
-        pub const Messenger = struct {
-            _handle: ?DebugMessengerHandle,
-            _instance_handle: InstanceHandle,
-            allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-            destroy_messenger: CommandFunction(raw.PFN_vkDestroyDebugUtilsMessengerEXT),
-
-            fn initConfig(
-                instance: *const Instance,
-                config: MessengerConfig,
-                allocation_callbacks: ?*const raw.VkAllocationCallbacks,
-            ) Error!Messenger {
-                return init(instance, config.rawOptions(allocation_callbacks));
-            }
-
-            /// Advanced raw-ABI creation. Prefer `InstanceOptions.debug_messenger`.
-            pub fn init(instance: *const Instance, options: MessengerOptions) Error!Messenger {
-                const instance_handle = instance._handle orelse return error.InactiveObject;
-                const create_messenger = (try instance.load(
-                    command.create_debug_utils_messenger_ext,
-                )) orelse return error.MissingCommand;
-                const destroy_messenger = (try instance.load(
-                    command.destroy_debug_utils_messenger_ext,
-                )) orelse return error.MissingCommand;
-
-                const create_info = options.createInfo();
-                var handle: raw.VkDebugUtilsMessengerEXT = null;
-                const result = create_messenger(
-                    instance_handle,
-                    &create_info,
-                    options.allocation_callbacks,
-                    &handle,
-                );
-                if (result != raw.VK_SUCCESS) {
-                    if (handle) |provisional_handle| {
-                        destroy_messenger(
-                            instance_handle,
-                            provisional_handle,
-                            options.allocation_callbacks,
-                        );
-                    }
-                    try checkSuccess(result);
-                    unreachable;
-                }
-
-                return .{
-                    ._handle = handle orelse return error.InvalidHandle,
-                    ._instance_handle = instance_handle,
-                    .allocation_callbacks = options.allocation_callbacks,
-                    .destroy_messenger = destroy_messenger,
-                };
-            }
-
-            pub fn deinit(messenger: *Messenger) void {
-                const handle = messenger._handle orelse return;
-                messenger.destroy_messenger(
-                    messenger._instance_handle,
-                    handle,
-                    messenger.allocation_callbacks,
-                );
-                messenger._handle = null;
-            }
-
-            /// Returns the live raw handle for explicit FFI integration.
-            pub fn rawHandle(messenger: *const Messenger) Error!raw.VkDebugUtilsMessengerEXT {
-                return messenger._handle orelse error.InactiveObject;
-            }
-        };
-
-        pub const Object = union(enum) {
-            device: *const Device,
-            queue: *const Queue,
-            surface: *const Surface,
-            swapchain: *const Swapchain,
-            semaphore: *const Semaphore,
-            command_buffer: *CommandBuffer,
-            fence: *const Fence,
-            image: *const SwapchainImage,
-            image_view: *const ImageView,
-            command_pool: *const CommandPool,
-            raw_semaphore: raw.VkSemaphore,
-            raw_command_buffer: raw.VkCommandBuffer,
-            raw_fence: raw.VkFence,
-            device_memory: raw.VkDeviceMemory,
-            buffer: raw.VkBuffer,
-            raw_image: raw.VkImage,
-            event: raw.VkEvent,
-            query_pool: raw.VkQueryPool,
-            buffer_view: raw.VkBufferView,
-            raw_image_view: raw.VkImageView,
-            shader_module: raw.VkShaderModule,
-            pipeline_cache: raw.VkPipelineCache,
-            pipeline_layout: raw.VkPipelineLayout,
-            render_pass: raw.VkRenderPass,
-            pipeline: raw.VkPipeline,
-            descriptor_set_layout: raw.VkDescriptorSetLayout,
-            sampler: raw.VkSampler,
-            descriptor_pool: raw.VkDescriptorPool,
-            descriptor_set: raw.VkDescriptorSet,
-            framebuffer: raw.VkFramebuffer,
-            raw_command_pool: raw.VkCommandPool,
-            raw_surface: raw.VkSurfaceKHR,
-            raw_swapchain: raw.VkSwapchainKHR,
-
-            const Info = struct {
-                object_type: raw.VkObjectType,
-                handle: u64,
-            };
-
-            fn info(object: Object) Error!Info {
-                return switch (object) {
-                    .device => |device| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_DEVICE),
-                        .handle = try handleValue(try device.rawHandle()),
-                    },
-                    .queue => |queue| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_QUEUE),
-                        .handle = try handleValue(queue.rawHandle()),
-                    },
-                    .surface => |surface| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_SURFACE_KHR),
-                        .handle = try handleValue(try surface.rawHandle()),
-                    },
-                    .swapchain => |swapchain| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_SWAPCHAIN_KHR),
-                        .handle = try handleValue(try swapchain.rawHandle()),
-                    },
-                    .semaphore => |semaphore| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_SEMAPHORE),
-                        .handle = try handleValue(try semaphore.rawHandle()),
-                    },
-                    .command_buffer => |command_buffer| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_COMMAND_BUFFER),
-                        .handle = try handleValue(try command_buffer.rawHandle()),
-                    },
-                    .fence => |fence| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_FENCE),
-                        .handle = try handleValue(try fence.rawHandle()),
-                    },
-                    .image => |image| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_IMAGE),
-                        .handle = try handleValue(image.rawHandle()),
-                    },
-                    .image_view => |image_view| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_IMAGE_VIEW),
-                        .handle = try handleValue(try image_view.rawHandle()),
-                    },
-                    .command_pool => |command_pool| .{
-                        .object_type = @intCast(raw.VK_OBJECT_TYPE_COMMAND_POOL),
-                        .handle = try handleValue(try command_pool.rawHandle()),
-                    },
-                    inline else => |handle, tag| .{
-                        .object_type = objectType(tag),
-                        .handle = try handleValue(handle),
-                    },
-                };
-            }
-
-            fn objectType(comptime tag: std.meta.Tag(Object)) raw.VkObjectType {
-                return @intCast(switch (tag) {
-                    .device,
-                    .queue,
-                    .surface,
-                    .swapchain,
-                    .semaphore,
-                    .command_buffer,
-                    .fence,
-                    .image,
-                    .image_view,
-                    .command_pool,
-                    => unreachable,
-                    .raw_semaphore => raw.VK_OBJECT_TYPE_SEMAPHORE,
-                    .raw_command_buffer => raw.VK_OBJECT_TYPE_COMMAND_BUFFER,
-                    .raw_fence => raw.VK_OBJECT_TYPE_FENCE,
-                    .device_memory => raw.VK_OBJECT_TYPE_DEVICE_MEMORY,
-                    .buffer => raw.VK_OBJECT_TYPE_BUFFER,
-                    .raw_image => raw.VK_OBJECT_TYPE_IMAGE,
-                    .event => raw.VK_OBJECT_TYPE_EVENT,
-                    .query_pool => raw.VK_OBJECT_TYPE_QUERY_POOL,
-                    .buffer_view => raw.VK_OBJECT_TYPE_BUFFER_VIEW,
-                    .raw_image_view => raw.VK_OBJECT_TYPE_IMAGE_VIEW,
-                    .shader_module => raw.VK_OBJECT_TYPE_SHADER_MODULE,
-                    .pipeline_cache => raw.VK_OBJECT_TYPE_PIPELINE_CACHE,
-                    .pipeline_layout => raw.VK_OBJECT_TYPE_PIPELINE_LAYOUT,
-                    .render_pass => raw.VK_OBJECT_TYPE_RENDER_PASS,
-                    .pipeline => raw.VK_OBJECT_TYPE_PIPELINE,
-                    .descriptor_set_layout => raw.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
-                    .sampler => raw.VK_OBJECT_TYPE_SAMPLER,
-                    .descriptor_pool => raw.VK_OBJECT_TYPE_DESCRIPTOR_POOL,
-                    .descriptor_set => raw.VK_OBJECT_TYPE_DESCRIPTOR_SET,
-                    .framebuffer => raw.VK_OBJECT_TYPE_FRAMEBUFFER,
-                    .raw_command_pool => raw.VK_OBJECT_TYPE_COMMAND_POOL,
-                    .raw_surface => raw.VK_OBJECT_TYPE_SURFACE_KHR,
-                    .raw_swapchain => raw.VK_OBJECT_TYPE_SWAPCHAIN_KHR,
-                });
-            }
-
-            fn validateParent(object: Object, device: *const Device) Error!void {
-                const device_handle = device._handle orelse return error.InactiveObject;
-                switch (object) {
-                    .device => |named_device| {
-                        if (try named_device.rawHandle() != device_handle) {
-                            return error.InvalidHandle;
-                        }
-                    },
-                    .queue => |queue| {
-                        if (queue._device_handle != device_handle) return error.InvalidHandle;
-                    },
-                    .surface => |surface| {
-                        if (surface._instance_handle != device._instance_handle) {
-                            return error.InvalidHandle;
-                        }
-                    },
-                    .swapchain => |swapchain| {
-                        if (swapchain._device_handle != device_handle) return error.InvalidHandle;
-                    },
-                    .semaphore => |semaphore| {
-                        if (semaphore._device_handle != device_handle) return error.InvalidHandle;
-                        _ = try semaphore.rawHandle();
-                    },
-                    .command_buffer => |command_buffer| {
-                        if (command_buffer._device_handle != device_handle) return error.InvalidHandle;
-                    },
-                    .fence => |fence| {
-                        if (fence._device_handle != device_handle) return error.InvalidHandle;
-                        _ = try fence.rawHandle();
-                    },
-                    .image => |image| {
-                        if (image._device_handle != device_handle) return error.InvalidHandle;
-                    },
-                    .image_view => |image_view| {
-                        if (image_view._device_handle != device_handle) return error.InvalidHandle;
-                        _ = try image_view.rawHandle();
-                    },
-                    .command_pool => |command_pool| {
-                        if (command_pool._device_handle != device_handle) return error.InvalidHandle;
-                        _ = try command_pool.rawHandle();
-                    },
-                    else => {},
-                }
-            }
-        };
-    };
-};
+pub const SemaphoreWait = queues.SemaphoreWait;
+pub const SubmitOptions = queues.SubmitOptions;
+pub const SemaphoreSubmit = queues.SemaphoreSubmit;
+pub const CommandBufferSubmit = queues.CommandBufferSubmit;
+pub const Submit2Options = queues.Submit2Options;
+pub const Submit2BatchOptions = queues.Submit2BatchOptions;
+pub const QueueLabelScope = queues.LabelScope;
+pub const Queue = queues.Queue;
 
 const InstanceDispatch = struct {
     get_instance_proc_addr: CommandFunction(raw.PFN_vkGetInstanceProcAddr),
@@ -4501,6 +2035,21 @@ const DeviceDispatch = struct {
     queue_submit2: ?CommandFunction(raw.PFN_vkQueueSubmit2),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
     device_wait_idle: CommandFunction(raw.PFN_vkDeviceWaitIdle),
+    allocate_memory: CommandFunction(raw.PFN_vkAllocateMemory),
+    free_memory: CommandFunction(raw.PFN_vkFreeMemory),
+    get_device_memory_opaque_capture_address: ?CommandFunction(
+        raw.PFN_vkGetDeviceMemoryOpaqueCaptureAddress,
+    ),
+    create_buffer: CommandFunction(raw.PFN_vkCreateBuffer),
+    destroy_buffer: CommandFunction(raw.PFN_vkDestroyBuffer),
+    get_buffer_memory_requirements: CommandFunction(raw.PFN_vkGetBufferMemoryRequirements),
+    get_buffer_memory_requirements2: ?CommandFunction(raw.PFN_vkGetBufferMemoryRequirements2),
+    get_buffer_device_address: ?CommandFunction(raw.PFN_vkGetBufferDeviceAddress),
+    get_buffer_opaque_capture_address: ?CommandFunction(raw.PFN_vkGetBufferOpaqueCaptureAddress),
+    create_buffer_view: CommandFunction(raw.PFN_vkCreateBufferView),
+    destroy_buffer_view: CommandFunction(raw.PFN_vkDestroyBufferView),
+    bind_buffer_memory: CommandFunction(raw.PFN_vkBindBufferMemory),
+    bind_buffer_memory2: ?CommandFunction(raw.PFN_vkBindBufferMemory2),
     create_image_view: CommandFunction(raw.PFN_vkCreateImageView),
     destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
     create_semaphore: CommandFunction(raw.PFN_vkCreateSemaphore),
@@ -4576,6 +2125,79 @@ const DeviceDispatch = struct {
                 handle,
                 raw.PFN_vkDeviceWaitIdle,
                 "vkDeviceWaitIdle",
+            ),
+            .allocate_memory = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkAllocateMemory,
+                "vkAllocateMemory",
+            ),
+            .free_memory = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkFreeMemory,
+                "vkFreeMemory",
+            ),
+            .get_device_memory_opaque_capture_address = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.get_device_memory_opaque_capture_address,
+            ),
+            .create_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateBuffer,
+                "vkCreateBuffer",
+            ),
+            .destroy_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyBuffer,
+                "vkDestroyBuffer",
+            ),
+            .get_buffer_memory_requirements = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetBufferMemoryRequirements,
+                "vkGetBufferMemoryRequirements",
+            ),
+            .get_buffer_memory_requirements2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.get_buffer_memory_requirements2,
+            ),
+            .get_buffer_device_address = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.get_buffer_device_address,
+            ),
+            .get_buffer_opaque_capture_address = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.get_buffer_opaque_capture_address,
+            ),
+            .create_buffer_view = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateBufferView,
+                "vkCreateBufferView",
+            ),
+            .destroy_buffer_view = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyBufferView,
+                "vkDestroyBufferView",
+            ),
+            .bind_buffer_memory = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkBindBufferMemory,
+                "vkBindBufferMemory",
+            ),
+            .bind_buffer_memory2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.bind_buffer_memory2,
             ),
             .create_image_view = try loadDeviceRequired(
                 get_device_proc_addr,
@@ -4944,23 +2566,23 @@ fn enumerateSurfaceFormats(
     var count = try surfaceFormatCountRaw(enumerate, physical_device, surface);
     if (count == 0) return gpa.alloc(SurfaceFormat, 0);
 
-    var formats = try gpa.alloc(SurfaceFormat, count);
-    errdefer gpa.free(formats);
+    var surface_formats = try gpa.alloc(SurfaceFormat, count);
+    errdefer gpa.free(surface_formats);
     for (0..enumeration_attempt_count_max) |_| {
         const written = enumerateSurfaceFormatsInto(
             enumerate,
             physical_device,
             surface,
-            formats,
+            surface_formats,
         ) catch |enumeration_error| switch (enumeration_error) {
             error.BufferTooSmall => null,
             else => return enumeration_error,
         };
-        if (written) |items| return gpa.realloc(formats, items.len);
+        if (written) |items| return gpa.realloc(surface_formats, items.len);
 
         count = try surfaceFormatCountRaw(enumerate, physical_device, surface);
-        count = try nextEnumerationCapacity(count, formats.len);
-        formats = try gpa.realloc(formats, count);
+        count = try nextEnumerationCapacity(count, surface_formats.len);
+        surface_formats = try gpa.realloc(surface_formats, count);
     }
     return error.EnumerationUnstable;
 }
@@ -5055,35 +2677,6 @@ fn enumeratePresentModesInto(
     return storage[0..written];
 }
 
-/// Maps errors for commands whose only successful result is `VK_SUCCESS`.
-/// Do not use this for enumerate, wait, acquire, or present commands that allow status results.
-pub fn checkSuccess(result: raw.VkResult) Error!void {
-    if (result == raw.VK_SUCCESS) return;
-    if (result == raw.VK_ERROR_OUT_OF_HOST_MEMORY) return error.OutOfHostMemory;
-    if (result == raw.VK_ERROR_OUT_OF_DEVICE_MEMORY) return error.OutOfDeviceMemory;
-    if (result == raw.VK_ERROR_INITIALIZATION_FAILED) return error.InitializationFailed;
-    if (result == raw.VK_ERROR_DEVICE_LOST) return error.DeviceLost;
-    if (result == raw.VK_ERROR_MEMORY_MAP_FAILED) return error.MemoryMapFailed;
-    if (result == raw.VK_ERROR_LAYER_NOT_PRESENT) return error.LayerNotPresent;
-    if (result == raw.VK_ERROR_EXTENSION_NOT_PRESENT) return error.ExtensionNotPresent;
-    if (result == raw.VK_ERROR_FEATURE_NOT_PRESENT) return error.FeatureNotPresent;
-    if (result == raw.VK_ERROR_INCOMPATIBLE_DRIVER) return error.IncompatibleDriver;
-    if (result == raw.VK_ERROR_TOO_MANY_OBJECTS) return error.TooManyObjects;
-    if (result == raw.VK_ERROR_FORMAT_NOT_SUPPORTED) return error.FormatNotSupported;
-    if (result == raw.VK_ERROR_FRAGMENTED_POOL) return error.FragmentedPool;
-    if (result == raw.VK_ERROR_UNKNOWN) return error.UnknownVulkanError;
-    if (result == raw.VK_ERROR_SURFACE_LOST_KHR) return error.SurfaceLost;
-    if (result == raw.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) return error.NativeWindowInUse;
-    if (result == raw.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
-        return error.FullScreenExclusiveLost;
-    }
-    return error.UnexpectedVulkanResult;
-}
-
-fn count32(count: usize) Error!u32 {
-    return std.math.cast(u32, count) orelse error.CountOverflow;
-}
-
 fn validateEnumerationCount(count: u32) Error!void {
     if (count <= enumeration_item_count_max) return;
     return error.TooManyObjects;
@@ -5126,23 +2719,6 @@ fn optionalCString(pointer: [*c]const u8) ?[]const u8 {
     if (pointer == null) return null;
     const sentinel: [*:0]const u8 = @ptrCast(pointer);
     return std.mem.span(sentinel);
-}
-
-fn handleValue(handle: anytype) Error!u64 {
-    const Handle = @TypeOf(handle);
-    return switch (@typeInfo(Handle)) {
-        .optional => if (handle) |live_handle| handleValue(live_handle) else error.InvalidHandle,
-        .pointer => @intCast(@intFromPtr(handle)),
-        .int => if (handle == 0) error.InvalidHandle else @intCast(handle),
-        else => @compileError("expected a Vulkan pointer or integer handle"),
-    };
-}
-
-fn NonNullHandle(comptime OptionalHandle: type) type {
-    return switch (@typeInfo(OptionalHandle)) {
-        .optional => |optional| optional.child,
-        else => @compileError("expected an optional Vulkan handle type"),
-    };
 }
 
 const NativeLibrary = if (builtin.os.tag == .windows) WindowsLibrary else PosixLibrary;
@@ -5282,6 +2858,21 @@ var test_timeline_signal_value: u64 = 0;
 var test_created_semaphore_kind: SemaphoreKind = .binary;
 var test_created_semaphore_initial_value: u64 = 0;
 var test_destroy_image_view_count: usize = 0;
+var test_destroy_buffer_count: usize = 0;
+var test_destroy_buffer_view_count: usize = 0;
+var test_free_memory_count: usize = 0;
+var test_bind_buffer_count: usize = 0;
+var test_buffer_size: u64 = 0;
+var test_buffer_sharing_mode: raw.VkSharingMode = raw.VK_SHARING_MODE_EXCLUSIVE;
+var test_buffer_queue_family_count: u32 = 0;
+var test_buffer_usage: raw.VkBufferUsageFlags = 0;
+var test_buffer_create_flags: raw.VkBufferCreateFlags = 0;
+var test_buffer_capture_address: u64 = 0;
+var test_buffer_view_offset: u64 = 0;
+var test_buffer_view_range: u64 = 0;
+var test_bound_memory_offset: u64 = 0;
+var test_allocated_memory_size: u64 = 0;
+var test_allocated_memory_type: u32 = 0;
 var test_destroy_semaphore_count: usize = 0;
 var test_destroy_fence_count: usize = 0;
 var test_destroy_command_pool_count: usize = 0;
@@ -5494,6 +3085,108 @@ fn testCreateImageView(
     handle: [*c]raw.VkImageView,
 ) callconv(.c) raw.VkResult {
     handle.* = if (test_resource_null_handle) null else testHandle(raw.VkImageView, 0x5100);
+    return test_resource_result;
+}
+
+fn testCreateBuffer(
+    _: raw.VkDevice,
+    create_info: [*c]const raw.VkBufferCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    handle: [*c]raw.VkBuffer,
+) callconv(.c) raw.VkResult {
+    test_buffer_size = create_info.*.size;
+    test_buffer_sharing_mode = create_info.*.sharingMode;
+    test_buffer_queue_family_count = create_info.*.queueFamilyIndexCount;
+    test_buffer_usage = create_info.*.usage;
+    test_buffer_create_flags = create_info.*.flags;
+    test_buffer_capture_address = 0;
+    if (create_info.*.pNext) |next| {
+        const capture: *const raw.VkBufferOpaqueCaptureAddressCreateInfo =
+            @ptrCast(@alignCast(next));
+        test_buffer_capture_address = capture.opaqueCaptureAddress;
+    }
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkBuffer, 0x5600);
+    return test_resource_result;
+}
+
+fn testDestroyBuffer(
+    _: raw.VkDevice,
+    _: raw.VkBuffer,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_destroy_buffer_count += 1;
+}
+
+fn testGetBufferMemoryRequirements(
+    _: raw.VkDevice,
+    _: raw.VkBuffer,
+    requirements: [*c]raw.VkMemoryRequirements,
+) callconv(.c) void {
+    requirements.* = .{ .size = 1024, .alignment = 256, .memoryTypeBits = 1 };
+}
+
+fn testGetBufferDeviceAddress(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkBufferDeviceAddressInfo,
+) callconv(.c) raw.VkDeviceAddress {
+    return 0x7000;
+}
+
+fn testGetBufferOpaqueCaptureAddress(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkBufferDeviceAddressInfo,
+) callconv(.c) u64 {
+    return 0x8000;
+}
+
+fn testCreateBufferView(
+    _: raw.VkDevice,
+    create_info: [*c]const raw.VkBufferViewCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    handle: [*c]raw.VkBufferView,
+) callconv(.c) raw.VkResult {
+    test_buffer_view_offset = create_info.*.offset;
+    test_buffer_view_range = create_info.*.range;
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkBufferView, 0x5700);
+    return test_resource_result;
+}
+
+fn testDestroyBufferView(
+    _: raw.VkDevice,
+    _: raw.VkBufferView,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_destroy_buffer_view_count += 1;
+}
+
+fn testAllocateMemory(
+    _: raw.VkDevice,
+    info: [*c]const raw.VkMemoryAllocateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    handle: [*c]raw.VkDeviceMemory,
+) callconv(.c) raw.VkResult {
+    test_allocated_memory_size = info.*.allocationSize;
+    test_allocated_memory_type = info.*.memoryTypeIndex;
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkDeviceMemory, 0x5800);
+    return test_resource_result;
+}
+
+fn testFreeMemory(
+    _: raw.VkDevice,
+    _: raw.VkDeviceMemory,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_free_memory_count += 1;
+}
+
+fn testBindBufferMemory(
+    _: raw.VkDevice,
+    _: raw.VkBuffer,
+    _: raw.VkDeviceMemory,
+    offset: u64,
+) callconv(.c) raw.VkResult {
+    test_bind_buffer_count += 1;
+    test_bound_memory_offset = offset;
     return test_resource_result;
 }
 
@@ -5721,9 +3414,9 @@ fn testGetSwapchainImages(
     _: raw.VkDevice,
     _: raw.VkSwapchainKHR,
     count: [*c]u32,
-    images: [*c]raw.VkImage,
+    output_images: [*c]raw.VkImage,
 ) callconv(.c) raw.VkResult {
-    if (images == null) {
+    if (output_images == null) {
         count.* = 2;
         return raw.VK_SUCCESS;
     }
@@ -5731,8 +3424,8 @@ fn testGetSwapchainImages(
         count.* = 2;
         return raw.VK_INCOMPLETE;
     }
-    images[0] = testHandle(raw.VkImage, 0x5000);
-    images[1] = testHandle(raw.VkImage, 0x5001);
+    output_images[0] = testHandle(raw.VkImage, 0x5000);
+    output_images[1] = testHandle(raw.VkImage, 0x5001);
     count.* = 2;
     return raw.VK_SUCCESS;
 }
@@ -5848,9 +3541,9 @@ fn testSurfaceFormats(
     _: raw.VkPhysicalDevice,
     _: raw.VkSurfaceKHR,
     count: [*c]u32,
-    formats: [*c]raw.VkSurfaceFormatKHR,
+    output_formats: [*c]raw.VkSurfaceFormatKHR,
 ) callconv(.c) raw.VkResult {
-    if (formats == null) {
+    if (output_formats == null) {
         count[0] = 2;
         return raw.VK_SUCCESS;
     }
@@ -5858,11 +3551,11 @@ fn testSurfaceFormats(
         count[0] = 2;
         return raw.VK_INCOMPLETE;
     }
-    formats[0] = .{
+    output_formats[0] = .{
         .format = raw.VK_FORMAT_B8G8R8A8_SRGB,
         .colorSpace = raw.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
     };
-    formats[1] = .{
+    output_formats[1] = .{
         .format = raw.VK_FORMAT_R8G8B8A8_SRGB,
         .colorSpace = raw.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
     };
@@ -5961,6 +3654,19 @@ fn testDevice() Device {
             .queue_submit2 = testQueueSubmit2,
             .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
             .device_wait_idle = testFunction(raw.PFN_vkDeviceWaitIdle),
+            .allocate_memory = testAllocateMemory,
+            .free_memory = testFreeMemory,
+            .get_device_memory_opaque_capture_address = null,
+            .create_buffer = testCreateBuffer,
+            .destroy_buffer = testDestroyBuffer,
+            .get_buffer_memory_requirements = testGetBufferMemoryRequirements,
+            .get_buffer_memory_requirements2 = null,
+            .get_buffer_device_address = testGetBufferDeviceAddress,
+            .get_buffer_opaque_capture_address = testGetBufferOpaqueCaptureAddress,
+            .create_buffer_view = testCreateBufferView,
+            .destroy_buffer_view = testDestroyBufferView,
+            .bind_buffer_memory = testBindBufferMemory,
+            .bind_buffer_memory2 = null,
             .create_image_view = testCreateImageView,
             .destroy_image_view = testDestroyImageView,
             .create_semaphore = testCreateSemaphore,
@@ -6102,15 +3808,15 @@ test "surface enumeration supports typed caller storage" {
         try surfaceFormatCountRaw(testSurfaceFormats, physical_device, surface),
     );
     var format_storage: [2]SurfaceFormat = undefined;
-    const formats = try enumerateSurfaceFormatsInto(
+    const returned_formats = try enumerateSurfaceFormatsInto(
         testSurfaceFormats,
         physical_device,
         surface,
         &format_storage,
     );
-    try std.testing.expectEqual(@as(usize, 2), formats.len);
-    try std.testing.expectEqual(Format.b8g8r8a8_srgb, formats[0].format);
-    try std.testing.expectEqual(ColorSpace.srgb_nonlinear, formats[0].color_space);
+    try std.testing.expectEqual(@as(usize, 2), returned_formats.len);
+    try std.testing.expectEqual(Format.b8g8r8a8_srgb, returned_formats[0].format);
+    try std.testing.expectEqual(ColorSpace.srgb_nonlinear, returned_formats[0].color_space);
     var format_storage_small: [1]SurfaceFormat = undefined;
     try std.testing.expectError(
         error.BufferTooSmall,
@@ -6815,9 +4521,9 @@ test "swapchain acquisition and presentation preserve operation statuses" {
     defer swapchain.deinit();
 
     var image_storage: [2]SwapchainImage = undefined;
-    const images = try swapchain.imagesInto(&image_storage);
-    try std.testing.expectEqual(@as(usize, 2), images.len);
-    try std.testing.expectEqual(@as(u32, 1), images[1].index.toRaw());
+    const swapchain_images = try swapchain.imagesInto(&image_storage);
+    try std.testing.expectEqual(@as(usize, 2), swapchain_images.len);
+    try std.testing.expectEqual(@as(u32, 1), swapchain_images[1].index.toRaw());
 
     test_acquire_image_index = 1;
     test_acquire_result = raw.VK_SUCCESS;
@@ -6878,9 +4584,14 @@ test "debug messenger handles fake dispatch success and failures" {
     test_destroy_messenger_count = 0;
     var instance = testInstance();
     defer instance.deinit();
-    const options: ext.debug_utils.MessengerOptions = .{ .callback = testDebugCallback };
+    const config = debug_utils.Config.fromHandler(
+        struct {
+            fn handle(_: debug_utils.Message) void {}
+        }.handle,
+        .{},
+    );
 
-    var messenger = try ext.debug_utils.Messenger.init(&instance, options);
+    var messenger = try instance.createDebugMessenger(config, null);
     messenger.deinit();
     messenger.deinit();
     try std.testing.expectEqual(@as(usize, 1), test_destroy_messenger_count);
@@ -6889,7 +4600,7 @@ test "debug messenger handles fake dispatch success and failures" {
     test_create_null_handle = true;
     try std.testing.expectError(
         error.InvalidHandle,
-        ext.debug_utils.Messenger.init(&instance, options),
+        instance.createDebugMessenger(config, null),
     );
 
     test_create_null_handle = false;
@@ -6897,7 +4608,7 @@ test "debug messenger handles fake dispatch success and failures" {
     test_destroy_messenger_count = 0;
     try std.testing.expectError(
         error.InitializationFailed,
-        ext.debug_utils.Messenger.init(&instance, options),
+        instance.createDebugMessenger(config, null),
     );
     try std.testing.expectEqual(@as(usize, 1), test_destroy_messenger_count);
 
@@ -6906,7 +4617,7 @@ test "debug messenger handles fake dispatch success and failures" {
     test_create_messenger_count = 0;
     try std.testing.expectError(
         error.MissingCommand,
-        ext.debug_utils.Messenger.init(&instance, options),
+        instance.createDebugMessenger(config, null),
     );
     try std.testing.expectEqual(@as(usize, 0), test_create_messenger_count);
 }
@@ -6955,7 +4666,7 @@ test "surface and object-name wrappers normalize fake dispatch results" {
     var device = testDevice();
     defer device.deinit();
     test_name_result = raw.VK_SUCCESS;
-    try device.setObjectName(.{ .device = &device }, "test-device");
+    try device.setObjectName(&device, "test-device");
     try std.testing.expectEqual(
         @as(raw.VkObjectType, @intCast(raw.VK_OBJECT_TYPE_DEVICE)),
         test_named_object_type,
@@ -6972,7 +4683,7 @@ test "surface and object-name wrappers normalize fake dispatch results" {
         .queue_end_debug_utils_label_ext = null,
         .queue_insert_debug_utils_label_ext = null,
     };
-    try device.setObjectName(.{ .queue = &queue }, "test-queue");
+    try device.setObjectName(&queue, "test-queue");
     try std.testing.expectEqual(
         @as(raw.VkObjectType, @intCast(raw.VK_OBJECT_TYPE_QUEUE)),
         test_named_object_type,
@@ -6981,12 +4692,12 @@ test "surface and object-name wrappers normalize fake dispatch results" {
     test_name_result = raw.VK_ERROR_OUT_OF_HOST_MEMORY;
     try std.testing.expectError(
         error.OutOfHostMemory,
-        device.setObjectName(.{ .device = &device }, "test-device"),
+        device.setObjectName(&device, "test-device"),
     );
     device.dispatch.set_debug_utils_object_name_ext = null;
     try std.testing.expectError(
         error.MissingCommand,
-        device.setObjectName(.{ .device = &device }, "test-device"),
+        device.setObjectName(&device, "test-device"),
     );
 }
 
@@ -7031,6 +4742,150 @@ test "physical device memory queries produce validated owned snapshots" {
     test_memory_properties = .{};
     try std.testing.expectEqual(@as(usize, 1), returned.types().len);
     try std.testing.expectEqual(@as(u64, 512), try returned.deviceLocalBytes());
+}
+
+test "buffer wrappers cover creation views addresses sharing and checked binding" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_destroy_buffer_count = 0;
+    test_destroy_buffer_view_count = 0;
+    test_free_memory_count = 0;
+    test_bind_buffer_count = 0;
+    test_name_result = raw.VK_SUCCESS;
+    var device = testDevice();
+    defer device.deinit();
+
+    var buffer = try device.createBuffer(.{
+        .size = .fromBytes(2048),
+        .usage = .init(&.{ .vertex_buffer, .uniform_texel_buffer }),
+        .queue_family_indices = &.{ .fromRaw(1), .fromRaw(2) },
+        .opaque_capture_address = buffers.OpaqueCaptureAddress.fromRaw(0x9000).?,
+    });
+    defer buffer.deinit();
+    try std.testing.expectEqual(@as(u64, 2048), test_buffer_size);
+    try std.testing.expectEqual(
+        @as(raw.VkSharingMode, @intCast(raw.VK_SHARING_MODE_CONCURRENT)),
+        test_buffer_sharing_mode,
+    );
+    try std.testing.expectEqual(@as(u32, 2), test_buffer_queue_family_count);
+    try std.testing.expect((test_buffer_usage & raw.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) != 0);
+    try std.testing.expect(
+        (test_buffer_create_flags & raw.VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT) != 0,
+    );
+    try std.testing.expectEqual(@as(u64, 0x9000), test_buffer_capture_address);
+
+    const requirements = try buffer.memoryRequirements();
+    try std.testing.expectEqual(@as(u64, 1024), requirements.size.bytes());
+    try std.testing.expectEqual(@as(u64, 256), requirements.alignment.bytes());
+    try std.testing.expect(requirements.supportsMemoryType(.fromRaw(0)));
+    try std.testing.expect(!requirements.supportsMemoryType(.fromRaw(1)));
+    try std.testing.expectEqual(@as(u64, 0x7000), (try buffer.deviceAddress()).?.toRaw());
+    try std.testing.expectEqual(
+        @as(u64, 0x8000),
+        (try buffer.opaqueCaptureAddress()).?.toRaw(),
+    );
+    try device.setObjectName(&buffer, "vertex-buffer");
+    try std.testing.expectEqual(
+        @as(raw.VkObjectType, @intCast(raw.VK_OBJECT_TYPE_BUFFER)),
+        test_named_object_type,
+    );
+
+    var view = try device.createBufferView(&buffer, .{
+        .format = .r32_uint,
+        .offset = .fromBytes(256),
+        .range = .{ .bytes = .fromBytes(512) },
+    });
+    view.deinit();
+    view.deinit();
+    try std.testing.expectEqual(@as(u64, 256), test_buffer_view_offset);
+    try std.testing.expectEqual(@as(u64, 512), test_buffer_view_range);
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_buffer_view_count);
+
+    var allocation = try device.allocateMemory(.{
+        .size = .fromBytes(2048),
+        .memory_type_index = .fromRaw(0),
+    });
+    defer allocation.deinit();
+    var foreign_allocation = allocation;
+    foreign_allocation._device_handle = testHandle(raw.VkDevice, 0x9999);
+    try std.testing.expectError(
+        error.InvalidHandle,
+        buffer.bindMemory(&foreign_allocation, .zero),
+    );
+    var incompatible_allocation = allocation;
+    incompatible_allocation.memory_type_index = .fromRaw(1);
+    try std.testing.expectError(
+        error.InvalidOptions,
+        buffer.bindMemory(&incompatible_allocation, .zero),
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        buffer.bindMemory(&allocation, .fromBytes(1)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), test_bind_buffer_count);
+    try buffer.bindMemory(&allocation, .fromBytes(256));
+    try std.testing.expectEqual(@as(usize, 1), test_bind_buffer_count);
+    try std.testing.expectEqual(@as(u64, 256), test_bound_memory_offset);
+    try std.testing.expectError(
+        error.InvalidOptions,
+        buffer.bindMemory(&allocation, .fromBytes(256)),
+    );
+
+    buffer.deinit();
+    buffer.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_buffer_count);
+}
+
+test "buffer and allocation creation roll back provisional handles" {
+    test_resource_null_handle = false;
+    test_resource_result = raw.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    test_destroy_buffer_count = 0;
+    test_free_memory_count = 0;
+    var device = testDevice();
+    defer device.deinit();
+
+    try std.testing.expectError(
+        error.OutOfDeviceMemory,
+        device.createBuffer(.{
+            .size = .fromBytes(64),
+            .usage = .init(&.{.storage_buffer}),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_buffer_count);
+    try std.testing.expectError(
+        error.OutOfDeviceMemory,
+        device.allocateMemory(.{
+            .size = .fromBytes(64),
+            .memory_type_index = .fromRaw(0),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), test_free_memory_count);
+    test_resource_result = raw.VK_SUCCESS;
+}
+
+test "allocated buffer convenience owns and binds both resources" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_destroy_buffer_count = 0;
+    test_free_memory_count = 0;
+    test_bind_buffer_count = 0;
+    var device = testDevice();
+    defer device.deinit();
+
+    var allocated = try device.createAllocatedBuffer(.{
+        .buffer = .{
+            .size = .fromBytes(1024),
+            .usage = .init(&.{ .transfer_src, .uniform_buffer }),
+        },
+        .memory = .{ .memory_type_index = .fromRaw(0) },
+    });
+    try std.testing.expectEqual(@as(u64, 1024), test_allocated_memory_size);
+    try std.testing.expectEqual(@as(u32, 0), test_allocated_memory_type);
+    try std.testing.expectEqual(@as(usize, 1), test_bind_buffer_count);
+    allocated.deinit();
+    allocated.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_buffer_count);
+    try std.testing.expectEqual(@as(usize, 1), test_free_memory_count);
 }
 
 test "physical device format queries preserve support and typed capabilities" {

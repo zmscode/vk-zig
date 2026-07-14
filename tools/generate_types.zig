@@ -135,6 +135,20 @@ const flag_specs = [_]FlagSpec{
         .constant_prefix = "VK_IMAGE_USAGE_",
     },
     .{
+        .registry_name = "VkBufferUsageFlagBits",
+        .bit_name = "BufferUsageBit",
+        .flags_name = "BufferUsageFlags",
+        .raw_flags_name = "VkBufferUsageFlags",
+        .constant_prefix = "VK_BUFFER_USAGE_",
+    },
+    .{
+        .registry_name = "VkBufferCreateFlagBits",
+        .bit_name = "BufferCreateBit",
+        .flags_name = "BufferCreateFlags",
+        .raw_flags_name = "VkBufferCreateFlags",
+        .constant_prefix = "VK_BUFFER_CREATE_",
+    },
+    .{
         .registry_name = "VkImageCreateFlagBits",
         .bit_name = "ImageCreateBit",
         .flags_name = "ImageCreateFlags",

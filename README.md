@@ -9,7 +9,8 @@ package provides:
 - resource-safe `deinit` methods and Zig errors for common `VkResult` failures;
 - generated command descriptors that prevent PFN/name and dispatch-scope mismatches;
 - generated extension-name descriptors and a bounded, allocation-free extension set;
-- typed queue-family, memory-selection, surface-query, swapchain-status, and debug-utils helpers;
+- domain modules for buffers, images, memory, synchronization, commands, queues, presentation,
+  formats, capabilities, and debug utilities;
 - reproducible offline builds from vendored Khronos inputs; and
 - an explicit command to pull, verify, and vendor a new Vulkan registry revision.
 
@@ -123,7 +124,8 @@ var instance = try entry.createInstance(.{
 });
 ```
 
-Use `queueFamilies` and `findMemoryTypeIndex` instead of repeating flag and bit-index arithmetic:
+Use `queueFamilies` and the typed memory snapshot instead of repeating flag and bit-index
+arithmetic:
 
 ```zig
 const families = try physical_device.queueFamilies(gpa);
@@ -132,12 +134,33 @@ const graphics = for (families) |family| {
     if (family.supports(.graphics)) break family;
 } else return error.NoGraphicsQueue;
 
-const memory_type = try physical_device.findMemoryTypeIndex(.{
-    .type_bits = requirements.memoryTypeBits,
+const memory_properties = try physical_device.memoryProperties();
+const memory_type = try memory_properties.findType(.{
+    .type_bits = requirements.memory_type_bits,
     .required_flags = .init(&.{.host_visible}),
     .preferred_flags = .init(&.{.host_coherent}),
 });
 ```
+
+Buffers, their requirements, memory binding, views, and device addresses are available without
+raw Vulkan declarations. The convenience path selects and owns the allocation alongside the
+buffer:
+
+```zig
+const memory_properties = try physical_device.memoryProperties();
+var vertex_buffer = try device.createAllocatedBufferForProperties(.{
+    .buffer = .{
+        .size = .fromBytes(4096),
+        .usage = .init(&.{ .transfer_src, .vertex_buffer }),
+    },
+    .memory_properties = &memory_properties,
+    .required_memory_flags = .init(&.{ .host_visible, .host_coherent }),
+});
+defer vertex_buffer.deinit();
+```
+
+Use `createBuffer`, `memoryRequirements`, `allocateMemory`, and `Buffer.bindMemory` when placing
+several resources into one allocation. See `examples/buffer_setup.zig` for the complete setup.
 
 Physical memory properties are owned typed snapshots, so their slices remain valid as long as the
 snapshot does. Counts and heap indices are validated before any slice is exposed:
@@ -384,9 +407,9 @@ const layers: []const [:0]const u8 = if (diagnostic_support.validation_enabled)
     &.{vk.layer.khronos_validation.name}
 else
     &.{};
-const debug_messenger: ?vk.ext.debug_utils.MessengerConfig =
+const debug_messenger: ?vk.debug_utils.Config =
     if (diagnostic_support.debug_messenger_enabled)
-        vk.ext.debug_utils.MessengerConfig.fromHandler(debugMessage, .{})
+        vk.debug_utils.Config.fromHandler(debugMessage, .{})
     else
         null;
 
@@ -397,7 +420,7 @@ var instance = try entry.createInstance(.{
 });
 defer instance.deinit(); // Destroys the messenger before the instance.
 
-fn debugMessage(message: vk.ext.debug_utils.Message) void {
+fn debugMessage(message: vk.debug_utils.Message) void {
     const text = message.text() orelse "(no message)";
     if (message.isError()) {
         std.log.err("Vulkan: {s}", .{text});
@@ -417,13 +440,13 @@ stateful handler, pass a stable pointer whose lifetime covers the instance:
 const Diagnostics = struct {
     warning_count: usize = 0,
 
-    fn handle(state: *Diagnostics, message: vk.ext.debug_utils.Message) void {
+    fn handle(state: *Diagnostics, message: vk.debug_utils.Message) void {
         if (message.isWarning()) state.warning_count += 1;
     }
 };
 
 var diagnostics: Diagnostics = .{};
-const debug_messenger = vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext(
+const debug_messenger = vk.debug_utils.Config.fromHandlerWithContext(
     &diagnostics,
     .{},
     Diagnostics.handle,
@@ -431,10 +454,10 @@ const debug_messenger = vk.ext.debug_utils.MessengerConfig.fromHandlerWithContex
 ```
 
 Vulkan may invoke a handler concurrently, so synchronize shared mutable state. A handler may
-return `vk.ext.debug_utils.HandlerResult` instead of `void` when it intentionally needs to abort
+return `vk.debug_utils.HandlerResult` instead of `void` when it intentionally needs to abort
 the triggering Vulkan call. The default configuration accepts warning/error severity and
-general/validation/performance message types; customize it with `severity_flags` and
-`message_type_flags`.
+general/validation/performance message types; customize `ConfigOptions.severity` and
+`ConfigOptions.message_types` with the typed flag sets.
 
 GPU labels use the same extension, but configuring labels without a messenger still requires
 adding `vk.extension.ext_debug_utils.name` to `InstanceOptions.extensions`:
@@ -442,8 +465,8 @@ adding `vk.extension.ext_debug_utils.name` to `InstanceOptions.extensions`:
 ```zig
 try enabled_extensions.append(vk.extension.ext_debug_utils.name);
 
-try device.setObjectName(.{ .device = &device }, "main-device");
-try device.setObjectName(.{ .image = image }, "scene-color");
+try device.setObjectName(&device, "main-device");
+try device.setObjectName(&image, "scene-color");
 var label = try queue.beginLabelScope(.{
     .name = "opaque-pass",
     .color = .{ 0.2, 0.4, 1.0, 1.0 },
@@ -451,12 +474,15 @@ var label = try queue.beginLabelScope(.{
 defer label.deinit();
 ```
 
-The logger and whether unavailable diagnostics are fatal remain application policy.
-`MessengerOptions`, `Messenger.init`, and `Message.fromCallback` remain available as explicit
-raw-ABI escape hatches for unusual integrations.
+The logger and whether unavailable diagnostics are fatal remain application policy. The wrapper
+owns the raw callback ABI; `Message.fromRawCallback` and raw command loading are explicit advanced
+escape hatches for unusual integrations.
 
 Destroy swapchains before their device and surface, and extension objects/surfaces before their
 parent instance. See `examples/debug_utils.zig` for a complete typed handler.
+
+The implementation layout and dependency direction are documented in
+[`src/README.md`](src/README.md).
 
 ## Commands
 

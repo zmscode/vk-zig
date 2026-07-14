@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
     );
     if (!diagnostics.debug_messenger_enabled) return error.DebugUtilsUnavailable;
 
-    const messenger_config = vk.ext.debug_utils.MessengerConfig.fromHandler(
+    const messenger_config = vk.debug_utils.Config.fromHandler(
         debugMessage,
         .{},
     );
@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("created a VK_EXT_debug_utils messenger", .{});
 }
 
-fn debugMessage(message: vk.ext.debug_utils.Message) void {
+fn debugMessage(message: vk.debug_utils.Message) void {
     const text = message.text() orelse "(no message)";
     if (message.isError()) {
         std.log.err("Vulkan: {s}", .{text});

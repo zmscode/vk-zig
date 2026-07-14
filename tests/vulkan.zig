@@ -1,22 +1,13 @@
 const std = @import("std");
 const vk = @import("vulkan");
 
-fn debugCallback(
-    _: vk.raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
-    _: vk.raw.VkDebugUtilsMessageTypeFlagsEXT,
-    _: [*c]const vk.raw.VkDebugUtilsMessengerCallbackDataEXT,
-    _: ?*anyopaque,
-) callconv(.c) vk.raw.VkBool32 {
-    return vk.raw.VK_FALSE;
-}
-
 var typed_handler_count: u32 = 0;
 
-fn typedDebugMessage(_: vk.ext.debug_utils.Message) void {
+fn typedDebugMessage(_: vk.debug_utils.Message) void {
     typed_handler_count += 1;
 }
 
-fn abortDebugMessage(_: vk.ext.debug_utils.Message) vk.ext.debug_utils.HandlerResult {
+fn abortDebugMessage(_: vk.debug_utils.Message) vk.debug_utils.HandlerResult {
     return .abort;
 }
 
@@ -25,8 +16,8 @@ const HandlerContext = struct {
 
     fn handle(
         context: *HandlerContext,
-        _: vk.ext.debug_utils.Message,
-    ) vk.ext.debug_utils.HandlerResult {
+        _: vk.debug_utils.Message,
+    ) vk.debug_utils.HandlerResult {
         context.count += 1;
         return .continue_;
     }
@@ -177,9 +168,9 @@ test "wrapper exposes typed Vulkan lifecycle objects" {
     try std.testing.expect(@hasDecl(vk, "Device"));
     try std.testing.expect(@hasDecl(vk, "Queue"));
     try std.testing.expect(@hasDecl(vk, "Surface"));
-    try std.testing.expect(@hasDecl(vk.ext.debug_utils, "Messenger"));
-    try std.testing.expect(@hasDecl(vk.ext.debug_utils, "MessengerConfig"));
-    try std.testing.expect(@hasDecl(vk.ext.debug_utils, "HandlerResult"));
+    try std.testing.expect(@hasDecl(vk.debug_utils, "Messenger"));
+    try std.testing.expect(@hasDecl(vk.debug_utils, "Config"));
+    try std.testing.expect(@hasDecl(vk.debug_utils, "HandlerResult"));
 }
 
 test "generated commands bind scope, name, and function type" {
@@ -599,10 +590,8 @@ test "typed memory properties convert flags and sum every device-local heap" {
 }
 
 test "debug utility options produce reusable callback and label views" {
-    const messenger_options: vk.ext.debug_utils.MessengerOptions = .{
-        .callback = debugCallback,
-    };
-    const messenger_info = messenger_options.createInfo();
+    const messenger_config = vk.debug_utils.Config.fromHandler(typedDebugMessage, .{});
+    const messenger_info = messenger_config.createInfoRaw(null);
     try std.testing.expectEqual(
         @as(vk.raw.VkStructureType, @intCast(
             vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -611,24 +600,24 @@ test "debug utility options produce reusable callback and label views" {
     );
     try std.testing.expect(messenger_info.pfnUserCallback != null);
     try std.testing.expectEqual(
-        vk.ext.debug_utils.severity_flags.warning_and_error,
+        vk.debug_utils.SeverityFlags.warning_and_error.toRaw(),
         messenger_info.messageSeverity,
     );
     try std.testing.expectEqual(
-        vk.ext.debug_utils.message_type_flags.standard,
+        vk.debug_utils.MessageTypeFlags.standard.toRaw(),
         messenger_info.messageType,
     );
     try std.testing.expect(
-        (messenger_info.messageSeverity & vk.ext.debug_utils.severity_flags.info) == 0,
+        (messenger_info.messageSeverity & vk.debug_utils.SeverityFlags.init(&.{.info}).toRaw()) == 0,
     );
     try std.testing.expect(
-        (messenger_info.messageSeverity & vk.ext.debug_utils.severity_flags.verbose) == 0,
+        (messenger_info.messageSeverity & vk.debug_utils.SeverityFlags.init(&.{.verbose}).toRaw()) == 0,
     );
 
-    const label = (vk.ext.debug_utils.LabelOptions{
+    const label = (vk.debug_utils.LabelOptions{
         .name = "frame",
         .color = .{ 1.0, 0.5, 0.25, 1.0 },
-    }).createInfo();
+    }).toRaw();
     try std.testing.expectEqualStrings("frame", std.mem.span(label.pLabelName));
     try std.testing.expectEqual(@as(f32, 0.5), label.color[1]);
 
@@ -637,7 +626,7 @@ test "debug utility options produce reusable callback and label views" {
         .pMessageIdName = "validation-id",
         .pMessage = "validation message",
     };
-    const message = vk.ext.debug_utils.Message.fromCallback(
+    const message = vk.debug_utils.Message.fromRawCallback(
         vk.raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
         vk.raw.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
         &callback_data,
@@ -646,36 +635,36 @@ test "debug utility options produce reusable callback and label views" {
     try std.testing.expect(!message.isWarning());
     try std.testing.expectEqualStrings("validation-id", message.idName().?);
     try std.testing.expectEqualStrings("validation message", message.text().?);
-    try std.testing.expectEqual(@as(usize, 0), message.objects().len);
+    try std.testing.expectEqual(@as(usize, 0), message.objectCount());
 
     typed_handler_count = 0;
-    const typed_config = vk.ext.debug_utils.MessengerConfig.fromHandler(
+    const typed_config = vk.debug_utils.Config.fromHandler(
         typedDebugMessage,
         .{},
     );
     try std.testing.expectEqual(
-        vk.ext.debug_utils.HandlerResult.continue_,
+        vk.debug_utils.HandlerResult.continue_,
         typed_config.dispatch(message),
     );
     try std.testing.expectEqual(@as(u32, 1), typed_handler_count);
 
-    const abort_config = vk.ext.debug_utils.MessengerConfig.fromHandler(
+    const abort_config = vk.debug_utils.Config.fromHandler(
         abortDebugMessage,
         .{},
     );
     try std.testing.expectEqual(
-        vk.ext.debug_utils.HandlerResult.abort,
+        vk.debug_utils.HandlerResult.abort,
         abort_config.dispatch(message),
     );
 
     var context: HandlerContext = .{};
-    const context_config = vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext(
+    const context_config = vk.debug_utils.Config.fromHandlerWithContext(
         &context,
         .{},
         HandlerContext.handle,
     );
     try std.testing.expectEqual(
-        vk.ext.debug_utils.HandlerResult.continue_,
+        vk.debug_utils.HandlerResult.continue_,
         context_config.dispatch(message),
     );
     try std.testing.expectEqual(@as(u32, 1), context.count);
@@ -702,7 +691,7 @@ test "instance owns typed debug messenger lifecycle" {
         .enumerate_instance_layer_properties = @ptrCast(&fakeUnused),
     };
     var context: HandlerContext = .{};
-    const messenger_config = vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext(
+    const messenger_config = vk.debug_utils.Config.fromHandlerWithContext(
         &context,
         .{},
         HandlerContext.handle,
@@ -965,9 +954,9 @@ test "all public wrapper declarations compile" {
     _ = &vk.CommandBuffer.clearColorImage;
     _ = &vk.CommandBuffer.beginLabel;
     _ = &vk.CommandBuffer.insertLabel;
-    _ = &vk.ext.debug_utils.Messenger.init;
-    _ = &vk.ext.debug_utils.MessengerConfig.fromHandler;
-    _ = &vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext;
+    _ = &vk.Instance.createDebugMessenger;
+    _ = &vk.debug_utils.Config.fromHandler;
+    _ = &vk.debug_utils.Config.fromHandlerWithContext;
     _ = &vk.Queue.submit;
     _ = &vk.Queue.submit2;
     _ = &vk.Queue.submitRaw;

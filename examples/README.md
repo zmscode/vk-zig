@@ -26,6 +26,7 @@ Each example also has a named run step:
 | `debug_utils.zig` | `zig build run-debug-utils` | Typed, instance-owned `VK_EXT_debug_utils` messenger |
 | `frame_resources.zig` | `zig build run-frame-resources` | Raw-free image-view, command, synchronization, acquire, submit, and present flow |
 | `timeline_submit.zig` | `zig build run-timeline-submit` | Raw-free submit2 timeline values, synchronization2 stages, fence wait, and command completion |
+| `buffer_setup.zig` | `zig build run-buffer-setup` | Raw-free buffer creation, memory-type selection, allocation, and checked binding |
 
 Except for `platform.zig`, running these programs requires a discoverable Vulkan loader and, for
 device examples, a working Vulkan implementation. On macOS, install MoltenVK or the Vulkan SDK.

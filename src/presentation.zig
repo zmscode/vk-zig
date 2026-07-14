@@ -1,0 +1,240 @@
+const std = @import("std");
+const raw = @import("vulkan_raw");
+const command = @import("vulkan_commands");
+const types = @import("vulkan_types");
+const core = @import("core.zig");
+const sync = @import("synchronization.zig");
+const image = @import("image.zig");
+const debug_utils = @import("debug_utils.zig");
+
+const CommandFunction = command.FunctionType;
+const InstanceHandle = core.NonNullHandle(raw.VkInstance);
+const DeviceHandle = core.NonNullHandle(raw.VkDevice);
+const SurfaceHandle = core.NonNullHandle(raw.VkSurfaceKHR);
+const SwapchainHandle = core.NonNullHandle(raw.VkSwapchainKHR);
+const image_count_max = 4096;
+const enumeration_attempt_count_max = 4;
+const queue_family_count_max = 64;
+
+pub const Surface = struct {
+    _handle: ?SurfaceHandle,
+    _instance_handle: InstanceHandle,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    destroy_surface: CommandFunction(raw.PFN_vkDestroySurfaceKHR),
+
+    pub fn deinit(surface: *Surface) void {
+        const handle = surface._handle orelse return;
+        surface.destroy_surface(
+            surface._instance_handle,
+            handle,
+            surface.allocation_callbacks,
+        );
+        surface._handle = null;
+    }
+
+    pub fn rawHandle(surface: *const Surface) core.Error!raw.VkSurfaceKHR {
+        return surface._handle orelse error.InactiveObject;
+    }
+
+    pub fn debugObject(surface: *const Surface) core.Error!debug_utils.Object {
+        return .forInstance(.surface, try surface.rawHandle(), surface._instance_handle);
+    }
+};
+
+pub const Options = struct {
+    surface: *const Surface,
+    min_image_count: u32,
+    image_format: types.Format,
+    image_color_space: types.ColorSpace,
+    image_extent: types.Extent2D,
+    image_usage: types.ImageUsageFlags,
+    image_array_layers: u32 = 1,
+    queue_family_indices: []const core.QueueFamilyIndex = &.{},
+    pre_transform: types.SurfaceTransformBit = .identity,
+    composite_alpha: types.CompositeAlphaBit = .opaque_,
+    present_mode: types.PresentMode = .fifo,
+    clipped: bool = true,
+    old_swapchain: ?*const Swapchain = null,
+    flags: types.SwapchainCreateFlags = .empty,
+    next: ?*const anyopaque = null,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
+
+    pub fn validate(
+        options: Options,
+        device_handle: DeviceHandle,
+        instance_handle: InstanceHandle,
+    ) core.Error!void {
+        if (options.surface._instance_handle != instance_handle) return error.InvalidHandle;
+        _ = try options.surface.rawHandle();
+        if (options.min_image_count == 0 or options.image_array_layers == 0) {
+            return error.InvalidOptions;
+        }
+        if (options.image_extent.width == 0 or options.image_extent.height == 0) {
+            return error.InvalidOptions;
+        }
+        _ = try core.count32(options.queue_family_indices.len);
+        if (options.queue_family_indices.len > queue_family_count_max) return error.CountOverflow;
+        for (options.queue_family_indices, 0..) |family_index, index| {
+            for (options.queue_family_indices[0..index]) |previous_index| {
+                if (family_index == previous_index) return error.InvalidOptions;
+            }
+        }
+        if (options.old_swapchain) |old| {
+            if (old._device_handle != device_handle) return error.InvalidHandle;
+            _ = try old.rawHandle();
+        }
+    }
+};
+
+pub const AcquireOptions = struct {
+    timeout: core.Timeout = .infinite,
+    semaphore: ?*const sync.Semaphore = null,
+    fence: ?*const sync.Fence = null,
+};
+
+pub const AcquireResult = union(enum) {
+    success: core.SwapchainImageIndex,
+    suboptimal: core.SwapchainImageIndex,
+    timeout,
+    not_ready,
+    out_of_date,
+};
+
+pub const PresentOptions = struct {
+    swapchain: *const Swapchain,
+    image_index: core.SwapchainImageIndex,
+    wait_semaphores: []const *const sync.Semaphore = &.{},
+    next: ?*const anyopaque = null,
+};
+
+pub const PresentStatus = enum {
+    success,
+    suboptimal,
+    out_of_date,
+};
+
+pub const Swapchain = struct {
+    _handle: ?SwapchainHandle,
+    _device_handle: DeviceHandle,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    destroy_swapchain: CommandFunction(raw.PFN_vkDestroySwapchainKHR),
+    get_swapchain_images: CommandFunction(raw.PFN_vkGetSwapchainImagesKHR),
+    acquire_next_image: CommandFunction(raw.PFN_vkAcquireNextImageKHR),
+
+    pub fn deinit(swapchain: *Swapchain) void {
+        const handle = swapchain._handle orelse return;
+        swapchain.destroy_swapchain(
+            swapchain._device_handle,
+            handle,
+            swapchain.allocation_callbacks,
+        );
+        swapchain._handle = null;
+    }
+
+    pub fn rawHandle(swapchain: *const Swapchain) core.Error!raw.VkSwapchainKHR {
+        return swapchain._handle orelse error.InactiveObject;
+    }
+
+    pub fn debugObject(swapchain: *const Swapchain) core.Error!debug_utils.Object {
+        return .forDevice(.swapchain, try swapchain.rawHandle(), swapchain._device_handle);
+    }
+
+    pub fn imageCount(swapchain: *const Swapchain) core.Error!u32 {
+        const handle = try swapchain.rawHandle();
+        var count: u32 = 0;
+        try core.checkSuccess(swapchain.get_swapchain_images(
+            swapchain._device_handle,
+            handle,
+            &count,
+            null,
+        ));
+        if (count > image_count_max) return error.TooManyObjects;
+        return count;
+    }
+
+    pub fn images(
+        swapchain: *const Swapchain,
+        gpa: std.mem.Allocator,
+    ) (core.Error || std.mem.Allocator.Error)![]image.SwapchainImage {
+        var output = try gpa.alloc(image.SwapchainImage, try swapchain.imageCount());
+        errdefer gpa.free(output);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = swapchain.imagesInto(output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try swapchain.imageCount();
+                    const next = if (required > output.len)
+                        required
+                    else
+                        @min(output.len * 2, image_count_max);
+                    if (next <= output.len) return error.EnumerationUnstable;
+                    output = try gpa.realloc(output, next);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return gpa.realloc(output, written.len);
+        }
+        return error.EnumerationUnstable;
+    }
+
+    pub fn imagesInto(
+        swapchain: *const Swapchain,
+        storage: []image.SwapchainImage,
+    ) core.Error![]image.SwapchainImage {
+        if (storage.len > image_count_max) return error.CountOverflow;
+        const live_handle = (try swapchain.rawHandle()) orelse return error.InvalidHandle;
+        var raw_images: [image_count_max]raw.VkImage = undefined;
+        var written: u32 = @intCast(storage.len);
+        const output: [*c]raw.VkImage = if (storage.len == 0) null else &raw_images;
+        const result = swapchain.get_swapchain_images(
+            swapchain._device_handle,
+            live_handle,
+            &written,
+            output,
+        );
+        if (result == raw.VK_INCOMPLETE) return error.BufferTooSmall;
+        try core.checkSuccess(result);
+        if (written > storage.len) return error.BufferTooSmall;
+        for (storage[0..written], raw_images[0..written], 0..) |*swapchain_image, raw_image, index| {
+            swapchain_image.* = .{
+                ._handle = raw_image orelse return error.InvalidHandle,
+                ._device_handle = swapchain._device_handle,
+                ._swapchain_handle = live_handle,
+                .index = .fromRaw(@intCast(index)),
+            };
+        }
+        return storage[0..written];
+    }
+
+    pub fn acquireNextImage(
+        swapchain: *const Swapchain,
+        options: AcquireOptions,
+    ) core.Error!AcquireResult {
+        if (options.semaphore == null and options.fence == null) return error.InvalidOptions;
+        const semaphore = if (options.semaphore) |semaphore| blk: {
+            if (semaphore._device_handle != swapchain._device_handle) return error.InvalidHandle;
+            if (semaphore.kind != .binary) return error.InvalidOptions;
+            break :blk try semaphore.rawHandle();
+        } else null;
+        const fence = if (options.fence) |fence| blk: {
+            if (fence._device_handle != swapchain._device_handle) return error.InvalidHandle;
+            break :blk try fence.rawHandle();
+        } else null;
+        var image_index: u32 = 0;
+        const result = swapchain.acquire_next_image(
+            swapchain._device_handle,
+            try swapchain.rawHandle(),
+            options.timeout.toRaw(),
+            semaphore,
+            fence,
+            &image_index,
+        );
+        if (result == raw.VK_SUCCESS) return .{ .success = .fromRaw(image_index) };
+        if (result == raw.VK_SUBOPTIMAL_KHR) return .{ .suboptimal = .fromRaw(image_index) };
+        if (result == raw.VK_TIMEOUT) return .timeout;
+        if (result == raw.VK_NOT_READY) return .not_ready;
+        if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
+        try core.checkSuccess(result);
+        unreachable;
+    }
+};
