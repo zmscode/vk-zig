@@ -60,8 +60,9 @@ Enumerate queue families with `queueFamilies`, select them with `QueueFamily.sup
 `QueueFamily.presentationSupport` when a surface is involved. Use `findMemoryTypeIndex` with
 required and preferred property flags instead of manually scanning `memoryTypes`.
 
-Deinitialize children before parents: swapchains, then devices, surfaces/debug messengers,
-instances, and finally the loader. Queues and swapchain images are non-owning and need no deinit.
+Deinitialize children before parents: swapchains, then devices, surfaces, instances, and finally
+the loader. An instance configured with a typed debug messenger owns and destroys that messenger
+before destroying itself. Queues and swapchain images are non-owning and need no deinit.
 Wrapper `deinit` methods are idempotent, but using an inactive owner returns
 `error.InactiveObject`.
 
@@ -72,20 +73,28 @@ Wrapper `deinit` methods are idempotent, but using an inactive owner returns
 - Enumerate `deviceExtensions`, enable `vk.extension.khr_swapchain.name`, then use
   `device.createSwapchain`. Handle every `AcquireResult` and `PresentStatus` tag; `.out_of_date`
   and `.suboptimal` are normal control flow for recreation, not generic errors.
-- Create an owned debug messenger with `vk.ext.debug_utils.Messenger.init(&instance, options)`.
+- Define a handler accepting `vk.ext.debug_utils.Message`, construct it with
+  `MessengerConfig.fromHandler`, and pass it as `InstanceOptions.debug_messenger`. This path owns
+  the C trampoline, automatically enables `VK_EXT_debug_utils`, chains the creation callback, and
+  destroys the persistent messenger with the instance.
+- Use `MessengerConfig.fromHandlerWithContext` when the handler needs state. The context pointer
+  must remain valid until instance deinitialization, and mutable state must be safe for concurrent
+  Vulkan callbacks. Handlers return `void` normally or `HandlerResult` to control abort behavior.
 - Resolve validation, messenger, and GPU-label requests with `vk.diagnostics.detect`; use
   `vk.layer.khronos_validation.name` and `vk.extension.ext_debug_utils.name` rather than repeating
   string literals. Treat the returned booleans as availability, leaving fatal/fallback policy to
   the application.
-- Reuse `MessengerOptions.createInfo()` in `InstanceOptions.next` when validation output is needed
-  during instance creation/destruction. Decode callback pointers with
-  `vk.ext.debug_utils.Message.fromCallback`.
 - Use `debug_utils.severity_flags` and `message_type_flags` instead of casting raw Vulkan bits.
+- Treat `MessengerOptions`, `Messenger.init`, `MessengerOptions.createInfo`, and
+  `Message.fromCallback` as advanced raw-ABI escape hatches. Do not use them in ordinary consumer
+  diagnostics code.
 - Name wrapper and raw Vulkan objects with `device.setObjectName`; use queue and command-buffer
   label methods for GPU captures. Do not convert handles with `@intFromPtr` in consumer code.
 
-Enable `VK_KHR_surface`, the platform surface extension, or `VK_EXT_debug_utils` in
-`InstanceOptions.extensions` before calling their commands.
+Enable `VK_KHR_surface` and the platform surface extension in `InstanceOptions.extensions` before
+calling their commands. `InstanceOptions.debug_messenger` automatically enables
+`VK_EXT_debug_utils`; add it explicitly only when using debug-utils features without a messenger,
+such as GPU labels.
 
 ## Read properties safely
 

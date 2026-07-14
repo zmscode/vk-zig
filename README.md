@@ -217,30 +217,76 @@ const status = try queue.present(.{
 if (status != .success) try recreateSwapchain();
 ```
 
-The debug-utils wrapper loads its own extension commands, rolls back partial creation, and owns the
-messenger. Enable `VK_EXT_debug_utils` in `InstanceOptions.extensions` first:
+The debug-utils wrapper owns Vulkan's C callback trampoline, create-info chain, extension loading,
+and messenger lifetime. Application handlers receive a typed `Message` and do not need `vk.raw`:
 
 ```zig
 const diagnostic_support = vk.diagnostics.detect(.{
     .validation = true,
     .debug_messenger = true,
-    .gpu_labels = true,
 }, available_layers, available_extensions);
 
-if (diagnostic_support.validation_enabled) {
-    try enabled_layers.append(vk.layer.khronos_validation.name);
-}
-if (diagnostic_support.debug_utils_enabled) {
-    try enabled_extensions.append(vk.extension.ext_debug_utils.name);
-}
+const layers: []const [:0]const u8 = if (diagnostic_support.validation_enabled)
+    &.{vk.layer.khronos_validation.name}
+else
+    &.{};
+const debug_messenger: ?vk.ext.debug_utils.MessengerConfig =
+    if (diagnostic_support.debug_messenger_enabled)
+        vk.ext.debug_utils.MessengerConfig.fromHandler(debugMessage, .{})
+    else
+        null;
 
-const messenger_options: vk.ext.debug_utils.MessengerOptions = .{
-    .callback = debugCallback,
+var instance = try entry.createInstance(.{
+    .layers = layers,
+    .debug_messenger = debug_messenger,
+    .enumerate_portability = vk.platform == .metal,
+});
+defer instance.deinit(); // Destroys the messenger before the instance.
+
+fn debugMessage(message: vk.ext.debug_utils.Message) void {
+    const text = message.text() orelse "(no message)";
+    if (message.isError()) {
+        std.log.err("Vulkan: {s}", .{text});
+    } else if (message.isWarning()) {
+        std.log.warn("Vulkan: {s}", .{text});
+    } else {
+        std.log.info("Vulkan: {s}", .{text});
+    }
+}
+```
+
+`Entry.createInstance` adds `VK_EXT_debug_utils`, includes the handler during instance
+creation/destruction, creates the persistent messenger, and rolls back partial creation. For a
+stateful handler, pass a stable pointer whose lifetime covers the instance:
+
+```zig
+const Diagnostics = struct {
+    warning_count: usize = 0,
+
+    fn handle(state: *Diagnostics, message: vk.ext.debug_utils.Message) void {
+        if (message.isWarning()) state.warning_count += 1;
+    }
 };
-var debug_create_info = messenger_options.createInfo();
-// Pass &debug_create_info as InstanceOptions.next to receive instance creation messages too.
-var messenger = try vk.ext.debug_utils.Messenger.init(&instance, messenger_options);
-defer messenger.deinit();
+
+var diagnostics: Diagnostics = .{};
+const debug_messenger = vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext(
+    &diagnostics,
+    .{},
+    Diagnostics.handle,
+);
+```
+
+Vulkan may invoke a handler concurrently, so synchronize shared mutable state. A handler may
+return `vk.ext.debug_utils.HandlerResult` instead of `void` when it intentionally needs to abort
+the triggering Vulkan call. The default configuration accepts warning/error severity and
+general/validation/performance message types; customize it with `severity_flags` and
+`message_type_flags`.
+
+GPU labels use the same extension, but configuring labels without a messenger still requires
+adding `vk.extension.ext_debug_utils.name` to `InstanceOptions.extensions`:
+
+```zig
+try enabled_extensions.append(vk.extension.ext_debug_utils.name);
 
 try device.setObjectName(.{ .device = &device }, "main-device");
 try device.setObjectName(.{ .image = image }, "scene-color");
@@ -248,14 +294,12 @@ try queue.beginLabel(.{ .name = "opaque-pass", .color = .{ 0.2, 0.4, 1.0, 1.0 } 
 defer queue.endLabel() catch {};
 ```
 
-The messenger defaults accept warning/error severity and general/validation/performance message
-types. Customize them without raw casts through `debug_utils.severity_flags` and
-`debug_utils.message_type_flags`. Use `vk.ext.debug_utils.Message.fromCallback(...)` for bounded
-callback text, severity checks, and label/object slices. The logger and whether unavailable
-diagnostics are fatal remain application policy.
+The logger and whether unavailable diagnostics are fatal remain application policy.
+`MessengerOptions`, `Messenger.init`, and `Message.fromCallback` remain available as explicit
+raw-ABI escape hatches for unusual integrations.
 
 Destroy swapchains before their device and surface, and extension objects/surfaces before their
-parent instance. See `examples/debug_utils.zig` for a complete callback signature.
+parent instance. See `examples/debug_utils.zig` for a complete typed handler.
 
 ## Commands
 

@@ -10,6 +10,139 @@ fn debugCallback(
     return vk.raw.VK_FALSE;
 }
 
+var typed_handler_count: u32 = 0;
+
+fn typedDebugMessage(_: vk.ext.debug_utils.Message) void {
+    typed_handler_count += 1;
+}
+
+fn abortDebugMessage(_: vk.ext.debug_utils.Message) vk.ext.debug_utils.HandlerResult {
+    return .abort;
+}
+
+const HandlerContext = struct {
+    count: u32 = 0,
+
+    fn handle(
+        context: *HandlerContext,
+        _: vk.ext.debug_utils.Message,
+    ) vk.ext.debug_utils.HandlerResult {
+        context.count += 1;
+        return .continue_;
+    }
+};
+
+var owned_debug_extension_enabled = false;
+var owned_debug_create_info_chained = false;
+var owned_debug_callback_continued = false;
+var owned_debug_create_count: u32 = 0;
+var owned_debug_destroy_count: u32 = 0;
+var owned_instance_destroy_count: u32 = 0;
+var owned_destroy_order: [2]u8 = .{ 0, 0 };
+var owned_destroy_order_count: u32 = 0;
+
+fn fakeUnused() callconv(.c) void {}
+
+fn fakeNameEquals(name: [*c]const u8, expected: []const u8) bool {
+    if (name == null) return false;
+    const sentinel_name: [*:0]const u8 = @ptrCast(name);
+    return std.mem.eql(u8, std.mem.span(sentinel_name), expected);
+}
+
+fn fakeCreateInstance(
+    create_info: [*c]const vk.raw.VkInstanceCreateInfo,
+    _: [*c]const vk.raw.VkAllocationCallbacks,
+    output: [*c]vk.raw.VkInstance,
+) callconv(.c) vk.raw.VkResult {
+    const info = create_info[0];
+    for (0..info.enabledExtensionCount) |index| {
+        if (fakeNameEquals(
+            info.ppEnabledExtensionNames[index],
+            vk.extension.ext_debug_utils.name,
+        )) {
+            owned_debug_extension_enabled = true;
+        }
+    }
+    if (info.pNext) |next| {
+        const debug_info: *const vk.raw.VkDebugUtilsMessengerCreateInfoEXT =
+            @ptrCast(@alignCast(next));
+        owned_debug_create_info_chained =
+            debug_info.sType == vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT and
+            debug_info.pfnUserCallback != null;
+        if (debug_info.pfnUserCallback) |callback| {
+            var callback_data: vk.raw.VkDebugUtilsMessengerCallbackDataEXT = .{
+                .sType = vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT,
+                .pMessage = "instance creation message",
+            };
+            const result = callback(
+                vk.raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+                vk.raw.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT,
+                &callback_data,
+                debug_info.pUserData,
+            );
+            owned_debug_callback_continued = result == vk.raw.VK_FALSE;
+        }
+    }
+    output[0] = @ptrFromInt(0x1000);
+    return vk.raw.VK_SUCCESS;
+}
+
+fn fakeGetDeviceProcAddr(
+    _: vk.raw.VkDevice,
+    _: [*c]const u8,
+) callconv(.c) vk.raw.PFN_vkVoidFunction {
+    return null;
+}
+
+fn fakeDestroyInstance(
+    _: vk.raw.VkInstance,
+    _: [*c]const vk.raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    owned_instance_destroy_count += 1;
+    owned_destroy_order[owned_destroy_order_count] = 2;
+    owned_destroy_order_count += 1;
+}
+
+fn fakeCreateDebugMessenger(
+    _: vk.raw.VkInstance,
+    _: [*c]const vk.raw.VkDebugUtilsMessengerCreateInfoEXT,
+    _: [*c]const vk.raw.VkAllocationCallbacks,
+    output: [*c]vk.raw.VkDebugUtilsMessengerEXT,
+) callconv(.c) vk.raw.VkResult {
+    owned_debug_create_count += 1;
+    output[0] = @ptrFromInt(0x2000);
+    return vk.raw.VK_SUCCESS;
+}
+
+fn fakeDestroyDebugMessenger(
+    _: vk.raw.VkInstance,
+    _: vk.raw.VkDebugUtilsMessengerEXT,
+    _: [*c]const vk.raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    owned_debug_destroy_count += 1;
+    owned_destroy_order[owned_destroy_order_count] = 1;
+    owned_destroy_order_count += 1;
+}
+
+fn fakeGetInstanceProcAddr(
+    _: vk.raw.VkInstance,
+    name: [*c]const u8,
+) callconv(.c) vk.raw.PFN_vkVoidFunction {
+    if (fakeNameEquals(name, "vkGetDeviceProcAddr")) {
+        return @ptrCast(&fakeGetDeviceProcAddr);
+    }
+    if (fakeNameEquals(name, "vkDestroyInstance")) {
+        return @ptrCast(&fakeDestroyInstance);
+    }
+    if (fakeNameEquals(name, "vkCreateDebugUtilsMessengerEXT")) {
+        return @ptrCast(&fakeCreateDebugMessenger);
+    }
+    if (fakeNameEquals(name, "vkDestroyDebugUtilsMessengerEXT")) {
+        return @ptrCast(&fakeDestroyDebugMessenger);
+    }
+    return @ptrCast(&fakeUnused);
+}
+
 test "raw bindings contain core Vulkan declarations" {
     try std.testing.expect(@hasDecl(vk.raw, "VkInstance"));
     try std.testing.expect(@hasDecl(vk.raw, "VkDevice"));
@@ -45,6 +178,8 @@ test "wrapper exposes typed Vulkan lifecycle objects" {
     try std.testing.expect(@hasDecl(vk, "Queue"));
     try std.testing.expect(@hasDecl(vk, "Surface"));
     try std.testing.expect(@hasDecl(vk.ext.debug_utils, "Messenger"));
+    try std.testing.expect(@hasDecl(vk.ext.debug_utils, "MessengerConfig"));
+    try std.testing.expect(@hasDecl(vk.ext.debug_utils, "HandlerResult"));
 }
 
 test "generated commands bind scope, name, and function type" {
@@ -216,6 +351,84 @@ test "debug utility options produce reusable callback and label views" {
     try std.testing.expectEqualStrings("validation-id", message.idName().?);
     try std.testing.expectEqualStrings("validation message", message.text().?);
     try std.testing.expectEqual(@as(usize, 0), message.objects().len);
+
+    typed_handler_count = 0;
+    const typed_config = vk.ext.debug_utils.MessengerConfig.fromHandler(
+        typedDebugMessage,
+        .{},
+    );
+    try std.testing.expectEqual(
+        vk.ext.debug_utils.HandlerResult.continue_,
+        typed_config.dispatch(message),
+    );
+    try std.testing.expectEqual(@as(u32, 1), typed_handler_count);
+
+    const abort_config = vk.ext.debug_utils.MessengerConfig.fromHandler(
+        abortDebugMessage,
+        .{},
+    );
+    try std.testing.expectEqual(
+        vk.ext.debug_utils.HandlerResult.abort,
+        abort_config.dispatch(message),
+    );
+
+    var context: HandlerContext = .{};
+    const context_config = vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext(
+        &context,
+        .{},
+        HandlerContext.handle,
+    );
+    try std.testing.expectEqual(
+        vk.ext.debug_utils.HandlerResult.continue_,
+        context_config.dispatch(message),
+    );
+    try std.testing.expectEqual(@as(u32, 1), context.count);
+
+    const instance_options: vk.InstanceOptions = .{ .debug_messenger = typed_config };
+    try std.testing.expect(instance_options.debug_messenger != null);
+}
+
+test "instance owns typed debug messenger lifecycle" {
+    owned_debug_extension_enabled = false;
+    owned_debug_create_info_chained = false;
+    owned_debug_callback_continued = false;
+    owned_debug_create_count = 0;
+    owned_debug_destroy_count = 0;
+    owned_instance_destroy_count = 0;
+    owned_destroy_order = .{ 0, 0 };
+    owned_destroy_order_count = 0;
+
+    const entry: vk.Entry = .{
+        .get_instance_proc_addr = fakeGetInstanceProcAddr,
+        .create_instance = fakeCreateInstance,
+        .enumerate_instance_version = null,
+        .enumerate_instance_extension_properties = @ptrCast(&fakeUnused),
+        .enumerate_instance_layer_properties = @ptrCast(&fakeUnused),
+    };
+    var context: HandlerContext = .{};
+    const messenger_config = vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext(
+        &context,
+        .{},
+        HandlerContext.handle,
+    );
+    var instance = try entry.createInstance(.{
+        .debug_messenger = messenger_config,
+    });
+
+    try std.testing.expect(owned_debug_extension_enabled);
+    try std.testing.expect(owned_debug_create_info_chained);
+    try std.testing.expect(owned_debug_callback_continued);
+    try std.testing.expectEqual(@as(u32, 1), context.count);
+    try std.testing.expectEqual(@as(u32, 1), owned_debug_create_count);
+    try std.testing.expect(instance.debugMessengerActive());
+
+    instance.deinit();
+    instance.deinit();
+    try std.testing.expect(!instance.debugMessengerActive());
+    try std.testing.expectEqual(@as(u32, 1), owned_debug_destroy_count);
+    try std.testing.expectEqual(@as(u32, 1), owned_instance_destroy_count);
+    try std.testing.expectEqual(@as(u32, 2), owned_destroy_order_count);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, &owned_destroy_order);
 }
 
 test "bounded property names and support checks do not allocate" {
@@ -387,10 +600,13 @@ test "all public wrapper declarations compile" {
     _ = &vk.Device.endCommandBufferLabel;
     _ = &vk.Device.insertCommandBufferLabel;
     _ = &vk.Surface.deinit;
+    _ = &vk.Instance.debugMessengerActive;
     _ = &vk.Swapchain.deinit;
     _ = &vk.Swapchain.images;
     _ = &vk.Swapchain.acquireNextImage;
     _ = &vk.ext.debug_utils.Messenger.init;
+    _ = &vk.ext.debug_utils.MessengerConfig.fromHandler;
+    _ = &vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext;
     _ = &vk.Queue.submit;
     _ = &vk.Queue.waitIdle;
     _ = &vk.Queue.present;

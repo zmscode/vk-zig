@@ -431,6 +431,14 @@ pub const Entry = struct {
 
         var extension_pointers: [name_count_max][*c]const u8 = undefined;
         var extension_count = try fillNamePointers(options.extensions, &extension_pointers);
+        if (options.debug_messenger != null) {
+            const debug_utils_extension = extension.ext_debug_utils.name;
+            if (!containsName(options.extensions, debug_utils_extension)) {
+                if (extension_count == extension_pointers.len) return error.CountOverflow;
+                extension_pointers[extension_count] = debug_utils_extension.ptr;
+                extension_count += 1;
+            }
+        }
         var flags = options.flags;
         if (options.enumerate_portability) {
             if (platform != .metal) return error.PortabilityNotSupported;
@@ -452,9 +460,14 @@ pub const Entry = struct {
             .engineVersion = options.engine_version.encode(),
             .apiVersion = options.api_version.encode(),
         };
+        var debug_create_info: raw.VkDebugUtilsMessengerCreateInfoEXT = undefined;
+        const instance_next: ?*const anyopaque = if (options.debug_messenger) |config| next: {
+            debug_create_info = config.createInfo(options.next);
+            break :next @ptrCast(&debug_create_info);
+        } else options.next;
         const create_info: raw.VkInstanceCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-            .pNext = options.next,
+            .pNext = instance_next,
             .flags = flags,
             .pApplicationInfo = &application_info,
             .enabledLayerCount = @intCast(layer_count),
@@ -462,7 +475,16 @@ pub const Entry = struct {
             .enabledExtensionCount = @intCast(extension_count),
             .ppEnabledExtensionNames = pointerArray(extension_pointers[0..extension_count]),
         };
-        return entry.createInstanceRaw(&create_info, options.allocation_callbacks);
+        var instance = try entry.createInstanceRaw(&create_info, options.allocation_callbacks);
+        errdefer instance.deinit();
+        if (options.debug_messenger) |config| {
+            instance._debug_messenger = try ext.debug_utils.Messenger.initConfig(
+                &instance,
+                config,
+                options.allocation_callbacks,
+            );
+        }
+        return instance;
     }
 
     pub fn createInstanceRaw(
@@ -491,6 +513,7 @@ pub const Entry = struct {
 
         return .{
             ._handle = live_handle,
+            ._debug_messenger = null,
             .allocation_callbacks = allocation_callbacks,
             .dispatch = dispatch,
         };
@@ -510,17 +533,26 @@ pub const InstanceOptions = struct {
     application_next: ?*const anyopaque = null,
     next: ?*const anyopaque = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
+    debug_messenger: ?ext.debug_utils.MessengerConfig = null,
 };
 
 pub const Instance = struct {
     _handle: ?InstanceHandle,
+    _debug_messenger: ?ext.debug_utils.Messenger,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: InstanceDispatch,
 
     pub fn deinit(instance: *Instance) void {
         const handle = instance._handle orelse return;
+        if (instance._debug_messenger) |*messenger| messenger.deinit();
+        instance._debug_messenger = null;
         instance.dispatch.destroy_instance(handle, instance.allocation_callbacks);
         instance._handle = null;
+    }
+
+    pub fn debugMessengerActive(instance: *const Instance) bool {
+        if (instance._handle == null) return false;
+        return instance._debug_messenger != null;
     }
 
     /// Returns the live raw handle for explicit FFI integration.
@@ -1528,6 +1560,110 @@ pub const ext = struct {
                 standard | device_address_binding;
         };
 
+        pub const HandlerResult = enum {
+            continue_,
+            abort,
+        };
+
+        pub const MessengerConfigOptions = struct {
+            severity: raw.VkDebugUtilsMessageSeverityFlagsEXT =
+                severity_flags.warning_and_error,
+            message_types: raw.VkDebugUtilsMessageTypeFlagsEXT =
+                message_type_flags.standard,
+        };
+
+        /// Type-erased configuration whose generated C trampoline remains private to vk-zig.
+        pub const MessengerConfig = struct {
+            _callback: CommandFunction(raw.PFN_vkDebugUtilsMessengerCallbackEXT),
+            _handler: *const fn (?*anyopaque, Message) HandlerResult,
+            _user_data: ?*anyopaque,
+            _severity: raw.VkDebugUtilsMessageSeverityFlagsEXT,
+            _message_types: raw.VkDebugUtilsMessageTypeFlagsEXT,
+
+            /// The handler may return `void` to continue, or `HandlerResult` to allow aborting.
+            /// Vulkan can invoke it concurrently, so captured global state must be synchronized.
+            pub fn fromHandler(
+                comptime handler: anytype,
+                options: MessengerConfigOptions,
+            ) MessengerConfig {
+                validateHandler(@TypeOf(handler), null);
+                const Adapter = HandlerAdapter(handler);
+                return .{
+                    ._callback = Adapter.callback,
+                    ._handler = Adapter.handle,
+                    ._user_data = null,
+                    ._severity = options.severity,
+                    ._message_types = options.message_types,
+                };
+            }
+
+            /// The context pointer must remain valid until the parent instance is deinitialized.
+            pub fn fromHandlerWithContext(
+                context: anytype,
+                options: MessengerConfigOptions,
+                comptime handler: anytype,
+            ) MessengerConfig {
+                const ContextPointer = @TypeOf(context);
+                const pointer_info = switch (@typeInfo(ContextPointer)) {
+                    .pointer => |pointer| pointer,
+                    else => @compileError("debug messenger context must be a pointer"),
+                };
+                if (pointer_info.size != .one) {
+                    @compileError("debug messenger context must be a single-item pointer");
+                }
+                if (pointer_info.is_allowzero) {
+                    @compileError("debug messenger context must not allow a zero address");
+                }
+                validateHandler(@TypeOf(handler), ContextPointer);
+
+                const Adapter = ContextHandlerAdapter(ContextPointer, handler);
+                const user_data: *anyopaque = if (pointer_info.is_const)
+                    @ptrCast(@constCast(context))
+                else
+                    @ptrCast(context);
+                return .{
+                    ._callback = Adapter.callback,
+                    ._handler = Adapter.handle,
+                    ._user_data = user_data,
+                    ._severity = options.severity,
+                    ._message_types = options.message_types,
+                };
+            }
+
+            /// Invokes the typed handler directly, primarily for application-level tests.
+            pub fn dispatch(config: MessengerConfig, message: Message) HandlerResult {
+                return config._handler(config._user_data, message);
+            }
+
+            fn createInfo(
+                config: MessengerConfig,
+                next: ?*const anyopaque,
+            ) raw.VkDebugUtilsMessengerCreateInfoEXT {
+                return .{
+                    .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                    .pNext = next,
+                    .messageSeverity = config._severity,
+                    .messageType = config._message_types,
+                    .pfnUserCallback = config._callback,
+                    .pUserData = config._user_data,
+                };
+            }
+
+            fn rawOptions(
+                config: MessengerConfig,
+                allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+            ) MessengerOptions {
+                return .{
+                    .callback = config._callback,
+                    .user_data = config._user_data,
+                    .severity = config._severity,
+                    .message_type = config._message_types,
+                    .allocation_callbacks = allocation_callbacks,
+                };
+            }
+        };
+
+        /// Advanced raw-ABI configuration. Prefer `MessengerConfig` for normal Zig code.
         pub const MessengerOptions = struct {
             callback: CommandFunction(raw.PFN_vkDebugUtilsMessengerCallbackEXT),
             user_data: ?*anyopaque = null,
@@ -1611,6 +1747,109 @@ pub const ext = struct {
             }
         };
 
+        fn validateHandler(
+            comptime Handler: type,
+            comptime ContextPointer: ?type,
+        ) void {
+            const function_info = switch (@typeInfo(Handler)) {
+                .@"fn" => |function| function,
+                else => @compileError("debug message handler must be a function"),
+            };
+            const parameter_count: usize = if (ContextPointer == null) 1 else 2;
+            if (function_info.params.len != parameter_count) {
+                @compileError("debug message handler has the wrong parameter count");
+            }
+            if (ContextPointer) |ExpectedContext| {
+                const actual_context = function_info.params[0].type orelse {
+                    @compileError("debug message handler context type must be explicit");
+                };
+                if (actual_context != ExpectedContext) {
+                    @compileError("debug message handler context type does not match its pointer");
+                }
+            }
+            const message_index: usize = if (ContextPointer == null) 0 else 1;
+            const actual_message = function_info.params[message_index].type orelse {
+                @compileError("debug message handler message type must be explicit");
+            };
+            if (actual_message != Message) {
+                @compileError("debug message handler must accept debug_utils.Message");
+            }
+            const Return = function_info.return_type orelse {
+                @compileError("debug message handler must have an explicit return type");
+            };
+            if (Return != void and Return != HandlerResult) {
+                @compileError("debug message handler must return void or HandlerResult");
+            }
+        }
+
+        fn invokeHandler(
+            comptime handler: anytype,
+            arguments: anytype,
+        ) HandlerResult {
+            const Return = @typeInfo(@TypeOf(handler)).@"fn".return_type.?;
+            if (Return == void) {
+                @call(.auto, handler, arguments);
+                return .continue_;
+            }
+            return @call(.auto, handler, arguments);
+        }
+
+        fn rawHandlerResult(result: HandlerResult) raw.VkBool32 {
+            return switch (result) {
+                .continue_ => raw.VK_FALSE,
+                .abort => raw.VK_TRUE,
+            };
+        }
+
+        fn HandlerAdapter(comptime handler: anytype) type {
+            return struct {
+                fn handle(_: ?*anyopaque, message: Message) HandlerResult {
+                    return invokeHandler(handler, .{message});
+                }
+
+                fn callback(
+                    severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
+                    message_type: raw.VkDebugUtilsMessageTypeFlagsEXT,
+                    callback_data: [*c]const raw.VkDebugUtilsMessengerCallbackDataEXT,
+                    _: ?*anyopaque,
+                ) callconv(.c) raw.VkBool32 {
+                    const message = Message.fromCallback(
+                        severity,
+                        message_type,
+                        callback_data,
+                    ) orelse return raw.VK_FALSE;
+                    return rawHandlerResult(handle(null, message));
+                }
+            };
+        }
+
+        fn ContextHandlerAdapter(
+            comptime ContextPointer: type,
+            comptime handler: anytype,
+        ) type {
+            return struct {
+                fn handle(user_data: ?*anyopaque, message: Message) HandlerResult {
+                    const opaque_context = user_data orelse return .continue_;
+                    const context: ContextPointer = @ptrCast(@alignCast(opaque_context));
+                    return invokeHandler(handler, .{ context, message });
+                }
+
+                fn callback(
+                    severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
+                    message_type: raw.VkDebugUtilsMessageTypeFlagsEXT,
+                    callback_data: [*c]const raw.VkDebugUtilsMessengerCallbackDataEXT,
+                    user_data: ?*anyopaque,
+                ) callconv(.c) raw.VkBool32 {
+                    const message = Message.fromCallback(
+                        severity,
+                        message_type,
+                        callback_data,
+                    ) orelse return raw.VK_FALSE;
+                    return rawHandlerResult(handle(user_data, message));
+                }
+            };
+        }
+
         pub const LabelOptions = struct {
             name: [:0]const u8,
             color: [4]f32 = .{ 0.0, 0.0, 0.0, 0.0 },
@@ -1632,6 +1871,15 @@ pub const ext = struct {
             allocation_callbacks: ?*const raw.VkAllocationCallbacks,
             destroy_messenger: CommandFunction(raw.PFN_vkDestroyDebugUtilsMessengerEXT),
 
+            fn initConfig(
+                instance: *const Instance,
+                config: MessengerConfig,
+                allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+            ) Error!Messenger {
+                return init(instance, config.rawOptions(allocation_callbacks));
+            }
+
+            /// Advanced raw-ABI creation. Prefer `InstanceOptions.debug_messenger`.
             pub fn init(instance: *const Instance, options: MessengerOptions) Error!Messenger {
                 const instance_handle = instance._handle orelse return error.InactiveObject;
                 const create_messenger = (try instance.load(
@@ -2561,6 +2809,7 @@ fn testDebugCallback(
 fn testInstance() Instance {
     return .{
         ._handle = testHandle(raw.VkInstance, 0x1000),
+        ._debug_messenger = null,
         .allocation_callbacks = null,
         .dispatch = .{
             .get_instance_proc_addr = testGetInstanceProcAddr,

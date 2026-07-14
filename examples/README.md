@@ -23,7 +23,7 @@ Each example also has a named run step:
 | `raw_create_info.zig` | `zig build run-raw-create-info` | Raw generated structs with wrapped ownership |
 | `platform.zig` | `zig build run-platform` | Target-specific declaration generation |
 | `capabilities.zig` | `zig build run-capabilities` | Allocation-free extension/layer support checks |
-| `debug_utils.zig` | `zig build run-debug-utils` | Owned `VK_EXT_debug_utils` messenger |
+| `debug_utils.zig` | `zig build run-debug-utils` | Typed, instance-owned `VK_EXT_debug_utils` messenger |
 
 Except for `platform.zig`, running these programs requires a discoverable Vulkan loader and, for
 device examples, a working Vulkan implementation. On macOS, install MoltenVK or the Vulkan SDK.
