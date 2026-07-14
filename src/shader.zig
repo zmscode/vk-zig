@@ -122,6 +122,7 @@ pub const Dispatch = struct {
     create: CommandFunction(raw.PFN_vkCreateShaderModule),
     destroy: CommandFunction(raw.PFN_vkDestroyShaderModule),
     get_identifier: ?CommandFunction(raw.PFN_vkGetShaderModuleIdentifierEXT),
+    get_create_info_identifier: ?CommandFunction(raw.PFN_vkGetShaderModuleCreateInfoIdentifierEXT),
 };
 
 pub const Module = struct {
@@ -195,6 +196,28 @@ pub fn createBytes(
     return createWords(device_handle, allocation_callbacks, dispatch, words);
 }
 
+pub fn identifyWords(device_handle: DeviceHandle, dispatch: Dispatch, words: []const u32) core.Error!Identifier {
+    try validateSpirv(words);
+    const get_identifier = dispatch.get_create_info_identifier orelse return error.MissingCommand;
+    const info: raw.VkShaderModuleCreateInfo = .{
+        .sType = raw.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = std.math.mul(usize, words.len, @sizeOf(u32)) catch return error.SizeOverflow,
+        .pCode = words.ptr,
+    };
+    var raw_identifier: raw.VkShaderModuleIdentifierEXT = .{
+        .sType = raw.VK_STRUCTURE_TYPE_SHADER_MODULE_IDENTIFIER_EXT,
+    };
+    get_identifier(device_handle, &info, &raw_identifier);
+    if (raw_identifier.identifierSize > raw.VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT) return error.InvalidProperties;
+    return .{ .bytes = raw_identifier.identifier, .length = raw_identifier.identifierSize };
+}
+
+pub fn identifyBytes(device_handle: DeviceHandle, dispatch: Dispatch, bytes: []align(4) const u8) core.Error!Identifier {
+    if (bytes.len % @sizeOf(u32) != 0) return error.InvalidOptions;
+    const words: []const u32 = @as([*]const u32, @ptrCast(bytes.ptr))[0 .. bytes.len / @sizeOf(u32)];
+    return identifyWords(device_handle, dispatch, words);
+}
+
 pub fn validateSpirv(words: []const u32) core.Error!void {
     if (words.len < 5 or words[0] != spirv_magic or words[3] == 0 or words[4] != 0) {
         return error.InvalidOptions;
@@ -206,4 +229,39 @@ pub fn validateSpirv(words: []const u32) core.Error!void {
 
 test "all shader declarations compile" {
     std.testing.refAllDecls(@This());
+}
+
+var test_result: raw.VkResult = raw.VK_SUCCESS;
+var test_destroy_count: usize = 0;
+
+fn testCreate(_: raw.VkDevice, _: [*c]const raw.VkShaderModuleCreateInfo, _: [*c]const raw.VkAllocationCallbacks, output: [*c]raw.VkShaderModule) callconv(.c) raw.VkResult {
+    output.* = @ptrFromInt(0x2000);
+    return test_result;
+}
+
+fn testDestroy(_: raw.VkDevice, _: raw.VkShaderModule, _: [*c]const raw.VkAllocationCallbacks) callconv(.c) void {
+    test_destroy_count += 1;
+}
+
+fn testIdentify(_: raw.VkDevice, _: [*c]const raw.VkShaderModuleCreateInfo, output: [*c]raw.VkShaderModuleIdentifierEXT) callconv(.c) void {
+    output.*.identifierSize = 4;
+    output.*.identifier[0..4].* = .{ 1, 2, 3, 4 };
+}
+
+test "shader words, bytes, specialization, identifiers, and rollback are validated" {
+    const words align(4) = [_]u32{ spirv_magic, 0x0001_0000, 0, 1, 0 };
+    const dispatch: Dispatch = .{ .create = testCreate, .destroy = testDestroy, .get_identifier = null, .get_create_info_identifier = testIdentify };
+    var module = try createWords(@ptrFromInt(0x1000), null, dispatch, &words);
+    module.deinit();
+    try std.testing.expectError(error.InvalidOptions, createBytes(@ptrFromInt(0x1000), null, dispatch, std.mem.asBytes(&words)[0..19]));
+    const identifier = try identifyWords(@ptrFromInt(0x1000), dispatch, &words);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, identifier.slice());
+    try (Specialization{ .entries = &.{.{ .constant_id = 0, .offset = 0, .size = 4 }}, .data = std.mem.asBytes(&words[0]) }).validate();
+    try std.testing.expectError(error.InvalidOptions, (Specialization{ .entries = &.{ .{ .constant_id = 0, .offset = 0, .size = 4 }, .{ .constant_id = 0, .offset = 4, .size = 4 } }, .data = std.mem.asBytes(&words) }).validate());
+
+    test_result = raw.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    defer test_result = raw.VK_SUCCESS;
+    test_destroy_count = 0;
+    try std.testing.expectError(error.OutOfDeviceMemory, createWords(@ptrFromInt(0x1000), null, dispatch, &words));
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_count);
 }

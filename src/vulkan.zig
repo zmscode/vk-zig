@@ -123,6 +123,8 @@ pub const Rect2D = types.Rect2D;
 pub const Viewport = types.Viewport;
 pub const ComponentMapping = types.ComponentMapping;
 pub const ImageSubresourceRange = types.ImageSubresourceRange;
+pub const MipLevelCount = types.MipLevelCount;
+pub const ArrayLayerCount = types.ArrayLayerCount;
 pub const ClearColor = types.ClearColor;
 pub const ClearDepthStencil = types.ClearDepthStencil;
 pub const ClearValue = types.ClearValue;
@@ -638,6 +640,21 @@ pub const Image = images.Image;
 pub const ImageOptions = images.Options;
 pub const ImageReference = images.Reference;
 pub const ImageMemoryRequirements = images.MemoryRequirements;
+pub const ImageSubresource = images.Subresource;
+pub const ImageSubresourceLayout = images.SubresourceLayout;
+pub const SparseImageMemoryRequirements = images.SparseMemoryRequirements;
+pub const HostMemoryToImageRegion = images.HostMemoryRegion;
+pub const HostImageToMemoryRegion = images.HostReadRegion;
+pub const HostImageCopyRegion = images.HostImageCopyRegion;
+pub const Buffer = buffers.Buffer;
+pub const BufferOptions = buffers.Options;
+pub const BufferView = buffers.View;
+pub const BufferViewOptions = buffers.ViewOptions;
+pub const AllocatedBuffer = buffers.Allocated;
+pub const AllocatedBufferOptions = buffers.AllocatedOptions;
+pub const AutoAllocatedBufferOptions = buffers.AutoAllocatedOptions;
+pub const BufferDeviceAddress = buffers.DeviceAddress;
+pub const BufferOpaqueCaptureAddress = buffers.OpaqueCaptureAddress;
 
 pub const SemaphoreKind = sync.SemaphoreKind;
 pub const SemaphoreOptions = sync.SemaphoreOptions;
@@ -661,6 +678,8 @@ pub const RenderingLoadOperation = rendering.LoadOperation;
 pub const RenderingStoreOperation = rendering.StoreOperation;
 pub const RenderingResolve = rendering.Resolve;
 pub const RenderingResolveMode = rendering.ResolveMode;
+pub const RenderingFragmentShadingRateAttachment = rendering.FragmentShadingRateAttachment;
+pub const RenderingFragmentDensityMapAttachment = rendering.FragmentDensityMapAttachment;
 pub const ImageSubresourceLayers = transfers.SubresourceLayers;
 pub const BufferCopy = transfers.BufferCopy;
 pub const BufferImageCopy = transfers.BufferImageCopy;
@@ -680,6 +699,12 @@ pub const IndexType = commands.IndexType;
 pub const DrawOptions = commands.DrawOptions;
 pub const DrawIndexedOptions = commands.DrawIndexedOptions;
 pub const DispatchOptions = commands.DispatchOptions;
+pub const DrawIndirectCommand = commands.DrawIndirectCommand;
+pub const DrawIndexedIndirectCommand = commands.DrawIndexedIndirectCommand;
+pub const DispatchIndirectCommand = commands.DispatchIndirectCommand;
+pub const MultiDraw = commands.MultiDraw;
+pub const MultiDrawIndexed = commands.MultiDrawIndexed;
+pub const StencilFaces = commands.StencilFaces;
 pub const CommandBuffer = commands.Buffer;
 pub const CommandBufferLabelScope = commands.LabelScope;
 pub const CommandPool = commands.Pool;
@@ -701,6 +726,7 @@ pub const DrmFormatModifierQuery = format_support.DrmModifierQuery;
 pub const ImageFormatQueryOptions = format_support.ImageQueryOptions;
 pub const ImageFormatProperties = format_support.ImageProperties;
 pub const ExternalMemoryProperties = format_support.ExternalMemoryProperties;
+pub const ExternalBufferOptions = format_support.ExternalBufferOptions;
 pub const ImageFormatQueryResult = format_support.ImageQueryResult;
 pub const DrmFormatModifierProperties = format_support.DrmModifierProperties;
 pub const SparseImageFormatOptions = format_support.SparseImageOptions;
@@ -716,6 +742,10 @@ pub const PhysicalDevice = struct {
     /// Returns the non-owning raw physical-device handle for FFI integration.
     pub fn rawHandle(device: *const PhysicalDevice) raw.VkPhysicalDevice {
         return device._handle;
+    }
+
+    pub fn groupMember(device: *const PhysicalDevice) device_configuration.GroupMember {
+        return .{ ._handle = device._handle, ._instance_handle = device._instance_handle };
     }
 
     pub fn propertiesRaw(device: *const PhysicalDevice) raw.VkPhysicalDeviceProperties {
@@ -774,6 +804,14 @@ pub const PhysicalDevice = struct {
         };
         get_properties(device._handle, format.toRaw(), &value);
         return .fromRaw(value.formatProperties);
+    }
+
+    pub fn externalBufferProperties(device: *const PhysicalDevice, options: ExternalBufferOptions) Error!ExternalMemoryProperties {
+        const get_properties = device.dispatch.get_physical_device_external_buffer_properties orelse return error.MissingCommand;
+        const info = options.toRaw();
+        var output: raw.VkExternalBufferProperties = .{ .sType = raw.VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES };
+        get_properties(device._handle, &info, &output);
+        return .fromRaw(output.externalMemoryProperties);
     }
 
     /// Uses the Vulkan 1.1/KHR promoted query. Unsupported combinations return null.
@@ -1450,9 +1488,27 @@ pub const PhysicalDevice = struct {
         if (api_version.atLeast(.v1_3)) features_12.pNext = &features_13;
         if (api_version.atLeast(.v1_4)) features_13.pNext = &features_14;
 
+        var group_handles: [device_configuration.group_device_count_max]raw.VkPhysicalDevice = undefined;
+        var group_info: raw.VkDeviceGroupDeviceCreateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO,
+        };
+        if (options.device_group.len != 0) {
+            if (options.device_group.len < 2) return error.InvalidOptions;
+            var contains_primary = false;
+            for (options.device_group, 0..) |member, index| {
+                if (member._instance_handle != physical_device._instance_handle) return error.InvalidHandle;
+                if (member._handle == physical_device._handle) contains_primary = true;
+                group_handles[index] = member._handle;
+            }
+            if (!contains_primary) return error.InvalidHandle;
+            group_info.physicalDeviceCount = @intCast(options.device_group.len);
+            group_info.pPhysicalDevices = group_handles[0..options.device_group.len].ptr;
+            group_info.pNext = if (options.features.hasPromoted()) &feature_root else null;
+        }
+
         const create_info: raw.VkDeviceCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = if (options.features.hasPromoted()) &feature_root else null,
+            .pNext = if (options.device_group.len != 0) &group_info else if (options.features.hasPromoted()) &feature_root else null,
             .queueCreateInfoCount = @intCast(options.queues.len),
             .pQueueCreateInfos = queue_infos[0..options.queues.len].ptr,
             .enabledExtensionCount = @intCast(extension_count),
@@ -1460,8 +1516,10 @@ pub const PhysicalDevice = struct {
             .pEnabledFeatures = if (options.features.hasPromoted()) null else &enabled_core_features,
         };
         var device = try physical_device.createDeviceRaw(&create_info, null);
-        device.enabled_capabilities = .init(enabled_extensions[0..extension_count], options.features);
-        device._max_push_constant_size = physical_device.properties().limits.max_push_constants_size;
+        device.enabled_capabilities = .init(enabled_extensions[0..extension_count], options.features, api_version);
+        const limits = physical_device.properties().limits;
+        device._max_push_constant_size = limits.max_push_constants_size;
+        device._max_sampler_anisotropy = limits.max_sampler_anisotropy;
         return device;
     }
 
@@ -1537,6 +1595,7 @@ pub const ShaderStageOptions = shaders.StageOptions;
 pub const ShaderSpecialization = shaders.Specialization;
 pub const ShaderSpecializationEntry = shaders.SpecializationEntry;
 pub const ShaderStageSet = shaders.StageSet;
+pub const ShaderIdentifier = shaders.Identifier;
 pub const DescriptorType = descriptors.Type;
 pub const DescriptorBinding = descriptors.Binding;
 pub const DescriptorSetLayout = descriptors.SetLayout;
@@ -1553,10 +1612,26 @@ pub const PipelineCreateResult = pipelines.CreateResult;
 pub const GraphicsPipelineOptions = pipelines.GraphicsOptions;
 pub const ComputePipelineOptions = pipelines.ComputeOptions;
 pub const PipelineBindPoint = pipelines.BindPoint;
+pub const PipelineVertexInputRate = pipelines.VertexInputRate;
+pub const PipelineVertexBinding = pipelines.VertexBinding;
+pub const PipelineVertexAttribute = pipelines.VertexAttribute;
+pub const PipelineTopology = pipelines.Topology;
+pub const PipelinePolygonMode = pipelines.PolygonMode;
+pub const PipelineCullMode = pipelines.CullMode;
+pub const PipelineFrontFace = pipelines.FrontFace;
+pub const PipelineRasterization = pipelines.Rasterization;
+pub const PipelineMultisample = pipelines.Multisample;
+pub const PipelineDepthStencil = pipelines.DepthStencil;
+pub const PipelineBlendFactor = pipelines.BlendFactor;
+pub const PipelineBlendOperation = pipelines.BlendOperation;
+pub const PipelineColorBlendAttachment = pipelines.ColorBlendAttachment;
+pub const PipelineDynamicState = pipelines.DynamicState;
+pub const PipelineRenderingFormats = pipelines.RenderingFormats;
 pub const selectMemoryTypeIndex = memory.selectTypeIndex;
 pub const selectMemoryTypeIndexRaw = memory.selectTypeIndexRaw;
 
 pub const DeviceQueueOptions = device_configuration.QueueOptions;
+pub const DeviceGroupMember = device_configuration.GroupMember;
 pub const DeviceOptions = device_configuration.Requirements;
 
 pub const Device = struct {
@@ -1567,6 +1642,7 @@ pub const Device = struct {
     dispatch: DeviceDispatch,
     enabled_capabilities: device_configuration.EnabledCapabilities = .{},
     _max_push_constant_size: u32 = 128,
+    _max_sampler_anisotropy: f32 = 1,
 
     pub fn deinit(device: *Device) void {
         const handle = device._handle orelse return;
@@ -1610,6 +1686,10 @@ pub const Device = struct {
 
     pub fn supportsFeature(device: *const Device, feature: DeviceFeature) bool {
         return device.enabled_capabilities.supportsFeature(feature);
+    }
+
+    pub fn supportsCommand(device: *const Device, comptime descriptor: anytype) bool {
+        return device.enabled_capabilities.supportsCommand(descriptor);
     }
 
     pub fn queue(
@@ -1728,6 +1808,7 @@ pub const Device = struct {
         options: memory.AllocationOptions,
     ) Error!memory.Allocation {
         const device_handle = device._handle orelse return error.InactiveObject;
+        if (options.priority != null and !device.supportsExtension(extension.ext_memory_priority)) return error.ExtensionNotPresent;
         return memory.allocate(
             device_handle,
             device.allocation_callbacks,
@@ -1749,6 +1830,19 @@ pub const Device = struct {
 
     pub fn createSampler(device: *const Device, options: samplers.Options) Error!samplers.Sampler {
         const device_handle = try device.dispatchHandle();
+        if (options.anisotropy) |value| {
+            if (!device.supportsFeature(.sampler_anisotropy)) return error.FeatureNotPresent;
+            if (value > device._max_sampler_anisotropy) return error.InvalidOptions;
+        }
+        if (options.ycbcr_conversion != null and !device.supportsFeature(.sampler_ycbcr_conversion)) return error.FeatureNotPresent;
+        if ((options.mag_filter == .cubic or options.min_filter == .cubic) and !device.supportsExtension(extension.ext_filter_cubic)) return error.ExtensionNotPresent;
+        if (options.reduction != null and !device.supportsExtension(extension.ext_sampler_filter_minmax)) return error.ExtensionNotPresent;
+        switch (options.border_color) {
+            .custom_float, .custom_int => if (!device.supportsExtension(extension.ext_custom_border_color)) return error.ExtensionNotPresent,
+            else => {},
+        }
+        if ((options.address_u == .mirror_clamp_to_edge or options.address_v == .mirror_clamp_to_edge or options.address_w == .mirror_clamp_to_edge) and
+            !device.supportsExtension(extension.khr_sampler_mirror_clamp_to_edge)) return error.ExtensionNotPresent;
         return samplers.create(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_sampler,
             .destroy = device.dispatch.destroy_sampler,
@@ -1760,6 +1854,7 @@ pub const Device = struct {
         options: samplers.YcbcrOptions,
     ) Error!samplers.YcbcrConversion {
         const device_handle = try device.dispatchHandle();
+        if (!device.supportsFeature(.sampler_ycbcr_conversion)) return error.FeatureNotPresent;
         const create_conversion = device.dispatch.create_sampler_ycbcr_conversion orelse return error.MissingCommand;
         const destroy_conversion = device.dispatch.destroy_sampler_ycbcr_conversion orelse return error.MissingCommand;
         return samplers.createYcbcrConversion(device_handle, device.allocation_callbacks, .{
@@ -1777,6 +1872,7 @@ pub const Device = struct {
             .create = device.dispatch.create_shader_module,
             .destroy = device.dispatch.destroy_shader_module,
             .get_identifier = device.dispatch.get_shader_module_identifier_ext,
+            .get_create_info_identifier = device.dispatch.get_shader_module_create_info_identifier_ext,
         }, words);
     }
 
@@ -1789,7 +1885,18 @@ pub const Device = struct {
             .create = device.dispatch.create_shader_module,
             .destroy = device.dispatch.destroy_shader_module,
             .get_identifier = device.dispatch.get_shader_module_identifier_ext,
+            .get_create_info_identifier = device.dispatch.get_shader_module_create_info_identifier_ext,
         }, bytes);
+    }
+
+    pub fn shaderModuleIdentifier(device: *const Device, words: []const u32) Error!shaders.Identifier {
+        const device_handle = try device.dispatchHandle();
+        return shaders.identifyWords(device_handle, .{
+            .create = device.dispatch.create_shader_module,
+            .destroy = device.dispatch.destroy_shader_module,
+            .get_identifier = device.dispatch.get_shader_module_identifier_ext,
+            .get_create_info_identifier = device.dispatch.get_shader_module_create_info_identifier_ext,
+        }, words);
     }
 
     pub fn createDescriptorSetLayout(
@@ -1850,6 +1957,32 @@ pub const Device = struct {
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
         }, options);
+    }
+
+    pub fn createComputePipelines(
+        device: *const Device,
+        options: []const pipelines.ComputeOptions,
+        output: []pipelines.CreateResult,
+    ) Error![]pipelines.CreateResult {
+        const device_handle = try device.dispatchHandle();
+        return pipelines.createComputeBatch(device_handle, device.allocation_callbacks, .{
+            .create_graphics = device.dispatch.create_graphics_pipelines,
+            .create_compute = device.dispatch.create_compute_pipelines,
+            .destroy = device.dispatch.destroy_pipeline,
+        }, options, output);
+    }
+
+    pub fn createGraphicsPipelines(
+        device: *const Device,
+        options: []const pipelines.GraphicsOptions,
+        output: []pipelines.CreateResult,
+    ) Error![]pipelines.CreateResult {
+        const device_handle = try device.dispatchHandle();
+        return pipelines.createGraphicsBatch(device_handle, device.allocation_callbacks, .{
+            .create_graphics = device.dispatch.create_graphics_pipelines,
+            .create_compute = device.dispatch.create_compute_pipelines,
+            .destroy = device.dispatch.destroy_pipeline,
+        }, options, output);
     }
 
     pub fn createAllocatedBuffer(
@@ -1916,6 +2049,13 @@ pub const Device = struct {
             .get_image_memory_requirements2 = device.dispatch.get_image_memory_requirements2,
             .bind_image_memory = device.dispatch.bind_image_memory,
             .bind_image_memory2 = device.dispatch.bind_image_memory2,
+            .get_subresource_layout = device.dispatch.get_image_subresource_layout,
+            .get_sparse_requirements = device.dispatch.get_image_sparse_memory_requirements,
+            .get_sparse_requirements2 = device.dispatch.get_image_sparse_memory_requirements2,
+            .copy_memory_to_image = device.dispatch.copy_memory_to_image,
+            .copy_image_to_memory = device.dispatch.copy_image_to_memory,
+            .copy_image_to_image = device.dispatch.copy_image_to_image,
+            .transition_layout = device.dispatch.transition_image_layout,
         }, options);
     }
 
@@ -2138,6 +2278,9 @@ pub const Device = struct {
             .reset_command_buffer = device.dispatch.reset_command_buffer,
             .cmd_pipeline_barrier = device.dispatch.cmd_pipeline_barrier,
             .cmd_pipeline_barrier2 = device.dispatch.cmd_pipeline_barrier2,
+            .cmd_set_event = device.dispatch.cmd_set_event,
+            .cmd_reset_event = device.dispatch.cmd_reset_event,
+            .cmd_wait_events = device.dispatch.cmd_wait_events,
             .cmd_set_event2 = device.dispatch.cmd_set_event2,
             .cmd_reset_event2 = device.dispatch.cmd_reset_event2,
             .cmd_wait_events2 = device.dispatch.cmd_wait_events2,
@@ -2150,10 +2293,15 @@ pub const Device = struct {
             .cmd_copy_buffer = device.dispatch.cmd_copy_buffer,
             .cmd_copy_buffer2 = device.dispatch.cmd_copy_buffer2,
             .cmd_copy_buffer_to_image = device.dispatch.cmd_copy_buffer_to_image,
+            .cmd_copy_buffer_to_image2 = device.dispatch.cmd_copy_buffer_to_image2,
             .cmd_copy_image_to_buffer = device.dispatch.cmd_copy_image_to_buffer,
+            .cmd_copy_image_to_buffer2 = device.dispatch.cmd_copy_image_to_buffer2,
             .cmd_copy_image = device.dispatch.cmd_copy_image,
+            .cmd_copy_image2 = device.dispatch.cmd_copy_image2,
             .cmd_blit_image = device.dispatch.cmd_blit_image,
+            .cmd_blit_image2 = device.dispatch.cmd_blit_image2,
             .cmd_resolve_image = device.dispatch.cmd_resolve_image,
+            .cmd_resolve_image2 = device.dispatch.cmd_resolve_image2,
             .cmd_bind_pipeline = device.dispatch.cmd_bind_pipeline,
             .cmd_bind_descriptor_sets = device.dispatch.cmd_bind_descriptor_sets,
             .cmd_bind_vertex_buffers = device.dispatch.cmd_bind_vertex_buffers,
@@ -2164,6 +2312,9 @@ pub const Device = struct {
             .cmd_set_depth_bias = device.dispatch.cmd_set_depth_bias,
             .cmd_set_blend_constants = device.dispatch.cmd_set_blend_constants,
             .cmd_set_depth_bounds = device.dispatch.cmd_set_depth_bounds,
+            .cmd_set_stencil_compare_mask = device.dispatch.cmd_set_stencil_compare_mask,
+            .cmd_set_stencil_write_mask = device.dispatch.cmd_set_stencil_write_mask,
+            .cmd_set_stencil_reference = device.dispatch.cmd_set_stencil_reference,
             .cmd_push_constants = device.dispatch.cmd_push_constants,
             .cmd_draw = device.dispatch.cmd_draw,
             .cmd_draw_indexed = device.dispatch.cmd_draw_indexed,
@@ -2171,6 +2322,8 @@ pub const Device = struct {
             .cmd_draw_indexed_indirect = device.dispatch.cmd_draw_indexed_indirect,
             .cmd_draw_indirect_count = device.dispatch.cmd_draw_indirect_count,
             .cmd_draw_indexed_indirect_count = device.dispatch.cmd_draw_indexed_indirect_count,
+            .cmd_draw_multi = device.dispatch.cmd_draw_multi,
+            .cmd_draw_multi_indexed = device.dispatch.cmd_draw_multi_indexed,
             .cmd_dispatch = device.dispatch.cmd_dispatch,
             .cmd_dispatch_indirect = device.dispatch.cmd_dispatch_indirect,
             .cmd_dispatch_base = device.dispatch.cmd_dispatch_base,
@@ -2340,6 +2493,9 @@ const InstanceDispatch = struct {
     get_physical_device_memory_properties2: ?CommandFunction(
         raw.PFN_vkGetPhysicalDeviceMemoryProperties2,
     ),
+    get_physical_device_external_buffer_properties: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceExternalBufferProperties,
+    ),
     get_physical_device_queue_family_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
     ),
@@ -2444,6 +2600,12 @@ const InstanceDispatch = struct {
                 command.get_physical_device_memory_properties2,
                 .instance,
             ),
+            .get_physical_device_external_buffer_properties = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_external_buffer_properties,
+                .instance,
+            ),
             .get_physical_device_queue_family_properties = try loadInstanceRequired(
                 get_instance_proc_addr,
                 handle,
@@ -2517,6 +2679,7 @@ const DeviceDispatch = struct {
     create_shader_module: CommandFunction(raw.PFN_vkCreateShaderModule),
     destroy_shader_module: CommandFunction(raw.PFN_vkDestroyShaderModule),
     get_shader_module_identifier_ext: ?CommandFunction(raw.PFN_vkGetShaderModuleIdentifierEXT),
+    get_shader_module_create_info_identifier_ext: ?CommandFunction(raw.PFN_vkGetShaderModuleCreateInfoIdentifierEXT),
     create_descriptor_set_layout: CommandFunction(raw.PFN_vkCreateDescriptorSetLayout),
     destroy_descriptor_set_layout: CommandFunction(raw.PFN_vkDestroyDescriptorSetLayout),
     create_descriptor_pool: CommandFunction(raw.PFN_vkCreateDescriptorPool),
@@ -2545,6 +2708,13 @@ const DeviceDispatch = struct {
     get_image_memory_requirements2: ?CommandFunction(raw.PFN_vkGetImageMemoryRequirements2),
     bind_image_memory: CommandFunction(raw.PFN_vkBindImageMemory),
     bind_image_memory2: ?CommandFunction(raw.PFN_vkBindImageMemory2),
+    get_image_subresource_layout: CommandFunction(raw.PFN_vkGetImageSubresourceLayout),
+    get_image_sparse_memory_requirements: CommandFunction(raw.PFN_vkGetImageSparseMemoryRequirements),
+    get_image_sparse_memory_requirements2: ?CommandFunction(raw.PFN_vkGetImageSparseMemoryRequirements2),
+    copy_memory_to_image: ?CommandFunction(raw.PFN_vkCopyMemoryToImage),
+    copy_image_to_memory: ?CommandFunction(raw.PFN_vkCopyImageToMemory),
+    copy_image_to_image: ?CommandFunction(raw.PFN_vkCopyImageToImage),
+    transition_image_layout: ?CommandFunction(raw.PFN_vkTransitionImageLayout),
     create_image_view: CommandFunction(raw.PFN_vkCreateImageView),
     destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
     create_semaphore: CommandFunction(raw.PFN_vkCreateSemaphore),
@@ -2572,6 +2742,9 @@ const DeviceDispatch = struct {
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
     cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
     cmd_pipeline_barrier2: ?CommandFunction(raw.PFN_vkCmdPipelineBarrier2),
+    cmd_set_event: CommandFunction(raw.PFN_vkCmdSetEvent),
+    cmd_reset_event: CommandFunction(raw.PFN_vkCmdResetEvent),
+    cmd_wait_events: CommandFunction(raw.PFN_vkCmdWaitEvents),
     cmd_set_event2: ?CommandFunction(raw.PFN_vkCmdSetEvent2),
     cmd_reset_event2: ?CommandFunction(raw.PFN_vkCmdResetEvent2),
     cmd_wait_events2: ?CommandFunction(raw.PFN_vkCmdWaitEvents2),
@@ -2584,10 +2757,15 @@ const DeviceDispatch = struct {
     cmd_copy_buffer: CommandFunction(raw.PFN_vkCmdCopyBuffer),
     cmd_copy_buffer2: ?CommandFunction(raw.PFN_vkCmdCopyBuffer2),
     cmd_copy_buffer_to_image: CommandFunction(raw.PFN_vkCmdCopyBufferToImage),
+    cmd_copy_buffer_to_image2: ?CommandFunction(raw.PFN_vkCmdCopyBufferToImage2),
     cmd_copy_image_to_buffer: CommandFunction(raw.PFN_vkCmdCopyImageToBuffer),
+    cmd_copy_image_to_buffer2: ?CommandFunction(raw.PFN_vkCmdCopyImageToBuffer2),
     cmd_copy_image: CommandFunction(raw.PFN_vkCmdCopyImage),
+    cmd_copy_image2: ?CommandFunction(raw.PFN_vkCmdCopyImage2),
     cmd_blit_image: CommandFunction(raw.PFN_vkCmdBlitImage),
+    cmd_blit_image2: ?CommandFunction(raw.PFN_vkCmdBlitImage2),
     cmd_resolve_image: CommandFunction(raw.PFN_vkCmdResolveImage),
+    cmd_resolve_image2: ?CommandFunction(raw.PFN_vkCmdResolveImage2),
     cmd_bind_pipeline: CommandFunction(raw.PFN_vkCmdBindPipeline),
     cmd_bind_descriptor_sets: CommandFunction(raw.PFN_vkCmdBindDescriptorSets),
     cmd_bind_vertex_buffers: CommandFunction(raw.PFN_vkCmdBindVertexBuffers),
@@ -2598,6 +2776,9 @@ const DeviceDispatch = struct {
     cmd_set_depth_bias: CommandFunction(raw.PFN_vkCmdSetDepthBias),
     cmd_set_blend_constants: CommandFunction(raw.PFN_vkCmdSetBlendConstants),
     cmd_set_depth_bounds: CommandFunction(raw.PFN_vkCmdSetDepthBounds),
+    cmd_set_stencil_compare_mask: CommandFunction(raw.PFN_vkCmdSetStencilCompareMask),
+    cmd_set_stencil_write_mask: CommandFunction(raw.PFN_vkCmdSetStencilWriteMask),
+    cmd_set_stencil_reference: CommandFunction(raw.PFN_vkCmdSetStencilReference),
     cmd_push_constants: CommandFunction(raw.PFN_vkCmdPushConstants),
     cmd_draw: CommandFunction(raw.PFN_vkCmdDraw),
     cmd_draw_indexed: CommandFunction(raw.PFN_vkCmdDrawIndexed),
@@ -2605,6 +2786,8 @@ const DeviceDispatch = struct {
     cmd_draw_indexed_indirect: CommandFunction(raw.PFN_vkCmdDrawIndexedIndirect),
     cmd_draw_indirect_count: ?CommandFunction(raw.PFN_vkCmdDrawIndirectCount),
     cmd_draw_indexed_indirect_count: ?CommandFunction(raw.PFN_vkCmdDrawIndexedIndirectCount),
+    cmd_draw_multi: ?CommandFunction(raw.PFN_vkCmdDrawMultiEXT),
+    cmd_draw_multi_indexed: ?CommandFunction(raw.PFN_vkCmdDrawMultiIndexedEXT),
     cmd_dispatch: CommandFunction(raw.PFN_vkCmdDispatch),
     cmd_dispatch_indirect: CommandFunction(raw.PFN_vkCmdDispatchIndirect),
     cmd_dispatch_base: ?CommandFunction(raw.PFN_vkCmdDispatchBase),
@@ -2753,6 +2936,11 @@ const DeviceDispatch = struct {
                 get_device_proc_addr,
                 handle,
                 command.get_shader_module_identifier_ext,
+            ),
+            .get_shader_module_create_info_identifier_ext = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.get_shader_module_create_info_identifier_ext,
             ),
             .create_descriptor_set_layout = try loadDeviceRequired(
                 get_device_proc_addr,
@@ -2921,6 +3109,13 @@ const DeviceDispatch = struct {
                 handle,
                 command.bind_image_memory2,
             ),
+            .get_image_subresource_layout = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkGetImageSubresourceLayout, "vkGetImageSubresourceLayout"),
+            .get_image_sparse_memory_requirements = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkGetImageSparseMemoryRequirements, "vkGetImageSparseMemoryRequirements"),
+            .get_image_sparse_memory_requirements2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_image_sparse_memory_requirements2),
+            .copy_memory_to_image = loadDeviceDescriptor(get_device_proc_addr, handle, command.copy_memory_to_image),
+            .copy_image_to_memory = loadDeviceDescriptor(get_device_proc_addr, handle, command.copy_image_to_memory),
+            .copy_image_to_image = loadDeviceDescriptor(get_device_proc_addr, handle, command.copy_image_to_image),
+            .transition_image_layout = loadDeviceDescriptor(get_device_proc_addr, handle, command.transition_image_layout),
             .create_image_view = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
@@ -3079,6 +3274,9 @@ const DeviceDispatch = struct {
                 handle,
                 command.cmd_pipeline_barrier2,
             ),
+            .cmd_set_event = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetEvent, "vkCmdSetEvent"),
+            .cmd_reset_event = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdResetEvent, "vkCmdResetEvent"),
+            .cmd_wait_events = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdWaitEvents, "vkCmdWaitEvents"),
             .cmd_set_event2 = loadDeviceDescriptor(
                 get_device_proc_addr,
                 handle,
@@ -3145,30 +3343,35 @@ const DeviceDispatch = struct {
                 raw.PFN_vkCmdCopyBufferToImage,
                 "vkCmdCopyBufferToImage",
             ),
+            .cmd_copy_buffer_to_image2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_copy_buffer_to_image2),
             .cmd_copy_image_to_buffer = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
                 raw.PFN_vkCmdCopyImageToBuffer,
                 "vkCmdCopyImageToBuffer",
             ),
+            .cmd_copy_image_to_buffer2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_copy_image_to_buffer2),
             .cmd_copy_image = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
                 raw.PFN_vkCmdCopyImage,
                 "vkCmdCopyImage",
             ),
+            .cmd_copy_image2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_copy_image2),
             .cmd_blit_image = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
                 raw.PFN_vkCmdBlitImage,
                 "vkCmdBlitImage",
             ),
+            .cmd_blit_image2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_blit_image2),
             .cmd_resolve_image = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
                 raw.PFN_vkCmdResolveImage,
                 "vkCmdResolveImage",
             ),
+            .cmd_resolve_image2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_resolve_image2),
             .cmd_bind_pipeline = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindPipeline, "vkCmdBindPipeline"),
             .cmd_bind_descriptor_sets = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindDescriptorSets, "vkCmdBindDescriptorSets"),
             .cmd_bind_vertex_buffers = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindVertexBuffers, "vkCmdBindVertexBuffers"),
@@ -3179,6 +3382,9 @@ const DeviceDispatch = struct {
             .cmd_set_depth_bias = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetDepthBias, "vkCmdSetDepthBias"),
             .cmd_set_blend_constants = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetBlendConstants, "vkCmdSetBlendConstants"),
             .cmd_set_depth_bounds = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetDepthBounds, "vkCmdSetDepthBounds"),
+            .cmd_set_stencil_compare_mask = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetStencilCompareMask, "vkCmdSetStencilCompareMask"),
+            .cmd_set_stencil_write_mask = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetStencilWriteMask, "vkCmdSetStencilWriteMask"),
+            .cmd_set_stencil_reference = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetStencilReference, "vkCmdSetStencilReference"),
             .cmd_push_constants = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdPushConstants, "vkCmdPushConstants"),
             .cmd_draw = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDraw, "vkCmdDraw"),
             .cmd_draw_indexed = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDrawIndexed, "vkCmdDrawIndexed"),
@@ -3186,6 +3392,8 @@ const DeviceDispatch = struct {
             .cmd_draw_indexed_indirect = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDrawIndexedIndirect, "vkCmdDrawIndexedIndirect"),
             .cmd_draw_indirect_count = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_draw_indirect_count),
             .cmd_draw_indexed_indirect_count = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_draw_indexed_indirect_count),
+            .cmd_draw_multi = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_draw_multi_ext),
+            .cmd_draw_multi_indexed = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_draw_multi_indexed_ext),
             .cmd_dispatch = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDispatch, "vkCmdDispatch"),
             .cmd_dispatch_indirect = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDispatchIndirect, "vkCmdDispatchIndirect"),
             .cmd_dispatch_base = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_dispatch_base),
@@ -3759,6 +3967,19 @@ var test_begin_rendering_count: usize = 0;
 var test_end_rendering_count: usize = 0;
 var test_rendering_flags: raw.VkRenderingFlags = 0;
 var test_rendering_color_count: u32 = 0;
+var test_rendering_has_depth = false;
+var test_rendering_has_stencil = false;
+var test_rendering_has_shading_rate = false;
+var test_rendering_has_density_map = false;
+var test_draw_count: usize = 0;
+var test_multi_draw_count: u32 = 0;
+var test_stencil_reference: u32 = 0;
+var test_event_status_result: raw.VkResult = raw.VK_EVENT_RESET;
+var test_event_set_count: usize = 0;
+var test_event_reset_count: usize = 0;
+var test_event_wait_count: usize = 0;
+var test_dispatch_dimensions: [3]u32 = .{ 0, 0, 0 };
+var test_indirect_draw_count: u32 = 0;
 var test_destroy_pipeline_layout_count: usize = 0;
 var test_push_constant_count: usize = 0;
 var test_push_constant_offset: u32 = 0;
@@ -3867,6 +4088,31 @@ fn testGetPhysicalDeviceMemoryProperties(
     properties: [*c]raw.VkPhysicalDeviceMemoryProperties,
 ) callconv(.c) void {
     properties.* = test_memory_properties;
+}
+
+fn testGetPhysicalDeviceMemoryProperties2(
+    _: raw.VkPhysicalDevice,
+    properties: [*c]raw.VkPhysicalDeviceMemoryProperties2,
+) callconv(.c) void {
+    properties.*.memoryProperties.memoryHeapCount = 2;
+    if (properties.*.pNext) |next| {
+        const budget: *raw.VkPhysicalDeviceMemoryBudgetPropertiesEXT = @ptrCast(@alignCast(next));
+        budget.heapBudget[0] = 1024;
+        budget.heapUsage[0] = 256;
+        budget.heapBudget[1] = 2048;
+        budget.heapUsage[1] = 512;
+    }
+}
+
+fn testExternalBufferProperties(
+    _: raw.VkPhysicalDevice,
+    info: [*c]const raw.VkPhysicalDeviceExternalBufferInfo,
+    properties: [*c]raw.VkExternalBufferProperties,
+) callconv(.c) void {
+    properties.*.externalMemoryProperties = .{
+        .externalMemoryFeatures = raw.VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT,
+        .compatibleHandleTypes = @intCast(info.*.handleType),
+    };
 }
 
 fn testGetPhysicalDeviceFormatProperties(
@@ -4226,6 +4472,60 @@ fn testSignalSemaphore(
     return test_resource_result;
 }
 
+fn testCreateEvent(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkEventCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    output: [*c]raw.VkEvent,
+) callconv(.c) raw.VkResult {
+    output.* = testHandle(raw.VkEvent, 0x5350);
+    return test_resource_result;
+}
+
+fn testDestroyEvent(
+    _: raw.VkDevice,
+    _: raw.VkEvent,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+fn testGetEventStatus(_: raw.VkDevice, _: raw.VkEvent) callconv(.c) raw.VkResult {
+    return test_event_status_result;
+}
+
+fn testSetEvent(_: raw.VkDevice, _: raw.VkEvent) callconv(.c) raw.VkResult {
+    test_event_set_count += 1;
+    return test_resource_result;
+}
+
+fn testResetEvent(_: raw.VkDevice, _: raw.VkEvent) callconv(.c) raw.VkResult {
+    test_event_reset_count += 1;
+    return test_resource_result;
+}
+
+fn testCmdSetEvent(_: raw.VkCommandBuffer, _: raw.VkEvent, _: raw.VkPipelineStageFlags) callconv(.c) void {
+    test_event_set_count += 1;
+}
+
+fn testCmdResetEvent(_: raw.VkCommandBuffer, _: raw.VkEvent, _: raw.VkPipelineStageFlags) callconv(.c) void {
+    test_event_reset_count += 1;
+}
+
+fn testCmdWaitEvents(
+    _: raw.VkCommandBuffer,
+    _: u32,
+    _: [*c]const raw.VkEvent,
+    _: raw.VkPipelineStageFlags,
+    _: raw.VkPipelineStageFlags,
+    _: u32,
+    _: [*c]const raw.VkMemoryBarrier,
+    _: u32,
+    _: [*c]const raw.VkBufferMemoryBarrier,
+    _: u32,
+    _: [*c]const raw.VkImageMemoryBarrier,
+) callconv(.c) void {
+    test_event_wait_count += 1;
+}
+
 fn testCreateCommandPool(
     _: raw.VkDevice,
     _: [*c]const raw.VkCommandPoolCreateInfo,
@@ -4331,10 +4631,62 @@ fn testCmdBeginRendering(
     test_begin_rendering_count += 1;
     test_rendering_flags = info.*.flags;
     test_rendering_color_count = info.*.colorAttachmentCount;
+    test_rendering_has_depth = info.*.pDepthAttachment != null;
+    test_rendering_has_stencil = info.*.pStencilAttachment != null;
+    var next = info.*.pNext;
+    while (next) |item| {
+        const base: *const raw.VkBaseInStructure = @ptrCast(@alignCast(item));
+        if (base.sType == raw.VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR) test_rendering_has_shading_rate = true;
+        if (base.sType == raw.VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT) test_rendering_has_density_map = true;
+        next = base.pNext;
+    }
 }
 
 fn testCmdEndRendering(_: raw.VkCommandBuffer) callconv(.c) void {
     test_end_rendering_count += 1;
+}
+
+fn testCmdDraw(
+    _: raw.VkCommandBuffer,
+    _: u32,
+    _: u32,
+    _: u32,
+    _: u32,
+) callconv(.c) void {
+    test_draw_count += 1;
+}
+
+fn testCmdDrawMulti(
+    _: raw.VkCommandBuffer,
+    count: u32,
+    _: [*c]const raw.VkMultiDrawInfoEXT,
+    _: u32,
+    _: u32,
+    _: u32,
+) callconv(.c) void {
+    test_multi_draw_count = count;
+}
+
+fn testCmdSetStencilReference(
+    _: raw.VkCommandBuffer,
+    _: raw.VkStencilFaceFlags,
+    reference: u32,
+) callconv(.c) void {
+    test_stencil_reference = reference;
+}
+
+fn testCmdDispatch(_: raw.VkCommandBuffer, x: u32, y: u32, z: u32) callconv(.c) void {
+    test_dispatch_dimensions = .{ x, y, z };
+}
+
+fn testCmdDrawIndirect(
+    _: raw.VkCommandBuffer,
+    _: raw.VkBuffer,
+    _: raw.VkDeviceSize,
+    count: u32,
+    _: u32,
+) callconv(.c) void {
+    test_indirect_draw_count = count;
 }
 
 fn testCreatePipelineLayout(
@@ -4589,6 +4941,7 @@ fn testInstance() Instance {
             .get_physical_device_features2 = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
             .get_physical_device_memory_properties = testGetPhysicalDeviceMemoryProperties,
             .get_physical_device_memory_properties2 = null,
+            .get_physical_device_external_buffer_properties = null,
             .get_physical_device_queue_family_properties = testFunction(
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
             ),
@@ -4640,6 +4993,7 @@ fn testDevice() Device {
             .create_shader_module = testFunction(raw.PFN_vkCreateShaderModule),
             .destroy_shader_module = testFunction(raw.PFN_vkDestroyShaderModule),
             .get_shader_module_identifier_ext = null,
+            .get_shader_module_create_info_identifier_ext = null,
             .create_descriptor_set_layout = testFunction(raw.PFN_vkCreateDescriptorSetLayout),
             .destroy_descriptor_set_layout = testFunction(raw.PFN_vkDestroyDescriptorSetLayout),
             .create_descriptor_pool = testFunction(raw.PFN_vkCreateDescriptorPool),
@@ -4668,6 +5022,13 @@ fn testDevice() Device {
             .get_image_memory_requirements2 = null,
             .bind_image_memory = testFunction(raw.PFN_vkBindImageMemory),
             .bind_image_memory2 = null,
+            .get_image_subresource_layout = testFunction(raw.PFN_vkGetImageSubresourceLayout),
+            .get_image_sparse_memory_requirements = testFunction(raw.PFN_vkGetImageSparseMemoryRequirements),
+            .get_image_sparse_memory_requirements2 = null,
+            .copy_memory_to_image = null,
+            .copy_image_to_memory = null,
+            .copy_image_to_image = null,
+            .transition_image_layout = null,
             .create_image_view = testCreateImageView,
             .destroy_image_view = testDestroyImageView,
             .create_semaphore = testCreateSemaphore,
@@ -4695,6 +5056,9 @@ fn testDevice() Device {
             .reset_command_buffer = testResetCommandBuffer,
             .cmd_pipeline_barrier = testCmdPipelineBarrier,
             .cmd_pipeline_barrier2 = null,
+            .cmd_set_event = testFunction(raw.PFN_vkCmdSetEvent),
+            .cmd_reset_event = testFunction(raw.PFN_vkCmdResetEvent),
+            .cmd_wait_events = testFunction(raw.PFN_vkCmdWaitEvents),
             .cmd_set_event2 = null,
             .cmd_reset_event2 = null,
             .cmd_wait_events2 = null,
@@ -4707,10 +5071,15 @@ fn testDevice() Device {
             .cmd_copy_buffer = testFunction(raw.PFN_vkCmdCopyBuffer),
             .cmd_copy_buffer2 = null,
             .cmd_copy_buffer_to_image = testFunction(raw.PFN_vkCmdCopyBufferToImage),
+            .cmd_copy_buffer_to_image2 = null,
             .cmd_copy_image_to_buffer = testFunction(raw.PFN_vkCmdCopyImageToBuffer),
+            .cmd_copy_image_to_buffer2 = null,
             .cmd_copy_image = testFunction(raw.PFN_vkCmdCopyImage),
+            .cmd_copy_image2 = null,
             .cmd_blit_image = testFunction(raw.PFN_vkCmdBlitImage),
+            .cmd_blit_image2 = null,
             .cmd_resolve_image = testFunction(raw.PFN_vkCmdResolveImage),
+            .cmd_resolve_image2 = null,
             .cmd_bind_pipeline = testFunction(raw.PFN_vkCmdBindPipeline),
             .cmd_bind_descriptor_sets = testFunction(raw.PFN_vkCmdBindDescriptorSets),
             .cmd_bind_vertex_buffers = testFunction(raw.PFN_vkCmdBindVertexBuffers),
@@ -4721,6 +5090,9 @@ fn testDevice() Device {
             .cmd_set_depth_bias = testFunction(raw.PFN_vkCmdSetDepthBias),
             .cmd_set_blend_constants = testFunction(raw.PFN_vkCmdSetBlendConstants),
             .cmd_set_depth_bounds = testFunction(raw.PFN_vkCmdSetDepthBounds),
+            .cmd_set_stencil_compare_mask = testFunction(raw.PFN_vkCmdSetStencilCompareMask),
+            .cmd_set_stencil_write_mask = testFunction(raw.PFN_vkCmdSetStencilWriteMask),
+            .cmd_set_stencil_reference = testFunction(raw.PFN_vkCmdSetStencilReference),
             .cmd_push_constants = testFunction(raw.PFN_vkCmdPushConstants),
             .cmd_draw = testFunction(raw.PFN_vkCmdDraw),
             .cmd_draw_indexed = testFunction(raw.PFN_vkCmdDrawIndexed),
@@ -4728,6 +5100,8 @@ fn testDevice() Device {
             .cmd_draw_indexed_indirect = testFunction(raw.PFN_vkCmdDrawIndexedIndirect),
             .cmd_draw_indirect_count = null,
             .cmd_draw_indexed_indirect_count = null,
+            .cmd_draw_multi = null,
+            .cmd_draw_multi_indexed = null,
             .cmd_dispatch = testFunction(raw.PFN_vkCmdDispatch),
             .cmd_dispatch_indirect = testFunction(raw.PFN_vkCmdDispatchIndirect),
             .cmd_dispatch_base = null,
@@ -5018,6 +5392,14 @@ test "typed command recording and fence results avoid raw Vulkan at call sites" 
         .image = &image,
         .subresource_range = color_range,
     });
+    try command_buffer.pipelineBarrier(.{
+        .memory_barriers = &.{.{
+            .source_stage = .init(&.{.all_transfer}),
+            .source_access = .init(&.{.transfer_write}),
+            .destination_stage = .init(&.{.fragment_shader}),
+            .destination_access = .init(&.{.shader_read}),
+        }},
+    });
     try command_buffer.clearColorImage(.{
         .image = .{ .swapchain = &image },
         .layout = .transfer_dst_optimal,
@@ -5066,7 +5448,7 @@ test "typed command recording and fence results avoid raw Vulkan at call sites" 
     try std.testing.expectEqual(@as(usize, 1), test_begin_command_buffer_count);
     try std.testing.expectEqual(@as(usize, 1), test_end_command_buffer_count);
     try std.testing.expectEqual(@as(usize, 1), test_reset_command_buffer_count);
-    try std.testing.expectEqual(@as(usize, 2), test_pipeline_barrier_count);
+    try std.testing.expectEqual(@as(usize, 3), test_pipeline_barrier_count);
     try std.testing.expectEqual(@as(usize, 1), test_clear_color_count);
     try std.testing.expectEqual(@as(usize, 1), test_queue_submit_count);
 
@@ -5080,6 +5462,66 @@ test "typed command recording and fence results avoid raw Vulkan at call sites" 
     test_wait_result = raw.VK_ERROR_DEVICE_LOST;
     try std.testing.expectError(error.DeviceLost, fence.wait(.infinite));
     test_wait_result = raw.VK_SUCCESS;
+}
+
+test "events support host operations and legacy command-buffer barriers" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_event_status_result = raw.VK_EVENT_RESET;
+    test_event_set_count = 0;
+    test_event_reset_count = 0;
+    test_event_wait_count = 0;
+    test_dispatch_dimensions = .{ 0, 0, 0 };
+    var device = testDevice();
+    defer device.deinit();
+    device.dispatch.create_event = testCreateEvent;
+    device.dispatch.destroy_event = testDestroyEvent;
+    device.dispatch.get_event_status = testGetEventStatus;
+    device.dispatch.set_event = testSetEvent;
+    device.dispatch.reset_event = testResetEvent;
+    device.dispatch.cmd_set_event = testCmdSetEvent;
+    device.dispatch.cmd_reset_event = testCmdResetEvent;
+    device.dispatch.cmd_wait_events = testCmdWaitEvents;
+    device.dispatch.cmd_set_event2 = null;
+    device.dispatch.cmd_reset_event2 = null;
+    device.dispatch.cmd_wait_events2 = null;
+    device.dispatch.cmd_dispatch = testCmdDispatch;
+
+    var event = try device.createEvent();
+    defer event.deinit();
+    try std.testing.expectEqual(sync.EventStatus.reset, try event.status());
+    try event.set();
+    try event.reset();
+
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
+    try command_buffer.begin(.{});
+    const compute_pipeline: Pipeline = .{
+        ._handle = testHandle(raw.VkPipeline, 0x5360),
+        ._device_handle = device._handle.?,
+        .bind_point = .compute,
+        .allocation_callbacks = null,
+        .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
+    };
+    try command_buffer.bindPipeline(&compute_pipeline);
+    try command_buffer.dispatch(.{ .x = 8, .y = 4, .z = 2 });
+    const dependency: DependencyInfo = .{ .memory_barriers = &.{.{
+        .source_stage = .init(&.{.all_transfer}),
+        .source_access = .init(&.{.transfer_write}),
+        .destination_stage = .init(&.{.fragment_shader}),
+        .destination_access = .init(&.{.shader_read}),
+    }} };
+    try command_buffer.setEvent(&event, dependency);
+    try command_buffer.resetEvent(&event, .init(&.{.all_transfer}));
+    try command_buffer.waitEvent(&event, dependency);
+    try command_buffer.end();
+
+    try std.testing.expectEqual(@as(usize, 2), test_event_set_count);
+    try std.testing.expectEqual(@as(usize, 2), test_event_reset_count);
+    try std.testing.expectEqual(@as(usize, 1), test_event_wait_count);
+    try std.testing.expectEqual([3]u32{ 8, 4, 2 }, test_dispatch_dimensions);
 }
 
 test "fence status and batches preserve typed outcomes and validate parents" {
@@ -5530,11 +5972,23 @@ test "dynamic rendering scopes record typed attachments and end once" {
     test_end_rendering_count = 0;
     test_rendering_flags = 0;
     test_rendering_color_count = 0;
+    test_rendering_has_depth = false;
+    test_rendering_has_stencil = false;
+    test_rendering_has_shading_rate = false;
+    test_rendering_has_density_map = false;
+    test_draw_count = 0;
+    test_multi_draw_count = 0;
+    test_stencil_reference = 0;
+    test_indirect_draw_count = 0;
 
     var device = testDevice();
     defer device.deinit();
     device.dispatch.cmd_begin_rendering = testCmdBeginRendering;
     device.dispatch.cmd_end_rendering = testCmdEndRendering;
+    device.dispatch.cmd_draw = testCmdDraw;
+    device.dispatch.cmd_draw_multi = testCmdDrawMulti;
+    device.dispatch.cmd_set_stencil_reference = testCmdSetStencilReference;
+    device.dispatch.cmd_draw_indirect = testCmdDrawIndirect;
     var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
     defer pool.deinit();
     var command_buffer = try pool.allocateCommandBuffer(.{});
@@ -5559,7 +6013,55 @@ test "dynamic rendering scopes record typed attachments and end once" {
             .load = .clear,
             .clear = .{ .color = .{ .float = .{ 0, 0, 0, 1 } } },
         }},
+        .depth_attachment = .{
+            .view = &view,
+            .layout = .depth_attachment_optimal,
+            .load = .clear,
+            .clear = .{ .depth_stencil = .{ .depth = 1, .stencil = 0 } },
+        },
+        .stencil_attachment = .{
+            .view = &view,
+            .layout = .stencil_attachment_optimal,
+        },
+        .fragment_shading_rate_attachment = .{
+            .view = &view,
+            .layout = .fragment_shading_rate_attachment_optimal_khr,
+            .texel_size = .{ .width = 2, .height = 2 },
+        },
+        .fragment_density_map_attachment = .{
+            .view = &view,
+            .layout = .fragment_density_map_optimal_ext,
+        },
     });
+    const graphics_pipeline: Pipeline = .{
+        ._handle = testHandle(raw.VkPipeline, 0x5200),
+        ._device_handle = device._handle.?,
+        .bind_point = .graphics,
+        .allocation_callbacks = null,
+        .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
+    };
+    try command_buffer.bindPipeline(&graphics_pipeline);
+    try command_buffer.setStencilReference(.{ .front = true, .back = true }, 7);
+    try command_buffer.draw(.{ .vertex_count = 3 });
+    try command_buffer.drawMulti(&.{
+        .{ .first_vertex = 0, .vertex_count = 3 },
+        .{ .first_vertex = 3, .vertex_count = 6 },
+    }, 1, 0);
+    const indirect: Buffer = .{
+        ._handle = testHandle(raw.VkBuffer, 0x5250),
+        ._device_handle = device._handle.?,
+        .size = .fromBytes(64),
+        .allocation_callbacks = null,
+        .dispatch = undefined,
+    };
+    try std.testing.expectError(error.InvalidOptions, command_buffer.bindVertexBuffers(0, &.{}));
+    try command_buffer.bindVertexBuffers(0, &.{
+        .{ .buffer = &indirect, .offset = .zero },
+        .{ .buffer = &indirect, .offset = .fromBytes(16) },
+    });
+    try std.testing.expectError(error.InvalidOptions, command_buffer.bindIndexBuffer(&indirect, .fromBytes(1), .uint32));
+    try std.testing.expectError(error.InvalidOptions, command_buffer.drawIndirect(&indirect, .zero, 2, 12));
+    try command_buffer.drawIndirect(&indirect, .zero, 2, @sizeOf(DrawIndirectCommand));
     try std.testing.expectError(error.InvalidOptions, command_buffer.end());
     try scope.end();
     try scope.end();
@@ -5569,6 +6071,14 @@ test "dynamic rendering scopes record typed attachments and end once" {
     try std.testing.expectEqual(@as(usize, 1), test_end_rendering_count);
     try std.testing.expectEqual(@as(u32, 1), test_rendering_color_count);
     try std.testing.expect((test_rendering_flags & raw.VK_RENDERING_SUSPENDING_BIT) != 0);
+    try std.testing.expect(test_rendering_has_depth);
+    try std.testing.expect(test_rendering_has_stencil);
+    try std.testing.expect(test_rendering_has_shading_rate);
+    try std.testing.expect(test_rendering_has_density_map);
+    try std.testing.expectEqual(@as(usize, 1), test_draw_count);
+    try std.testing.expectEqual(@as(u32, 2), test_multi_draw_count);
+    try std.testing.expectEqual(@as(u32, 7), test_stencil_reference);
+    try std.testing.expectEqual(@as(u32, 2), test_indirect_draw_count);
 }
 
 test "pipeline layouts validate and record typed push constants" {
@@ -5878,6 +6388,38 @@ test "physical device memory queries produce validated owned snapshots" {
     try std.testing.expectEqual(@as(u64, 512), try returned.deviceLocalBytes());
 }
 
+test "memory budgets and external buffer capabilities are typed and command checked" {
+    var instance = testInstance();
+    defer instance.deinit();
+    instance.dispatch.get_physical_device_memory_properties2 = testGetPhysicalDeviceMemoryProperties2;
+    instance.dispatch.get_physical_device_external_buffer_properties = testExternalBufferProperties;
+    var physical_device: PhysicalDevice = .{
+        ._handle = testHandle(raw.VkPhysicalDevice, 0x1100),
+        ._instance_handle = testHandle(raw.VkInstance, 0x1000),
+        .dispatch = instance.dispatch,
+    };
+
+    const budget = try physical_device.memoryBudget();
+    try std.testing.expectEqual(@as(usize, 2), budget.heaps().len);
+    try std.testing.expectEqual(@as(u64, 768), budget.heaps()[0].available().bytes());
+    try std.testing.expectEqual(@as(u64, 1536), budget.heaps()[1].available().bytes());
+
+    const external = try physical_device.externalBufferProperties(.{
+        .usage = .init(&.{.storage_buffer}),
+        .handle_type = .opaque_fd,
+    });
+    try std.testing.expect(external.features.contains(.exportable));
+    try std.testing.expect(external.compatible_handle_types.contains(.opaque_fd));
+
+    physical_device.dispatch.get_physical_device_memory_properties2 = null;
+    physical_device.dispatch.get_physical_device_external_buffer_properties = null;
+    try std.testing.expectError(error.MissingCommand, physical_device.memoryBudget());
+    try std.testing.expectError(error.MissingCommand, physical_device.externalBufferProperties(.{
+        .usage = .init(&.{.storage_buffer}),
+        .handle_type = .opaque_fd,
+    }));
+}
+
 test "buffer wrappers cover creation views addresses sharing and checked binding" {
     test_resource_result = raw.VK_SUCCESS;
     test_resource_null_handle = false;
@@ -6051,6 +6593,14 @@ test "mapped memory bounds cache ranges and supports legacy and map2 paths" {
     try std.testing.expectError(error.DeviceLost, map2_allocation.map(.{}));
     try std.testing.expectEqual(@as(usize, 3), test_map_count);
     try std.testing.expectEqual(@as(usize, 2), test_unmap_count);
+}
+
+test "sampler capabilities reject unavailable features and extensions before dispatch" {
+    var device = testDevice();
+    defer device.deinit();
+    try std.testing.expectError(error.FeatureNotPresent, device.createSampler(.{ .anisotropy = 2 }));
+    try std.testing.expectError(error.ExtensionNotPresent, device.createSampler(.{ .mag_filter = .cubic }));
+    try std.testing.expectError(error.ExtensionNotPresent, device.createSampler(.{ .reduction = .minimum }));
 }
 
 test "allocated buffer convenience owns and binds both resources" {

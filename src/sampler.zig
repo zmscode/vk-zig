@@ -145,7 +145,7 @@ pub const Options = struct {
             if (!std.math.isFinite(value) or value < 1) return error.InvalidOptions;
         }
         if (options.unnormalized_coordinates) {
-            if (options.mipmap_mode != .nearest or options.min_lod != 0 or options.max_lod != 0 or
+            if (options.mag_filter != options.min_filter or options.mipmap_mode != .nearest or options.min_lod != 0 or options.max_lod != 0 or
                 options.anisotropy != null or options.compare != null)
             {
                 return error.InvalidOptions;
@@ -348,6 +348,7 @@ pub fn createYcbcrConversion(
     dispatch: YcbcrDispatch,
     options: YcbcrOptions,
 ) core.Error!YcbcrConversion {
+    if (options.format == .undefined_) return error.InvalidOptions;
     const info: raw.VkSamplerYcbcrConversionCreateInfo = .{
         .sType = raw.VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
         .format = options.format.toRaw(),
@@ -376,4 +377,83 @@ pub fn createYcbcrConversion(
 
 test "all sampler declarations compile" {
     std.testing.refAllDecls(@This());
+}
+
+var test_result: raw.VkResult = raw.VK_SUCCESS;
+var test_destroy_count: usize = 0;
+var test_chain_count: usize = 0;
+
+fn testCreateSampler(
+    _: raw.VkDevice,
+    info: [*c]const raw.VkSamplerCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    output: [*c]raw.VkSampler,
+) callconv(.c) raw.VkResult {
+    output.* = @ptrFromInt(0x2000);
+    test_chain_count = 0;
+    var next = info.*.pNext;
+    while (next) |pointer| {
+        test_chain_count += 1;
+        const base: *const raw.VkBaseInStructure = @ptrCast(@alignCast(pointer));
+        next = base.pNext;
+    }
+    return test_result;
+}
+
+fn testDestroySampler(
+    _: raw.VkDevice,
+    _: raw.VkSampler,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_destroy_count += 1;
+}
+
+fn testDestroyConversion(
+    _: raw.VkDevice,
+    _: raw.VkSamplerYcbcrConversion,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+test "sampler validation, extension chains, and rollback are deterministic" {
+    try (Options{}).validate();
+    try std.testing.expectError(error.InvalidOptions, (Options{ .anisotropy = 0.5 }).validate());
+    try std.testing.expectError(error.InvalidOptions, (Options{
+        .mag_filter = .linear,
+        .min_filter = .nearest,
+        .mipmap_mode = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .unnormalized_coordinates = true,
+    }).validate());
+
+    const device_handle: DeviceHandle = @ptrFromInt(0x1000);
+    const conversion: YcbcrConversion = .{
+        ._handle = @ptrFromInt(0x3000),
+        ._device_handle = device_handle,
+        .allocation_callbacks = null,
+        .destroy_conversion = testDestroyConversion,
+    };
+    var value = try create(device_handle, null, .{
+        .create = testCreateSampler,
+        .destroy = testDestroySampler,
+    }, .{
+        .compare = .less,
+        .border_color = .{ .custom_float = .{ .value = .{ 0, 0, 0, 1 }, .format = .r8g8b8a8_unorm } },
+        .reduction = .maximum,
+        .ycbcr_conversion = &conversion,
+    });
+    try std.testing.expectEqual(@as(usize, 3), test_chain_count);
+    test_destroy_count = 0;
+    value.deinit();
+    value.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_count);
+
+    test_result = raw.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    defer test_result = raw.VK_SUCCESS;
+    test_destroy_count = 0;
+    try std.testing.expectError(error.OutOfDeviceMemory, create(device_handle, null, .{
+        .create = testCreateSampler,
+        .destroy = testDestroySampler,
+    }, .{}));
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_count);
 }

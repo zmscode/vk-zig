@@ -144,94 +144,92 @@ pub fn createLayout(
     return layout;
 }
 
-pub const BindPoint = enum {
-    graphics,
-    compute,
+pub const BindPoint = enum(raw.VkPipelineBindPoint) {
+    graphics = raw.VK_PIPELINE_BIND_POINT_GRAPHICS,
+    compute = raw.VK_PIPELINE_BIND_POINT_COMPUTE,
+    _,
 
+    pub fn fromRaw(value: raw.VkPipelineBindPoint) BindPoint {
+        return @enumFromInt(value);
+    }
     pub fn toRaw(value: BindPoint) raw.VkPipelineBindPoint {
-        return switch (value) {
-            .graphics => raw.VK_PIPELINE_BIND_POINT_GRAPHICS,
-            .compute => raw.VK_PIPELINE_BIND_POINT_COMPUTE,
-        };
+        return @intFromEnum(value);
     }
 };
 
-pub const VertexInputRate = enum {
-    vertex,
-    instance,
+pub const VertexInputRate = enum(raw.VkVertexInputRate) {
+    vertex = raw.VK_VERTEX_INPUT_RATE_VERTEX,
+    instance = raw.VK_VERTEX_INPUT_RATE_INSTANCE,
+    _,
 
-    fn toRaw(value: VertexInputRate) raw.VkVertexInputRate {
-        return switch (value) {
-            .vertex => raw.VK_VERTEX_INPUT_RATE_VERTEX,
-            .instance => raw.VK_VERTEX_INPUT_RATE_INSTANCE,
-        };
+    pub fn fromRaw(value: raw.VkVertexInputRate) VertexInputRate {
+        return @enumFromInt(value);
+    }
+    pub fn toRaw(value: VertexInputRate) raw.VkVertexInputRate {
+        return @intFromEnum(value);
     }
 };
 
 pub const VertexBinding = struct { binding: u32, stride: u32, rate: VertexInputRate = .vertex };
 pub const VertexAttribute = struct { location: u32, binding: u32, format: types.Format, offset: u32 };
 
-pub const Topology = enum {
-    point_list,
-    line_list,
-    line_strip,
-    triangle_list,
-    triangle_strip,
-    triangle_fan,
-    patch_list,
+pub const Topology = enum(raw.VkPrimitiveTopology) {
+    point_list = raw.VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
+    line_list = raw.VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+    line_strip = raw.VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
+    triangle_list = raw.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    triangle_strip = raw.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+    triangle_fan = raw.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN,
+    patch_list = raw.VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+    _,
 
-    fn toRaw(value: Topology) raw.VkPrimitiveTopology {
-        return switch (value) {
-            .point_list => raw.VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
-            .line_list => raw.VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
-            .line_strip => raw.VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
-            .triangle_list => raw.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            .triangle_strip => raw.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-            .triangle_fan => raw.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN,
-            .patch_list => raw.VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        };
+    pub fn fromRaw(value: raw.VkPrimitiveTopology) Topology {
+        return @enumFromInt(value);
+    }
+    pub fn toRaw(value: Topology) raw.VkPrimitiveTopology {
+        return @intFromEnum(value);
     }
 };
 
-pub const PolygonMode = enum {
-    fill,
-    line,
-    point,
+pub const PolygonMode = enum(raw.VkPolygonMode) {
+    fill = raw.VK_POLYGON_MODE_FILL,
+    line = raw.VK_POLYGON_MODE_LINE,
+    point = raw.VK_POLYGON_MODE_POINT,
+    _,
 
-    fn toRaw(value: PolygonMode) raw.VkPolygonMode {
-        return switch (value) {
-            .fill => raw.VK_POLYGON_MODE_FILL,
-            .line => raw.VK_POLYGON_MODE_LINE,
-            .point => raw.VK_POLYGON_MODE_POINT,
-        };
+    pub fn fromRaw(value: raw.VkPolygonMode) PolygonMode {
+        return @enumFromInt(value);
+    }
+    pub fn toRaw(value: PolygonMode) raw.VkPolygonMode {
+        return @intFromEnum(value);
     }
 };
 
-pub const CullMode = enum {
-    none,
-    front,
-    back,
-    front_and_back,
+pub const CullMode = enum(raw.VkCullModeFlags) {
+    none = raw.VK_CULL_MODE_NONE,
+    front = raw.VK_CULL_MODE_FRONT_BIT,
+    back = raw.VK_CULL_MODE_BACK_BIT,
+    front_and_back = raw.VK_CULL_MODE_FRONT_AND_BACK,
+    _,
 
-    fn toRaw(value: CullMode) raw.VkCullModeFlags {
-        return switch (value) {
-            .none => raw.VK_CULL_MODE_NONE,
-            .front => raw.VK_CULL_MODE_FRONT_BIT,
-            .back => raw.VK_CULL_MODE_BACK_BIT,
-            .front_and_back => raw.VK_CULL_MODE_FRONT_AND_BACK,
-        };
+    pub fn fromRaw(value: raw.VkCullModeFlags) CullMode {
+        return @enumFromInt(value);
+    }
+    pub fn toRaw(value: CullMode) raw.VkCullModeFlags {
+        return @intFromEnum(value);
     }
 };
 
-pub const FrontFace = enum {
-    counter_clockwise,
-    clockwise,
+pub const FrontFace = enum(raw.VkFrontFace) {
+    counter_clockwise = raw.VK_FRONT_FACE_COUNTER_CLOCKWISE,
+    clockwise = raw.VK_FRONT_FACE_CLOCKWISE,
+    _,
 
-    fn toRaw(value: FrontFace) raw.VkFrontFace {
-        return switch (value) {
-            .counter_clockwise => raw.VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            .clockwise => raw.VK_FRONT_FACE_CLOCKWISE,
-        };
+    pub fn fromRaw(value: raw.VkFrontFace) FrontFace {
+        return @enumFromInt(value);
+    }
+    pub fn toRaw(value: FrontFace) raw.VkFrontFace {
+        return @intFromEnum(value);
     }
 };
 
@@ -270,41 +268,36 @@ pub const DepthStencil = struct {
     depth_bounds: ?DepthBounds = null,
 };
 
-pub const BlendFactor = enum {
-    zero,
-    one,
-    source_alpha,
-    one_minus_source_alpha,
-    destination_alpha,
-    one_minus_destination_alpha,
+pub const BlendFactor = enum(raw.VkBlendFactor) {
+    zero = raw.VK_BLEND_FACTOR_ZERO,
+    one = raw.VK_BLEND_FACTOR_ONE,
+    source_alpha = raw.VK_BLEND_FACTOR_SRC_ALPHA,
+    one_minus_source_alpha = raw.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+    destination_alpha = raw.VK_BLEND_FACTOR_DST_ALPHA,
+    one_minus_destination_alpha = raw.VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
+    _,
 
-    fn toRaw(value: BlendFactor) raw.VkBlendFactor {
-        return switch (value) {
-            .zero => raw.VK_BLEND_FACTOR_ZERO,
-            .one => raw.VK_BLEND_FACTOR_ONE,
-            .source_alpha => raw.VK_BLEND_FACTOR_SRC_ALPHA,
-            .one_minus_source_alpha => raw.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-            .destination_alpha => raw.VK_BLEND_FACTOR_DST_ALPHA,
-            .one_minus_destination_alpha => raw.VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
-        };
+    pub fn fromRaw(value: raw.VkBlendFactor) BlendFactor {
+        return @enumFromInt(value);
+    }
+    pub fn toRaw(value: BlendFactor) raw.VkBlendFactor {
+        return @intFromEnum(value);
     }
 };
 
-pub const BlendOperation = enum {
-    add,
-    subtract,
-    reverse_subtract,
-    minimum,
-    maximum,
+pub const BlendOperation = enum(raw.VkBlendOp) {
+    add = raw.VK_BLEND_OP_ADD,
+    subtract = raw.VK_BLEND_OP_SUBTRACT,
+    reverse_subtract = raw.VK_BLEND_OP_REVERSE_SUBTRACT,
+    minimum = raw.VK_BLEND_OP_MIN,
+    maximum = raw.VK_BLEND_OP_MAX,
+    _,
 
-    fn toRaw(value: BlendOperation) raw.VkBlendOp {
-        return switch (value) {
-            .add => raw.VK_BLEND_OP_ADD,
-            .subtract => raw.VK_BLEND_OP_SUBTRACT,
-            .reverse_subtract => raw.VK_BLEND_OP_REVERSE_SUBTRACT,
-            .minimum => raw.VK_BLEND_OP_MIN,
-            .maximum => raw.VK_BLEND_OP_MAX,
-        };
+    pub fn fromRaw(value: raw.VkBlendOp) BlendOperation {
+        return @enumFromInt(value);
+    }
+    pub fn toRaw(value: BlendOperation) raw.VkBlendOp {
+        return @intFromEnum(value);
     }
 };
 
@@ -335,29 +328,23 @@ pub const ColorBlendAttachment = struct {
     write_mask: ColorWriteMask = .{},
 };
 
-pub const DynamicState = enum {
-    viewport,
-    scissor,
-    line_width,
-    depth_bias,
-    blend_constants,
-    depth_bounds,
-    stencil_compare_mask,
-    stencil_write_mask,
-    stencil_reference,
+pub const DynamicState = enum(raw.VkDynamicState) {
+    viewport = raw.VK_DYNAMIC_STATE_VIEWPORT,
+    scissor = raw.VK_DYNAMIC_STATE_SCISSOR,
+    line_width = raw.VK_DYNAMIC_STATE_LINE_WIDTH,
+    depth_bias = raw.VK_DYNAMIC_STATE_DEPTH_BIAS,
+    blend_constants = raw.VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+    depth_bounds = raw.VK_DYNAMIC_STATE_DEPTH_BOUNDS,
+    stencil_compare_mask = raw.VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+    stencil_write_mask = raw.VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
+    stencil_reference = raw.VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+    _,
 
-    fn toRaw(value: DynamicState) raw.VkDynamicState {
-        return switch (value) {
-            .viewport => raw.VK_DYNAMIC_STATE_VIEWPORT,
-            .scissor => raw.VK_DYNAMIC_STATE_SCISSOR,
-            .line_width => raw.VK_DYNAMIC_STATE_LINE_WIDTH,
-            .depth_bias => raw.VK_DYNAMIC_STATE_DEPTH_BIAS,
-            .blend_constants => raw.VK_DYNAMIC_STATE_BLEND_CONSTANTS,
-            .depth_bounds => raw.VK_DYNAMIC_STATE_DEPTH_BOUNDS,
-            .stencil_compare_mask => raw.VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
-            .stencil_write_mask => raw.VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
-            .stencil_reference => raw.VK_DYNAMIC_STATE_STENCIL_REFERENCE,
-        };
+    pub fn fromRaw(value: raw.VkDynamicState) DynamicState {
+        return @enumFromInt(value);
+    }
+    pub fn toRaw(value: DynamicState) raw.VkDynamicState {
+        return @intFromEnum(value);
     }
 };
 
@@ -538,6 +525,7 @@ pub fn createGraphics(
         return error.CountOverflow;
     }
     if (options.viewports.len != options.scissors.len) return error.InvalidOptions;
+    if (options.color_blend_attachments.len != options.rendering.color.len) return error.InvalidOptions;
     if (!std.math.isFinite(options.rasterization.line_width) or options.rasterization.line_width <= 0) return error.InvalidOptions;
     if (options.multisample.minimum_sample_shading) |value| {
         if (!std.math.isFinite(value) or value < 0 or value > 1) return error.InvalidOptions;
@@ -672,12 +660,65 @@ pub fn createGraphics(
     return finishCreate(device_handle, allocation_callbacks, dispatch.destroy, .graphics, result, handle);
 }
 
+pub fn createComputeBatch(
+    device_handle: DeviceHandle,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    dispatch: PipelineDispatch,
+    options: []const ComputeOptions,
+    output: []CreateResult,
+) core.Error![]CreateResult {
+    if (options.len == 0) return error.InvalidOptions;
+    if (output.len < options.len) return error.BufferTooSmall;
+    var initialized: usize = 0;
+    errdefer rollbackBatch(output[0..initialized]);
+    for (options, 0..) |item, index| {
+        output[index] = try createCompute(device_handle, allocation_callbacks, dispatch, item);
+        initialized += 1;
+    }
+    return output[0..options.len];
+}
+
+pub fn createGraphicsBatch(
+    device_handle: DeviceHandle,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    dispatch: PipelineDispatch,
+    options: []const GraphicsOptions,
+    output: []CreateResult,
+) core.Error![]CreateResult {
+    if (options.len == 0) return error.InvalidOptions;
+    if (output.len < options.len) return error.BufferTooSmall;
+    var initialized: usize = 0;
+    errdefer rollbackBatch(output[0..initialized]);
+    for (options, 0..) |item, index| {
+        output[index] = try createGraphics(device_handle, allocation_callbacks, dispatch, item);
+        initialized += 1;
+    }
+    return output[0..options.len];
+}
+
+fn rollbackBatch(results: []CreateResult) void {
+    for (results) |*result| switch (result.*) {
+        .success => |*value| value.deinit(),
+        .compile_required => {},
+    };
+}
+
 test "all pipeline declarations compile" {
     std.testing.refAllDecls(@This());
 }
 
+test "pipeline enum domains preserve unknown extension values" {
+    const unknown_topology: raw.VkPrimitiveTopology = 0x7fff;
+    const unknown_dynamic_state: raw.VkDynamicState = 0x7ffe;
+    try std.testing.expectEqual(unknown_topology, Topology.fromRaw(unknown_topology).toRaw());
+    try std.testing.expectEqual(unknown_dynamic_state, DynamicState.fromRaw(unknown_dynamic_state).toRaw());
+}
+
 var test_layout_result: raw.VkResult = raw.VK_SUCCESS;
 var test_layout_destroy_count: usize = 0;
+var test_pipeline_result: raw.VkResult = raw.VK_SUCCESS;
+var test_pipeline_destroy_count: usize = 0;
+var test_graphics_has_rendering = false;
 
 fn testCreateLayout(
     _: raw.VkDevice,
@@ -700,6 +741,48 @@ fn testDestroyLayout(
 fn testDestroySetLayout(
     _: raw.VkDevice,
     _: raw.VkDescriptorSetLayout,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+fn testCreateComputePipeline(
+    _: raw.VkDevice,
+    _: raw.VkPipelineCache,
+    count: u32,
+    infos: [*c]const raw.VkComputePipelineCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    output: [*c]raw.VkPipeline,
+) callconv(.c) raw.VkResult {
+    for (0..count) |index| {
+        std.debug.assert(infos[index].stage.stage == raw.VK_SHADER_STAGE_COMPUTE_BIT);
+        output[index] = @ptrFromInt(0x5000 + index);
+    }
+    return test_pipeline_result;
+}
+
+fn testCreateGraphicsPipeline(
+    _: raw.VkDevice,
+    _: raw.VkPipelineCache,
+    count: u32,
+    infos: [*c]const raw.VkGraphicsPipelineCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    output: [*c]raw.VkPipeline,
+) callconv(.c) raw.VkResult {
+    for (0..count) |index| output[index] = @ptrFromInt(0x6000 + index);
+    test_graphics_has_rendering = infos[0].pNext != null;
+    return test_pipeline_result;
+}
+
+fn testDestroyPipeline(
+    _: raw.VkDevice,
+    _: raw.VkPipeline,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_pipeline_destroy_count += 1;
+}
+
+fn testDestroyShaderModule(
+    _: raw.VkDevice,
+    _: raw.VkShaderModule,
     _: [*c]const raw.VkAllocationCallbacks,
 ) callconv(.c) void {}
 
@@ -749,4 +832,65 @@ test "pipeline layouts reject invalid ranges and roll back provisional handles" 
     test_layout_destroy_count = 0;
     try std.testing.expectError(error.OutOfHostMemory, createLayout(device_handle, null, dispatch, 128, .{}));
     try std.testing.expectEqual(@as(usize, 1), test_layout_destroy_count);
+}
+
+test "compute pipeline batches preserve compile status and roll back earlier successes" {
+    const device_handle: DeviceHandle = @ptrFromInt(0x1000);
+    const dispatch: PipelineDispatch = .{
+        .create_graphics = testCreateGraphicsPipeline,
+        .create_compute = testCreateComputePipeline,
+        .destroy = testDestroyPipeline,
+    };
+    const module: shader.Module = .{
+        ._handle = @ptrFromInt(0x2000),
+        ._device_handle = device_handle,
+        .allocation_callbacks = null,
+        .dispatch = .{
+            .create = undefined,
+            .destroy = testDestroyShaderModule,
+            .get_identifier = null,
+            .get_create_info_identifier = null,
+        },
+    };
+    const layout: Layout = .{
+        ._handle = @ptrFromInt(0x3000),
+        ._device_handle = device_handle,
+        .allocation_callbacks = null,
+        .destroy_layout = testDestroyLayout,
+    };
+    const valid: ComputeOptions = .{ .stage = .{ .stage = .compute, .module = &module }, .layout = &layout };
+
+    test_pipeline_result = raw.VK_SUCCESS;
+    test_graphics_has_rendering = false;
+    var graphics_result = try createGraphics(device_handle, null, dispatch, .{
+        .stages = &.{.{ .stage = .vertex, .module = &module }},
+        .layout = &layout,
+        .color_blend_attachments = &.{.{}},
+        .rendering = .{ .color = &.{.b8g8r8a8_srgb} },
+    });
+    try std.testing.expect(graphics_result == .success);
+    try std.testing.expect(test_graphics_has_rendering);
+    switch (graphics_result) {
+        .success => |*value| value.deinit(),
+        .compile_required => unreachable,
+    }
+
+    test_pipeline_result = raw.VK_PIPELINE_COMPILE_REQUIRED;
+    test_pipeline_destroy_count = 0;
+    const compile_result = try createCompute(device_handle, null, dispatch, valid);
+    try std.testing.expect(compile_result == .compile_required);
+    try std.testing.expectEqual(@as(usize, 1), test_pipeline_destroy_count);
+
+    test_pipeline_result = raw.VK_SUCCESS;
+    test_pipeline_destroy_count = 0;
+    var output: [2]CreateResult = undefined;
+    const invalid: ComputeOptions = .{ .stage = .{ .stage = .vertex, .module = &module }, .layout = &layout };
+    try std.testing.expectError(error.InvalidOptions, createComputeBatch(
+        device_handle,
+        null,
+        dispatch,
+        &.{ valid, invalid },
+        &output,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), test_pipeline_destroy_count);
 }

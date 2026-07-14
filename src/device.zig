@@ -7,6 +7,7 @@ const registry = @import("registry.zig");
 
 pub const extension_count_max = registry.name_count_max;
 pub const queue_count_max = 64;
+pub const group_device_count_max = raw.VK_MAX_DEVICE_GROUP_SIZE;
 pub const rejection_count_max = extension_count_max + queue_count_max + 32;
 
 /// Vulkan features commonly needed by modern applications. Core 1.0 features
@@ -240,17 +241,32 @@ pub const QueueOptions = struct {
     global_priority: ?GlobalPriority = null,
 };
 
+/// A typed, non-owning member of a Vulkan physical-device group. Values are
+/// obtained from `PhysicalDevice.groupMember`; applications never handle the
+/// underlying Vulkan handle.
+pub const GroupMember = struct {
+    _handle: core.NonNullHandle(raw.VkPhysicalDevice),
+    _instance_handle: core.NonNullHandle(raw.VkInstance),
+};
+
 pub const Requirements = struct {
     queues: []const QueueOptions,
     extensions: []const command.Extension = &.{},
     features: FeatureSet = .empty,
     enabled_instance_extensions: []const [:0]const u8 = &.{},
+    device_group: []const GroupMember = &.{},
     enable_portability_subset: bool = false,
 
     pub fn validate(requirements: Requirements) core.Error!void {
         if (requirements.queues.len == 0) return error.InvalidOptions;
         if (requirements.queues.len > queue_count_max) return error.CountOverflow;
         if (requirements.extensions.len > extension_count_max) return error.CountOverflow;
+        if (requirements.device_group.len > group_device_count_max) return error.CountOverflow;
+        for (requirements.device_group, 0..) |member, index| {
+            for (requirements.device_group[0..index]) |previous| {
+                if (member._handle == previous._handle) return error.InvalidOptions;
+            }
+        }
         for (requirements.queues, 0..) |queue, queue_index| {
             if (queue.priorities.len == 0) return error.InvalidOptions;
             for (queue.priorities) |priority| {
@@ -308,6 +324,12 @@ pub fn evaluate(requirements: Requirements, available: Availability) Evaluation 
         result.reject(.invalid_options);
     }
     if (requirements.extensions.len > extension_count_max) result.reject(.invalid_options);
+    if (requirements.device_group.len > group_device_count_max) result.reject(.invalid_options);
+    for (requirements.device_group, 0..) |member, index| {
+        for (requirements.device_group[0..index]) |previous| {
+            if (member._handle == previous._handle) result.reject(.invalid_options);
+        }
+    }
 
     for (requirements.extensions) |requested| {
         if (requested.scope != .device) {
@@ -440,9 +462,10 @@ pub const EnabledCapabilities = struct {
     _extensions: [extension_count_max][:0]const u8 = undefined,
     extension_count: usize = 0,
     features: FeatureSet = .empty,
+    api_version: core.Version = .v1_0,
 
-    pub fn init(items: []const command.Extension, features: FeatureSet) EnabledCapabilities {
-        var enabled: EnabledCapabilities = .{ .features = features };
+    pub fn init(items: []const command.Extension, features: FeatureSet, api_version: core.Version) EnabledCapabilities {
+        var enabled: EnabledCapabilities = .{ .features = features, .api_version = api_version };
         for (items) |item| {
             if (enabled.extension_count == enabled._extensions.len) break;
             enabled._extensions[enabled.extension_count] = item.name;
@@ -456,11 +479,24 @@ pub const EnabledCapabilities = struct {
     }
 
     pub fn supportsExtension(enabled: *const EnabledCapabilities, item: command.Extension) bool {
-        return registry.containsName(enabled.extensions(), item.name);
+        if (registry.containsName(enabled.extensions(), item.name)) return true;
+        const promoted = item.promoted_to orelse return false;
+        return versionTokenSatisfied(promoted, enabled.api_version);
     }
 
     pub fn supportsFeature(enabled: *const EnabledCapabilities, feature: Feature) bool {
         return enabled.features.contains(feature);
+    }
+
+    pub fn supportsCommand(enabled: *const EnabledCapabilities, comptime descriptor: anytype) bool {
+        if (@TypeOf(descriptor).scope != .device) return false;
+        if (@TypeOf(descriptor).core_version) |version| {
+            if (enabled.api_version.atLeast(.{ .major = version.major, .minor = version.minor, .patch = 0 })) return true;
+        }
+        inline for (@TypeOf(descriptor).extensions) |required| {
+            if (registry.containsName(enabled.extensions(), required)) return true;
+        }
+        return false;
     }
 };
 
@@ -513,4 +549,26 @@ test "device requirement evaluation reports extensions features and queues indep
     });
     try std.testing.expect(!rejected.supported());
     try std.testing.expect(rejected.reasons().len >= 2);
+}
+
+test "device groups and enabled capabilities remain typed and queryable" {
+    const member: GroupMember = .{
+        ._handle = @ptrFromInt(0x1000),
+        ._instance_handle = @ptrFromInt(0x2000),
+    };
+    try std.testing.expectError(error.InvalidOptions, (Requirements{
+        .queues = &.{.{ .family_index = .fromRaw(0), .priorities = &.{1} }},
+        .device_group = &.{ member, member },
+    }).validate());
+
+    const enabled = EnabledCapabilities.init(
+        &.{command.extension.khr_swapchain},
+        .init(&.{.dynamic_rendering}),
+        .v1_3,
+    );
+    try std.testing.expect(enabled.supportsExtension(command.extension.khr_swapchain));
+    try std.testing.expect(enabled.supportsExtension(command.extension.khr_dynamic_rendering));
+    try std.testing.expect(enabled.supportsFeature(.dynamic_rendering));
+    try std.testing.expect(enabled.supportsCommand(command.cmd_begin_rendering));
+    try std.testing.expect(!enabled.supportsCommand(command.cmd_encode_video_khr));
 }

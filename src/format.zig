@@ -71,6 +71,21 @@ pub const ExternalMemoryProperties = struct {
     }
 };
 
+pub const ExternalBufferOptions = struct {
+    flags: types.BufferCreateFlags = .empty,
+    usage: types.BufferUsageFlags,
+    handle_type: types.ExternalMemoryHandleTypeBit,
+
+    pub fn toRaw(options: ExternalBufferOptions) raw.VkPhysicalDeviceExternalBufferInfo {
+        return .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO,
+            .flags = options.flags.toRaw(),
+            .usage = options.usage.toRaw(),
+            .handleType = options.handle_type.toRaw(),
+        };
+    }
+};
+
 pub const ImageQueryResult = struct {
     properties: ImageProperties,
     external_memory: ?ExternalMemoryProperties,

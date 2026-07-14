@@ -816,17 +816,28 @@ fn writeValueTypes(writer: *std.Io.Writer) !void {
         \\    }
         \\};
         \\
+        \\pub const MipLevelCount = union(enum) {
+        \\    count: u32,
+        \\    remaining,
+        \\    pub fn toRaw(value: MipLevelCount) u32 { return switch (value) { .count => |count| count, .remaining => raw.VK_REMAINING_MIP_LEVELS }; }
+        \\};
+        \\pub const ArrayLayerCount = union(enum) {
+        \\    count: u32,
+        \\    remaining,
+        \\    pub fn toRaw(value: ArrayLayerCount) u32 { return switch (value) { .count => |count| count, .remaining => raw.VK_REMAINING_ARRAY_LAYERS }; }
+        \\};
+        \\
         \\pub const ImageSubresourceRange = struct {
         \\    aspect_mask: ImageAspectFlags,
         \\    base_mip_level: u32 = 0,
-        \\    level_count: u32 = 1,
+        \\    level_count: MipLevelCount = .{ .count = 1 },
         \\    base_array_layer: u32 = 0,
-        \\    layer_count: u32 = 1,
+        \\    layer_count: ArrayLayerCount = .{ .count = 1 },
         \\
         \\    pub fn toRaw(value: ImageSubresourceRange) raw.VkImageSubresourceRange {
         \\        return .{ .aspectMask = value.aspect_mask.toRaw(),
-        \\            .baseMipLevel = value.base_mip_level, .levelCount = value.level_count,
-        \\            .baseArrayLayer = value.base_array_layer, .layerCount = value.layer_count };
+        \\            .baseMipLevel = value.base_mip_level, .levelCount = value.level_count.toRaw(),
+        \\            .baseArrayLayer = value.base_array_layer, .layerCount = value.layer_count.toRaw() };
         \\    }
         \\};
         \\

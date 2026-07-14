@@ -73,6 +73,17 @@ pub const Resolve = struct {
     layout: types.ImageLayout,
 };
 
+pub const FragmentShadingRateAttachment = struct {
+    view: *const images.View,
+    layout: types.ImageLayout,
+    texel_size: types.Extent2D,
+};
+
+pub const FragmentDensityMapAttachment = struct {
+    view: *const images.View,
+    layout: types.ImageLayout,
+};
+
 pub const Attachment = struct {
     view: *const images.View,
     layout: types.ImageLayout,
@@ -116,6 +127,8 @@ pub const Options = struct {
     color_attachments: []const Attachment = &.{},
     depth_attachment: ?Attachment = null,
     stencil_attachment: ?Attachment = null,
+    fragment_shading_rate_attachment: ?FragmentShadingRateAttachment = null,
+    fragment_density_map_attachment: ?FragmentDensityMapAttachment = null,
 
     pub fn validate(options: Options, device_handle: core.NonNullHandle(raw.VkDevice)) core.Error!void {
         if (options.render_area.extent.width == 0 or options.render_area.extent.height == 0) return error.InvalidOptions;
@@ -125,6 +138,13 @@ pub const Options = struct {
         for (options.color_attachments) |attachment| try attachment.validate(device_handle);
         if (options.depth_attachment) |attachment| try attachment.validate(device_handle);
         if (options.stencil_attachment) |attachment| try attachment.validate(device_handle);
+        if (options.fragment_shading_rate_attachment) |attachment| {
+            if (attachment.view._device_handle != device_handle or attachment.view._handle == null) return error.InvalidHandle;
+            if (attachment.texel_size.width == 0 or attachment.texel_size.height == 0) return error.InvalidOptions;
+        }
+        if (options.fragment_density_map_attachment) |attachment| {
+            if (attachment.view._device_handle != device_handle or attachment.view._handle == null) return error.InvalidHandle;
+        }
     }
 };
 
@@ -146,6 +166,24 @@ test "dynamic rendering options validate clear, multiview, and suspend state" {
         .load = .clear,
         .clear = .{ .color = .{ .float = .{ 0, 0, 0, 1 } } },
     };
+    const resolve_view: images.View = .{
+        ._handle = @ptrFromInt(0x3000),
+        ._device_handle = device_handle,
+        .allocation_callbacks = null,
+        .destroy_image_view = undefined,
+    };
+    const resolved_color: Attachment = .{
+        .view = &view,
+        .layout = .color_attachment_optimal,
+        .resolve = .{
+            .mode = .average,
+            .view = &resolve_view,
+            .layout = .color_attachment_optimal,
+        },
+    };
+    try resolved_color.validate(device_handle);
+    const raw_resolved = try resolved_color.toRaw();
+    try std.testing.expectEqual(@as(raw.VkResolveModeFlagBits, @intCast(raw.VK_RESOLVE_MODE_AVERAGE_BIT)), raw_resolved.resolveMode);
     try Options.validate(.{
         .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 32, .height = 32 } },
         .view_mask = 0b11,
@@ -165,4 +203,7 @@ test "dynamic rendering options validate clear, multiview, and suspend state" {
         .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 32, .height = 32 } },
         .color_attachments = &.{missing_clear},
     }, device_handle));
+    var invalid_depth_resolve = resolved_color;
+    invalid_depth_resolve.layout = .depth_attachment_optimal;
+    try std.testing.expectError(error.InvalidOptions, invalid_depth_resolve.validate(device_handle));
 }

@@ -81,6 +81,27 @@ pub const IndexType = enum {
 pub const DrawOptions = struct { vertex_count: u32, instance_count: u32 = 1, first_vertex: u32 = 0, first_instance: u32 = 0 };
 pub const DrawIndexedOptions = struct { index_count: u32, instance_count: u32 = 1, first_index: u32 = 0, vertex_offset: i32 = 0, first_instance: u32 = 0 };
 pub const DispatchOptions = struct { x: u32, y: u32 = 1, z: u32 = 1 };
+pub const DrawIndirectCommand = extern struct { vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32 };
+pub const DrawIndexedIndirectCommand = extern struct { index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32 };
+pub const DispatchIndirectCommand = extern struct { x: u32, y: u32, z: u32 };
+comptime {
+    std.debug.assert(@sizeOf(DrawIndirectCommand) == @sizeOf(raw.VkDrawIndirectCommand));
+    std.debug.assert(@sizeOf(DrawIndexedIndirectCommand) == @sizeOf(raw.VkDrawIndexedIndirectCommand));
+    std.debug.assert(@sizeOf(DispatchIndirectCommand) == @sizeOf(raw.VkDispatchIndirectCommand));
+}
+pub const MultiDraw = struct { first_vertex: u32 = 0, vertex_count: u32 };
+pub const MultiDrawIndexed = struct { first_index: u32 = 0, index_count: u32, vertex_offset: i32 = 0 };
+pub const StencilFaces = packed struct(u2) {
+    front: bool = false,
+    back: bool = false,
+
+    fn toRaw(value: StencilFaces) raw.VkStencilFaceFlags {
+        var flags: raw.VkStencilFaceFlags = 0;
+        if (value.front) flags |= raw.VK_STENCIL_FACE_FRONT_BIT;
+        if (value.back) flags |= raw.VK_STENCIL_FACE_BACK_BIT;
+        return flags;
+    }
+};
 
 pub const State = enum {
     initial,
@@ -118,6 +139,64 @@ const DependencyStorage = struct {
     }
 };
 
+const LegacyDependencyStorage = struct {
+    memory: [64]raw.VkMemoryBarrier = undefined,
+    buffers: [64]raw.VkBufferMemoryBarrier = undefined,
+    images: [64]raw.VkImageMemoryBarrier = undefined,
+    source_stages: raw.VkPipelineStageFlags = 0,
+    destination_stages: raw.VkPipelineStageFlags = 0,
+
+    fn init(storage: *LegacyDependencyStorage, dependency: sync.DependencyInfo) core.Error!void {
+        if (dependency.memory_barriers.len > storage.memory.len or dependency.buffer_barriers.len > storage.buffers.len or dependency.image_barriers.len > storage.images.len) return error.CountOverflow;
+        for (dependency.memory_barriers, 0..) |barrier, index| {
+            storage.addStages(barrier.source_stage, barrier.destination_stage) catch return error.UnsupportedOperation;
+            storage.memory[index] = .{ .sType = raw.VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = try legacyAccess(barrier.source_access), .dstAccessMask = try legacyAccess(barrier.destination_access) };
+        }
+        for (dependency.buffer_barriers, 0..) |barrier, index| {
+            storage.addStages(barrier.source_stage, barrier.destination_stage) catch return error.UnsupportedOperation;
+            const converted = try barrier.toRaw();
+            storage.buffers[index] = .{ .sType = raw.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, .srcAccessMask = try legacyAccess(barrier.source_access), .dstAccessMask = try legacyAccess(barrier.destination_access), .srcQueueFamilyIndex = converted.srcQueueFamilyIndex, .dstQueueFamilyIndex = converted.dstQueueFamilyIndex, .buffer = converted.buffer, .offset = converted.offset, .size = converted.size };
+        }
+        for (dependency.image_barriers, 0..) |barrier, index| {
+            storage.addStages(barrier.source_stage, barrier.destination_stage) catch return error.UnsupportedOperation;
+            const converted = try barrier.toRaw();
+            storage.images[index] = .{ .sType = raw.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = try legacyAccess(barrier.source_access), .dstAccessMask = try legacyAccess(barrier.destination_access), .oldLayout = converted.oldLayout, .newLayout = converted.newLayout, .srcQueueFamilyIndex = converted.srcQueueFamilyIndex, .dstQueueFamilyIndex = converted.dstQueueFamilyIndex, .image = converted.image, .subresourceRange = converted.subresourceRange };
+        }
+        if (storage.source_stages == 0) storage.source_stages = raw.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (storage.destination_stages == 0) storage.destination_stages = raw.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    }
+
+    fn addStages(storage: *LegacyDependencyStorage, source: types.PipelineStage2Flags, destination: types.PipelineStage2Flags) core.Error!void {
+        storage.source_stages |= try legacyStages(source);
+        storage.destination_stages |= try legacyStages(destination);
+    }
+};
+
+fn legacyStages(value: types.PipelineStage2Flags) core.Error!raw.VkPipelineStageFlags {
+    const bits = value.toRaw();
+    if (bits > std.math.maxInt(raw.VkPipelineStageFlags)) return error.UnsupportedOperation;
+    return @intCast(bits);
+}
+
+fn legacyAccess(value: types.Access2Flags) core.Error!raw.VkAccessFlags {
+    const bits = value.toRaw();
+    if (bits > std.math.maxInt(raw.VkAccessFlags)) return error.UnsupportedOperation;
+    return @intCast(bits);
+}
+
+fn validateImageRegion(reference: image.Reference, layers: transfer.SubresourceLayers, offset: types.Offset3D, extent: types.Extent3D) core.Error!void {
+    if (layers.layer_count == 0 or offset.x < 0 or offset.y < 0 or offset.z < 0 or extent.width == 0 or extent.height == 0 or extent.depth == 0) return error.InvalidOptions;
+    if (reference.knownExtentAtMip(layers.mip_level)) |known| {
+        const x: u32 = @intCast(offset.x);
+        const y: u32 = @intCast(offset.y);
+        const z: u32 = @intCast(offset.z);
+        if (x > known.width or extent.width > known.width - x or y > known.height or extent.height > known.height - y or z > known.depth or extent.depth > known.depth - z) return error.InvalidOptions;
+    } else if (reference == .owned) return error.InvalidOptions;
+    if (reference.knownArrayLayers()) |layer_count| {
+        if (layers.base_array_layer > layer_count or layers.layer_count > layer_count - layers.base_array_layer) return error.InvalidOptions;
+    }
+}
+
 pub const Buffer = struct {
     _handle: ?CommandBufferHandle,
     _device_handle: DeviceHandle,
@@ -136,6 +215,9 @@ pub const Buffer = struct {
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
     cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
     cmd_pipeline_barrier2: ?CommandFunction(raw.PFN_vkCmdPipelineBarrier2),
+    cmd_set_event: CommandFunction(raw.PFN_vkCmdSetEvent),
+    cmd_reset_event: CommandFunction(raw.PFN_vkCmdResetEvent),
+    cmd_wait_events: CommandFunction(raw.PFN_vkCmdWaitEvents),
     cmd_set_event2: ?CommandFunction(raw.PFN_vkCmdSetEvent2),
     cmd_reset_event2: ?CommandFunction(raw.PFN_vkCmdResetEvent2),
     cmd_wait_events2: ?CommandFunction(raw.PFN_vkCmdWaitEvents2),
@@ -148,10 +230,15 @@ pub const Buffer = struct {
     cmd_copy_buffer: CommandFunction(raw.PFN_vkCmdCopyBuffer),
     cmd_copy_buffer2: ?CommandFunction(raw.PFN_vkCmdCopyBuffer2),
     cmd_copy_buffer_to_image: CommandFunction(raw.PFN_vkCmdCopyBufferToImage),
+    cmd_copy_buffer_to_image2: ?CommandFunction(raw.PFN_vkCmdCopyBufferToImage2),
     cmd_copy_image_to_buffer: CommandFunction(raw.PFN_vkCmdCopyImageToBuffer),
+    cmd_copy_image_to_buffer2: ?CommandFunction(raw.PFN_vkCmdCopyImageToBuffer2),
     cmd_copy_image: CommandFunction(raw.PFN_vkCmdCopyImage),
+    cmd_copy_image2: ?CommandFunction(raw.PFN_vkCmdCopyImage2),
     cmd_blit_image: CommandFunction(raw.PFN_vkCmdBlitImage),
+    cmd_blit_image2: ?CommandFunction(raw.PFN_vkCmdBlitImage2),
     cmd_resolve_image: CommandFunction(raw.PFN_vkCmdResolveImage),
+    cmd_resolve_image2: ?CommandFunction(raw.PFN_vkCmdResolveImage2),
     cmd_bind_pipeline: CommandFunction(raw.PFN_vkCmdBindPipeline),
     cmd_bind_descriptor_sets: CommandFunction(raw.PFN_vkCmdBindDescriptorSets),
     cmd_bind_vertex_buffers: CommandFunction(raw.PFN_vkCmdBindVertexBuffers),
@@ -162,6 +249,9 @@ pub const Buffer = struct {
     cmd_set_depth_bias: CommandFunction(raw.PFN_vkCmdSetDepthBias),
     cmd_set_blend_constants: CommandFunction(raw.PFN_vkCmdSetBlendConstants),
     cmd_set_depth_bounds: CommandFunction(raw.PFN_vkCmdSetDepthBounds),
+    cmd_set_stencil_compare_mask: CommandFunction(raw.PFN_vkCmdSetStencilCompareMask),
+    cmd_set_stencil_write_mask: CommandFunction(raw.PFN_vkCmdSetStencilWriteMask),
+    cmd_set_stencil_reference: CommandFunction(raw.PFN_vkCmdSetStencilReference),
     cmd_push_constants: CommandFunction(raw.PFN_vkCmdPushConstants),
     cmd_draw: CommandFunction(raw.PFN_vkCmdDraw),
     cmd_draw_indexed: CommandFunction(raw.PFN_vkCmdDrawIndexed),
@@ -169,6 +259,8 @@ pub const Buffer = struct {
     cmd_draw_indexed_indirect: CommandFunction(raw.PFN_vkCmdDrawIndexedIndirect),
     cmd_draw_indirect_count: ?CommandFunction(raw.PFN_vkCmdDrawIndirectCount),
     cmd_draw_indexed_indirect_count: ?CommandFunction(raw.PFN_vkCmdDrawIndexedIndirectCount),
+    cmd_draw_multi: ?CommandFunction(raw.PFN_vkCmdDrawMultiEXT),
+    cmd_draw_multi_indexed: ?CommandFunction(raw.PFN_vkCmdDrawMultiIndexedEXT),
     cmd_dispatch: CommandFunction(raw.PFN_vkCmdDispatch),
     cmd_dispatch_indirect: CommandFunction(raw.PFN_vkCmdDispatchIndirect),
     cmd_dispatch_base: ?CommandFunction(raw.PFN_vkCmdDispatchBase),
@@ -321,12 +413,18 @@ pub const Buffer = struct {
     pub fn pipelineBarrier(buffer: *Buffer, dependency: sync.DependencyInfo) core.Error!void {
         const handle = try buffer.liveHandle();
         if (buffer.state != .recording) return error.InvalidOptions;
-        const barrier2 = buffer.cmd_pipeline_barrier2 orelse return error.MissingCommand;
         if (dependency.memory_barriers.len > 64 or dependency.buffer_barriers.len > 64 or
             dependency.image_barriers.len > 64)
         {
             return error.CountOverflow;
         }
+        if (buffer.cmd_pipeline_barrier2 == null) {
+            var legacy: LegacyDependencyStorage = .{};
+            try legacy.init(dependency);
+            buffer.cmd_pipeline_barrier(handle, legacy.source_stages, legacy.destination_stages, dependency.flags.toRaw(), @intCast(dependency.memory_barriers.len), if (dependency.memory_barriers.len == 0) null else legacy.memory[0..dependency.memory_barriers.len].ptr, @intCast(dependency.buffer_barriers.len), if (dependency.buffer_barriers.len == 0) null else legacy.buffers[0..dependency.buffer_barriers.len].ptr, @intCast(dependency.image_barriers.len), if (dependency.image_barriers.len == 0) null else legacy.images[0..dependency.image_barriers.len].ptr);
+            return;
+        }
+        const barrier2 = buffer.cmd_pipeline_barrier2.?;
         var memory_barriers: [64]raw.VkMemoryBarrier2 = undefined;
         for (dependency.memory_barriers, 0..) |barrier, index| memory_barriers[index] = barrier.toRaw();
         var buffer_barriers: [64]raw.VkBufferMemoryBarrier2 = undefined;
@@ -359,10 +457,15 @@ pub const Buffer = struct {
     ) core.Error!void {
         if (event._device_handle != buffer._device_handle) return error.InvalidHandle;
         if (buffer.state != .recording) return error.InvalidOptions;
-        const command = buffer.cmd_set_event2 orelse return error.MissingCommand;
-        var storage: DependencyStorage = .{};
-        try storage.init(dependency);
-        command(try buffer.liveHandle(), try event.rawHandle(), &storage.info);
+        if (buffer.cmd_set_event2) |command| {
+            var storage: DependencyStorage = .{};
+            try storage.init(dependency);
+            command(try buffer.liveHandle(), try event.rawHandle(), &storage.info);
+        } else {
+            var storage: LegacyDependencyStorage = .{};
+            try storage.init(dependency);
+            buffer.cmd_set_event(try buffer.liveHandle(), try event.rawHandle(), storage.source_stages);
+        }
     }
 
     pub fn resetEvent(
@@ -371,8 +474,11 @@ pub const Buffer = struct {
         stages: types.PipelineStage2Flags,
     ) core.Error!void {
         if (event._device_handle != buffer._device_handle or stages.isEmpty() or buffer.state != .recording) return error.InvalidOptions;
-        const command = buffer.cmd_reset_event2 orelse return error.MissingCommand;
-        command(try buffer.liveHandle(), try event.rawHandle(), stages.toRaw());
+        if (buffer.cmd_reset_event2) |command| {
+            command(try buffer.liveHandle(), try event.rawHandle(), stages.toRaw());
+        } else {
+            buffer.cmd_reset_event(try buffer.liveHandle(), try event.rawHandle(), try legacyStages(stages));
+        }
     }
 
     pub fn waitEvent(
@@ -382,11 +488,16 @@ pub const Buffer = struct {
     ) core.Error!void {
         if (event._device_handle != buffer._device_handle) return error.InvalidHandle;
         if (buffer.state != .recording) return error.InvalidOptions;
-        const command = buffer.cmd_wait_events2 orelse return error.MissingCommand;
         const event_handle = try event.rawHandle();
-        var storage: DependencyStorage = .{};
-        try storage.init(dependency);
-        command(try buffer.liveHandle(), 1, @ptrCast(&event_handle), &storage.info);
+        if (buffer.cmd_wait_events2) |command| {
+            var storage: DependencyStorage = .{};
+            try storage.init(dependency);
+            command(try buffer.liveHandle(), 1, @ptrCast(&event_handle), &storage.info);
+        } else {
+            var storage: LegacyDependencyStorage = .{};
+            try storage.init(dependency);
+            buffer.cmd_wait_events(try buffer.liveHandle(), 1, @ptrCast(&event_handle), storage.source_stages, storage.destination_stages, @intCast(dependency.memory_barriers.len), if (dependency.memory_barriers.len == 0) null else storage.memory[0..dependency.memory_barriers.len].ptr, @intCast(dependency.buffer_barriers.len), if (dependency.buffer_barriers.len == 0) null else storage.buffers[0..dependency.buffer_barriers.len].ptr, @intCast(dependency.image_barriers.len), if (dependency.image_barriers.len == 0) null else storage.images[0..dependency.image_barriers.len].ptr);
+        }
     }
 
     pub fn beginRendering(
@@ -405,8 +516,25 @@ pub const Buffer = struct {
         if (options.depth_attachment) |attachment| depth_attachment = try attachment.toRaw();
         var stencil_attachment: raw.VkRenderingAttachmentInfo = undefined;
         if (options.stencil_attachment) |attachment| stencil_attachment = try attachment.toRaw();
+        var shading_rate_info: raw.VkRenderingFragmentShadingRateAttachmentInfoKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR };
+        var density_map_info: raw.VkRenderingFragmentDensityMapAttachmentInfoEXT = .{ .sType = raw.VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT };
+        var next: ?*const anyopaque = null;
+        if (options.fragment_density_map_attachment) |attachment| {
+            density_map_info.imageView = try attachment.view.rawHandle();
+            density_map_info.imageLayout = attachment.layout.toRaw();
+            density_map_info.pNext = next;
+            next = &density_map_info;
+        }
+        if (options.fragment_shading_rate_attachment) |attachment| {
+            shading_rate_info.imageView = try attachment.view.rawHandle();
+            shading_rate_info.imageLayout = attachment.layout.toRaw();
+            shading_rate_info.shadingRateAttachmentTexelSize = attachment.texel_size.toRaw();
+            shading_rate_info.pNext = next;
+            next = &shading_rate_info;
+        }
         const info: raw.VkRenderingInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .pNext = next,
             .flags = options.flags.toRaw(),
             .renderArea = options.render_area.toRaw(),
             .layerCount = options.layer_count,
@@ -500,6 +628,7 @@ pub const Buffer = struct {
         const handle = try command_buffer.liveHandle();
         if (command_buffer.state != .recording or regions.len == 0 or regions.len > 64) return error.InvalidOptions;
         if (source._device_handle != command_buffer._device_handle or destination._device_handle != command_buffer._device_handle) return error.InvalidHandle;
+        if (source._handle == destination._handle) try validateSameBufferCopyRegions(regions);
         var raw_regions: [64]raw.VkBufferCopy = undefined;
         var raw_regions2: [64]raw.VkBufferCopy2 = undefined;
         for (regions, 0..) |region, index| {
@@ -533,8 +662,17 @@ pub const Buffer = struct {
         if (command_buffer.state != .recording or options.regions.len == 0 or options.regions.len > 64) return error.InvalidOptions;
         if (options.source._device_handle != command_buffer._device_handle or options.destination.deviceHandle() != command_buffer._device_handle) return error.InvalidHandle;
         var regions: [64]raw.VkBufferImageCopy = undefined;
-        for (options.regions, 0..) |region, index| regions[index] = try region.toRaw();
-        command_buffer.cmd_copy_buffer_to_image(handle, try options.source.rawHandle(), try options.destination.handle(), options.destination_layout.toRaw(), @intCast(options.regions.len), regions[0..options.regions.len].ptr);
+        var regions2: [64]raw.VkBufferImageCopy2 = undefined;
+        for (options.regions, 0..) |region, index| {
+            if (region.buffer_offset.bytes() >= options.source.size.bytes()) return error.InvalidOptions;
+            try validateImageRegion(options.destination, region.image_subresource, region.image_offset, region.image_extent);
+            regions[index] = try region.toRaw();
+            regions2[index] = try region.toRaw2();
+        }
+        if (command_buffer.cmd_copy_buffer_to_image2) |copy2| {
+            const info: raw.VkCopyBufferToImageInfo2 = .{ .sType = raw.VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2, .srcBuffer = try options.source.rawHandle(), .dstImage = try options.destination.handle(), .dstImageLayout = options.destination_layout.toRaw(), .regionCount = @intCast(options.regions.len), .pRegions = regions2[0..options.regions.len].ptr };
+            copy2(handle, &info);
+        } else command_buffer.cmd_copy_buffer_to_image(handle, try options.source.rawHandle(), try options.destination.handle(), options.destination_layout.toRaw(), @intCast(options.regions.len), regions[0..options.regions.len].ptr);
     }
 
     pub fn copyImageToBuffer(command_buffer: *Buffer, options: transfer.ImageToBuffer) core.Error!void {
@@ -542,8 +680,17 @@ pub const Buffer = struct {
         if (command_buffer.state != .recording or options.regions.len == 0 or options.regions.len > 64) return error.InvalidOptions;
         if (options.destination._device_handle != command_buffer._device_handle or options.source.deviceHandle() != command_buffer._device_handle) return error.InvalidHandle;
         var regions: [64]raw.VkBufferImageCopy = undefined;
-        for (options.regions, 0..) |region, index| regions[index] = try region.toRaw();
-        command_buffer.cmd_copy_image_to_buffer(handle, try options.source.handle(), options.source_layout.toRaw(), try options.destination.rawHandle(), @intCast(options.regions.len), regions[0..options.regions.len].ptr);
+        var regions2: [64]raw.VkBufferImageCopy2 = undefined;
+        for (options.regions, 0..) |region, index| {
+            if (region.buffer_offset.bytes() >= options.destination.size.bytes()) return error.InvalidOptions;
+            try validateImageRegion(options.source, region.image_subresource, region.image_offset, region.image_extent);
+            regions[index] = try region.toRaw();
+            regions2[index] = try region.toRaw2();
+        }
+        if (command_buffer.cmd_copy_image_to_buffer2) |copy2| {
+            const info: raw.VkCopyImageToBufferInfo2 = .{ .sType = raw.VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2, .srcImage = try options.source.handle(), .srcImageLayout = options.source_layout.toRaw(), .dstBuffer = try options.destination.rawHandle(), .regionCount = @intCast(options.regions.len), .pRegions = regions2[0..options.regions.len].ptr };
+            copy2(handle, &info);
+        } else command_buffer.cmd_copy_image_to_buffer(handle, try options.source.handle(), options.source_layout.toRaw(), try options.destination.rawHandle(), @intCast(options.regions.len), regions[0..options.regions.len].ptr);
     }
 
     pub fn copyImage(command_buffer: *Buffer, options: transfer.ImageToImage) core.Error!void {
@@ -551,8 +698,17 @@ pub const Buffer = struct {
         if (command_buffer.state != .recording or options.regions.len == 0 or options.regions.len > 64) return error.InvalidOptions;
         if (options.source.deviceHandle() != command_buffer._device_handle or options.destination.deviceHandle() != command_buffer._device_handle) return error.InvalidHandle;
         var regions: [64]raw.VkImageCopy = undefined;
-        for (options.regions, 0..) |region, index| regions[index] = try region.toRaw();
-        command_buffer.cmd_copy_image(handle, try options.source.handle(), options.source_layout.toRaw(), try options.destination.handle(), options.destination_layout.toRaw(), @intCast(options.regions.len), regions[0..options.regions.len].ptr);
+        var regions2: [64]raw.VkImageCopy2 = undefined;
+        for (options.regions, 0..) |region, index| {
+            try validateImageRegion(options.source, region.source_subresource, region.source_offset, region.extent);
+            try validateImageRegion(options.destination, region.destination_subresource, region.destination_offset, region.extent);
+            regions[index] = try region.toRaw();
+            regions2[index] = try region.toRaw2();
+        }
+        if (command_buffer.cmd_copy_image2) |copy2| {
+            const info: raw.VkCopyImageInfo2 = .{ .sType = raw.VK_STRUCTURE_TYPE_COPY_IMAGE_INFO_2, .srcImage = try options.source.handle(), .srcImageLayout = options.source_layout.toRaw(), .dstImage = try options.destination.handle(), .dstImageLayout = options.destination_layout.toRaw(), .regionCount = @intCast(options.regions.len), .pRegions = regions2[0..options.regions.len].ptr };
+            copy2(handle, &info);
+        } else command_buffer.cmd_copy_image(handle, try options.source.handle(), options.source_layout.toRaw(), try options.destination.handle(), options.destination_layout.toRaw(), @intCast(options.regions.len), regions[0..options.regions.len].ptr);
     }
 
     pub fn blitImage(
@@ -568,8 +724,21 @@ pub const Buffer = struct {
         if (command_buffer.state != .recording or regions.len == 0 or regions.len > 64) return error.InvalidOptions;
         if (source.deviceHandle() != command_buffer._device_handle or destination.deviceHandle() != command_buffer._device_handle) return error.InvalidHandle;
         var raw_regions: [64]raw.VkImageBlit = undefined;
-        for (regions, 0..) |region, index| raw_regions[index] = try region.toRaw();
-        command_buffer.cmd_blit_image(handle, try source.handle(), source_layout.toRaw(), try destination.handle(), destination_layout.toRaw(), @intCast(regions.len), raw_regions[0..regions.len].ptr, filter.toRaw());
+        var raw_regions2: [64]raw.VkImageBlit2 = undefined;
+        for (regions, 0..) |region, index| {
+            const source_extent = types.Extent3D{ .width = @intCast(@abs(region.source_offsets[1].x - region.source_offsets[0].x)), .height = @intCast(@abs(region.source_offsets[1].y - region.source_offsets[0].y)), .depth = @intCast(@abs(region.source_offsets[1].z - region.source_offsets[0].z)) };
+            const destination_extent = types.Extent3D{ .width = @intCast(@abs(region.destination_offsets[1].x - region.destination_offsets[0].x)), .height = @intCast(@abs(region.destination_offsets[1].y - region.destination_offsets[0].y)), .depth = @intCast(@abs(region.destination_offsets[1].z - region.destination_offsets[0].z)) };
+            const source_offset = types.Offset3D{ .x = @min(region.source_offsets[0].x, region.source_offsets[1].x), .y = @min(region.source_offsets[0].y, region.source_offsets[1].y), .z = @min(region.source_offsets[0].z, region.source_offsets[1].z) };
+            const destination_offset = types.Offset3D{ .x = @min(region.destination_offsets[0].x, region.destination_offsets[1].x), .y = @min(region.destination_offsets[0].y, region.destination_offsets[1].y), .z = @min(region.destination_offsets[0].z, region.destination_offsets[1].z) };
+            try validateImageRegion(source, region.source_subresource, source_offset, source_extent);
+            try validateImageRegion(destination, region.destination_subresource, destination_offset, destination_extent);
+            raw_regions[index] = try region.toRaw();
+            raw_regions2[index] = try region.toRaw2();
+        }
+        if (command_buffer.cmd_blit_image2) |blit2| {
+            const info: raw.VkBlitImageInfo2 = .{ .sType = raw.VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2, .srcImage = try source.handle(), .srcImageLayout = source_layout.toRaw(), .dstImage = try destination.handle(), .dstImageLayout = destination_layout.toRaw(), .regionCount = @intCast(regions.len), .pRegions = raw_regions2[0..regions.len].ptr, .filter = filter.toRaw() };
+            blit2(handle, &info);
+        } else command_buffer.cmd_blit_image(handle, try source.handle(), source_layout.toRaw(), try destination.handle(), destination_layout.toRaw(), @intCast(regions.len), raw_regions[0..regions.len].ptr, filter.toRaw());
     }
 
     pub fn resolveImage(
@@ -584,18 +753,28 @@ pub const Buffer = struct {
         if (command_buffer.state != .recording or regions.len == 0 or regions.len > 64) return error.InvalidOptions;
         if (source.deviceHandle() != command_buffer._device_handle or destination.deviceHandle() != command_buffer._device_handle) return error.InvalidHandle;
         var raw_regions: [64]raw.VkImageResolve = undefined;
-        for (regions, 0..) |region, index| raw_regions[index] = try region.toRaw();
-        command_buffer.cmd_resolve_image(handle, try source.handle(), source_layout.toRaw(), try destination.handle(), destination_layout.toRaw(), @intCast(regions.len), raw_regions[0..regions.len].ptr);
+        var raw_regions2: [64]raw.VkImageResolve2 = undefined;
+        for (regions, 0..) |region, index| {
+            try validateImageRegion(source, region.source_subresource, region.source_offset, region.extent);
+            try validateImageRegion(destination, region.destination_subresource, region.destination_offset, region.extent);
+            raw_regions[index] = try region.toRaw();
+            raw_regions2[index] = try region.toRaw2();
+        }
+        if (command_buffer.cmd_resolve_image2) |resolve2| {
+            const info: raw.VkResolveImageInfo2 = .{ .sType = raw.VK_STRUCTURE_TYPE_RESOLVE_IMAGE_INFO_2, .srcImage = try source.handle(), .srcImageLayout = source_layout.toRaw(), .dstImage = try destination.handle(), .dstImageLayout = destination_layout.toRaw(), .regionCount = @intCast(regions.len), .pRegions = raw_regions2[0..regions.len].ptr };
+            resolve2(handle, &info);
+        } else command_buffer.cmd_resolve_image(handle, try source.handle(), source_layout.toRaw(), try destination.handle(), destination_layout.toRaw(), @intCast(regions.len), raw_regions[0..regions.len].ptr);
     }
 
     pub fn bindPipeline(command_buffer: *Buffer, value: *const pipeline.Pipeline) core.Error!void {
         const handle = try command_buffer.liveHandle();
         if (command_buffer.state != .recording or value._device_handle != command_buffer._device_handle) return error.InvalidOptions;
-        command_buffer.cmd_bind_pipeline(handle, value.bind_point.toRaw(), try value.rawHandle());
         switch (value.bind_point) {
             .graphics => command_buffer.graphics_pipeline_bound = true,
             .compute => command_buffer.compute_pipeline_bound = true,
+            else => return error.InvalidOptions,
         }
+        command_buffer.cmd_bind_pipeline(handle, value.bind_point.toRaw(), try value.rawHandle());
     }
 
     pub fn bindDescriptorSets(
@@ -678,6 +857,21 @@ pub const Buffer = struct {
         command_buffer.cmd_set_depth_bounds(try command_buffer.liveHandle(), minimum, maximum);
     }
 
+    pub fn setStencilCompareMask(command_buffer: *Buffer, faces: StencilFaces, mask: u32) core.Error!void {
+        if (command_buffer.state != .recording or faces.toRaw() == 0) return error.InvalidOptions;
+        command_buffer.cmd_set_stencil_compare_mask(try command_buffer.liveHandle(), faces.toRaw(), mask);
+    }
+
+    pub fn setStencilWriteMask(command_buffer: *Buffer, faces: StencilFaces, mask: u32) core.Error!void {
+        if (command_buffer.state != .recording or faces.toRaw() == 0) return error.InvalidOptions;
+        command_buffer.cmd_set_stencil_write_mask(try command_buffer.liveHandle(), faces.toRaw(), mask);
+    }
+
+    pub fn setStencilReference(command_buffer: *Buffer, faces: StencilFaces, reference: u32) core.Error!void {
+        if (command_buffer.state != .recording or faces.toRaw() == 0) return error.InvalidOptions;
+        command_buffer.cmd_set_stencil_reference(try command_buffer.liveHandle(), faces.toRaw(), reference);
+    }
+
     pub fn pushConstants(command_buffer: *Buffer, layout: *const pipeline.Layout, stages: @import("shader.zig").StageSet, offset: u32, bytes: []const u8) core.Error!void {
         if (command_buffer.state != .recording or layout._device_handle != command_buffer._device_handle or bytes.len == 0 or bytes.len % 4 != 0 or offset % 4 != 0 or bytes.len > std.math.maxInt(u32)) return error.InvalidOptions;
         if (!layout.supportsPushConstants(stages, offset, @intCast(bytes.len))) return error.InvalidOptions;
@@ -704,30 +898,53 @@ pub const Buffer = struct {
         command_buffer.cmd_draw_indexed(try command_buffer.liveHandle(), options.index_count, options.instance_count, options.first_index, options.vertex_offset, options.first_instance);
     }
 
+    pub fn drawMulti(command_buffer: *Buffer, draws: []const MultiDraw, instance_count: u32, first_instance: u32) core.Error!void {
+        const command = command_buffer.cmd_draw_multi orelse return error.MissingCommand;
+        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or draws.len == 0 or draws.len > 256 or instance_count == 0) return error.InvalidOptions;
+        var values: [256]raw.VkMultiDrawInfoEXT = undefined;
+        for (draws, 0..) |draw_info, index| {
+            if (draw_info.vertex_count == 0) return error.InvalidOptions;
+            values[index] = .{ .firstVertex = draw_info.first_vertex, .vertexCount = draw_info.vertex_count };
+        }
+        command(try command_buffer.liveHandle(), @intCast(draws.len), values[0..draws.len].ptr, instance_count, first_instance, @sizeOf(raw.VkMultiDrawInfoEXT));
+    }
+
+    pub fn drawMultiIndexed(command_buffer: *Buffer, draws: []const MultiDrawIndexed, instance_count: u32, first_instance: u32, common_vertex_offset: ?i32) core.Error!void {
+        const command = command_buffer.cmd_draw_multi_indexed orelse return error.MissingCommand;
+        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or draws.len == 0 or draws.len > 256 or instance_count == 0) return error.InvalidOptions;
+        var values: [256]raw.VkMultiDrawIndexedInfoEXT = undefined;
+        for (draws, 0..) |draw_info, index| {
+            if (draw_info.index_count == 0) return error.InvalidOptions;
+            values[index] = .{ .firstIndex = draw_info.first_index, .indexCount = draw_info.index_count, .vertexOffset = draw_info.vertex_offset };
+        }
+        var vertex_offset = common_vertex_offset orelse 0;
+        command(try command_buffer.liveHandle(), @intCast(draws.len), values[0..draws.len].ptr, instance_count, first_instance, @sizeOf(raw.VkMultiDrawIndexedInfoEXT), if (common_vertex_offset != null) &vertex_offset else null);
+    }
+
     pub fn drawIndirect(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset, draw_count: u32, stride: u32) core.Error!void {
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or draw_count == 0 or stride < @sizeOf(raw.VkDrawIndirectCommand) or stride % 4 != 0) return error.InvalidOptions;
-        try validateIndirectRange(indirect, offset, draw_count, stride, @sizeOf(raw.VkDrawIndirectCommand));
+        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or draw_count == 0 or stride < @sizeOf(DrawIndirectCommand) or stride % 4 != 0) return error.InvalidOptions;
+        try validateIndirectRange(indirect, offset, draw_count, stride, @sizeOf(DrawIndirectCommand));
         command_buffer.cmd_draw_indirect(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes(), draw_count, stride);
     }
 
     pub fn drawIndexedIndirect(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset, draw_count: u32, stride: u32) core.Error!void {
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or draw_count == 0 or stride < @sizeOf(raw.VkDrawIndexedIndirectCommand) or stride % 4 != 0) return error.InvalidOptions;
-        try validateIndirectRange(indirect, offset, draw_count, stride, @sizeOf(raw.VkDrawIndexedIndirectCommand));
+        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or draw_count == 0 or stride < @sizeOf(DrawIndexedIndirectCommand) or stride % 4 != 0) return error.InvalidOptions;
+        try validateIndirectRange(indirect, offset, draw_count, stride, @sizeOf(DrawIndexedIndirectCommand));
         command_buffer.cmd_draw_indexed_indirect(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes(), draw_count, stride);
     }
 
     pub fn drawIndirectCount(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset, count_buffer: *const buffers.Buffer, count_offset: core.DeviceOffset, max_draw_count: u32, stride: u32) core.Error!void {
         const command = command_buffer.cmd_draw_indirect_count orelse return error.MissingCommand;
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or count_buffer._device_handle != command_buffer._device_handle or max_draw_count == 0 or stride < @sizeOf(raw.VkDrawIndirectCommand) or stride % 4 != 0 or count_offset.bytes() % 4 != 0) return error.InvalidOptions;
-        try validateIndirectRange(indirect, offset, max_draw_count, stride, @sizeOf(raw.VkDrawIndirectCommand));
+        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or count_buffer._device_handle != command_buffer._device_handle or max_draw_count == 0 or stride < @sizeOf(DrawIndirectCommand) or stride % 4 != 0 or count_offset.bytes() % 4 != 0) return error.InvalidOptions;
+        try validateIndirectRange(indirect, offset, max_draw_count, stride, @sizeOf(DrawIndirectCommand));
         try validateFixedRange(count_buffer, count_offset, @sizeOf(u32));
         command(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes(), try count_buffer.rawHandle(), count_offset.bytes(), max_draw_count, stride);
     }
 
     pub fn drawIndexedIndirectCount(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset, count_buffer: *const buffers.Buffer, count_offset: core.DeviceOffset, max_draw_count: u32, stride: u32) core.Error!void {
         const command = command_buffer.cmd_draw_indexed_indirect_count orelse return error.MissingCommand;
-        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or count_buffer._device_handle != command_buffer._device_handle or max_draw_count == 0 or stride < @sizeOf(raw.VkDrawIndexedIndirectCommand) or stride % 4 != 0 or count_offset.bytes() % 4 != 0) return error.InvalidOptions;
-        try validateIndirectRange(indirect, offset, max_draw_count, stride, @sizeOf(raw.VkDrawIndexedIndirectCommand));
+        if (command_buffer.state != .recording or !command_buffer.rendering_active or !command_buffer.graphics_pipeline_bound or indirect._device_handle != command_buffer._device_handle or count_buffer._device_handle != command_buffer._device_handle or max_draw_count == 0 or stride < @sizeOf(DrawIndexedIndirectCommand) or stride % 4 != 0 or count_offset.bytes() % 4 != 0) return error.InvalidOptions;
+        try validateIndirectRange(indirect, offset, max_draw_count, stride, @sizeOf(DrawIndexedIndirectCommand));
         try validateFixedRange(count_buffer, count_offset, @sizeOf(u32));
         command(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes(), try count_buffer.rawHandle(), count_offset.bytes(), max_draw_count, stride);
     }
@@ -739,7 +956,7 @@ pub const Buffer = struct {
 
     pub fn dispatchIndirect(command_buffer: *Buffer, indirect: *const buffers.Buffer, offset: core.DeviceOffset) core.Error!void {
         if (command_buffer.state != .recording or command_buffer.rendering_active or !command_buffer.compute_pipeline_bound or indirect._device_handle != command_buffer._device_handle or offset.bytes() % 4 != 0) return error.InvalidOptions;
-        try validateFixedRange(indirect, offset, @sizeOf(raw.VkDispatchIndirectCommand));
+        try validateFixedRange(indirect, offset, @sizeOf(DispatchIndirectCommand));
         command_buffer.cmd_dispatch_indirect(try command_buffer.liveHandle(), try indirect.rawHandle(), offset.bytes());
     }
 
@@ -864,6 +1081,9 @@ pub const Pool = struct {
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
     cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
     cmd_pipeline_barrier2: ?CommandFunction(raw.PFN_vkCmdPipelineBarrier2),
+    cmd_set_event: CommandFunction(raw.PFN_vkCmdSetEvent),
+    cmd_reset_event: CommandFunction(raw.PFN_vkCmdResetEvent),
+    cmd_wait_events: CommandFunction(raw.PFN_vkCmdWaitEvents),
     cmd_set_event2: ?CommandFunction(raw.PFN_vkCmdSetEvent2),
     cmd_reset_event2: ?CommandFunction(raw.PFN_vkCmdResetEvent2),
     cmd_wait_events2: ?CommandFunction(raw.PFN_vkCmdWaitEvents2),
@@ -876,10 +1096,15 @@ pub const Pool = struct {
     cmd_copy_buffer: CommandFunction(raw.PFN_vkCmdCopyBuffer),
     cmd_copy_buffer2: ?CommandFunction(raw.PFN_vkCmdCopyBuffer2),
     cmd_copy_buffer_to_image: CommandFunction(raw.PFN_vkCmdCopyBufferToImage),
+    cmd_copy_buffer_to_image2: ?CommandFunction(raw.PFN_vkCmdCopyBufferToImage2),
     cmd_copy_image_to_buffer: CommandFunction(raw.PFN_vkCmdCopyImageToBuffer),
+    cmd_copy_image_to_buffer2: ?CommandFunction(raw.PFN_vkCmdCopyImageToBuffer2),
     cmd_copy_image: CommandFunction(raw.PFN_vkCmdCopyImage),
+    cmd_copy_image2: ?CommandFunction(raw.PFN_vkCmdCopyImage2),
     cmd_blit_image: CommandFunction(raw.PFN_vkCmdBlitImage),
+    cmd_blit_image2: ?CommandFunction(raw.PFN_vkCmdBlitImage2),
     cmd_resolve_image: CommandFunction(raw.PFN_vkCmdResolveImage),
+    cmd_resolve_image2: ?CommandFunction(raw.PFN_vkCmdResolveImage2),
     cmd_bind_pipeline: CommandFunction(raw.PFN_vkCmdBindPipeline),
     cmd_bind_descriptor_sets: CommandFunction(raw.PFN_vkCmdBindDescriptorSets),
     cmd_bind_vertex_buffers: CommandFunction(raw.PFN_vkCmdBindVertexBuffers),
@@ -890,6 +1115,9 @@ pub const Pool = struct {
     cmd_set_depth_bias: CommandFunction(raw.PFN_vkCmdSetDepthBias),
     cmd_set_blend_constants: CommandFunction(raw.PFN_vkCmdSetBlendConstants),
     cmd_set_depth_bounds: CommandFunction(raw.PFN_vkCmdSetDepthBounds),
+    cmd_set_stencil_compare_mask: CommandFunction(raw.PFN_vkCmdSetStencilCompareMask),
+    cmd_set_stencil_write_mask: CommandFunction(raw.PFN_vkCmdSetStencilWriteMask),
+    cmd_set_stencil_reference: CommandFunction(raw.PFN_vkCmdSetStencilReference),
     cmd_push_constants: CommandFunction(raw.PFN_vkCmdPushConstants),
     cmd_draw: CommandFunction(raw.PFN_vkCmdDraw),
     cmd_draw_indexed: CommandFunction(raw.PFN_vkCmdDrawIndexed),
@@ -897,6 +1125,8 @@ pub const Pool = struct {
     cmd_draw_indexed_indirect: CommandFunction(raw.PFN_vkCmdDrawIndexedIndirect),
     cmd_draw_indirect_count: ?CommandFunction(raw.PFN_vkCmdDrawIndirectCount),
     cmd_draw_indexed_indirect_count: ?CommandFunction(raw.PFN_vkCmdDrawIndexedIndirectCount),
+    cmd_draw_multi: ?CommandFunction(raw.PFN_vkCmdDrawMultiEXT),
+    cmd_draw_multi_indexed: ?CommandFunction(raw.PFN_vkCmdDrawMultiIndexedEXT),
     cmd_dispatch: CommandFunction(raw.PFN_vkCmdDispatch),
     cmd_dispatch_indirect: CommandFunction(raw.PFN_vkCmdDispatchIndirect),
     cmd_dispatch_base: ?CommandFunction(raw.PFN_vkCmdDispatchBase),
@@ -938,6 +1168,9 @@ pub const Pool = struct {
             .reset_command_buffer = pool.reset_command_buffer,
             .cmd_pipeline_barrier = pool.cmd_pipeline_barrier,
             .cmd_pipeline_barrier2 = pool.cmd_pipeline_barrier2,
+            .cmd_set_event = pool.cmd_set_event,
+            .cmd_reset_event = pool.cmd_reset_event,
+            .cmd_wait_events = pool.cmd_wait_events,
             .cmd_set_event2 = pool.cmd_set_event2,
             .cmd_reset_event2 = pool.cmd_reset_event2,
             .cmd_wait_events2 = pool.cmd_wait_events2,
@@ -950,10 +1183,15 @@ pub const Pool = struct {
             .cmd_copy_buffer = pool.cmd_copy_buffer,
             .cmd_copy_buffer2 = pool.cmd_copy_buffer2,
             .cmd_copy_buffer_to_image = pool.cmd_copy_buffer_to_image,
+            .cmd_copy_buffer_to_image2 = pool.cmd_copy_buffer_to_image2,
             .cmd_copy_image_to_buffer = pool.cmd_copy_image_to_buffer,
+            .cmd_copy_image_to_buffer2 = pool.cmd_copy_image_to_buffer2,
             .cmd_copy_image = pool.cmd_copy_image,
+            .cmd_copy_image2 = pool.cmd_copy_image2,
             .cmd_blit_image = pool.cmd_blit_image,
+            .cmd_blit_image2 = pool.cmd_blit_image2,
             .cmd_resolve_image = pool.cmd_resolve_image,
+            .cmd_resolve_image2 = pool.cmd_resolve_image2,
             .cmd_bind_pipeline = pool.cmd_bind_pipeline,
             .cmd_bind_descriptor_sets = pool.cmd_bind_descriptor_sets,
             .cmd_bind_vertex_buffers = pool.cmd_bind_vertex_buffers,
@@ -964,6 +1202,9 @@ pub const Pool = struct {
             .cmd_set_depth_bias = pool.cmd_set_depth_bias,
             .cmd_set_blend_constants = pool.cmd_set_blend_constants,
             .cmd_set_depth_bounds = pool.cmd_set_depth_bounds,
+            .cmd_set_stencil_compare_mask = pool.cmd_set_stencil_compare_mask,
+            .cmd_set_stencil_write_mask = pool.cmd_set_stencil_write_mask,
+            .cmd_set_stencil_reference = pool.cmd_set_stencil_reference,
             .cmd_push_constants = pool.cmd_push_constants,
             .cmd_draw = pool.cmd_draw,
             .cmd_draw_indexed = pool.cmd_draw_indexed,
@@ -971,6 +1212,8 @@ pub const Pool = struct {
             .cmd_draw_indexed_indirect = pool.cmd_draw_indexed_indirect,
             .cmd_draw_indirect_count = pool.cmd_draw_indirect_count,
             .cmd_draw_indexed_indirect_count = pool.cmd_draw_indexed_indirect_count,
+            .cmd_draw_multi = pool.cmd_draw_multi,
+            .cmd_draw_multi_indexed = pool.cmd_draw_multi_indexed,
             .cmd_dispatch = pool.cmd_dispatch,
             .cmd_dispatch_indirect = pool.cmd_dispatch_indirect,
             .cmd_dispatch_base = pool.cmd_dispatch_base,
@@ -1013,4 +1256,54 @@ pub const Pool = struct {
 
 test "all command-buffer declarations compile" {
     std.testing.refAllDecls(@This());
+}
+
+fn validateSameBufferCopyRegions(regions: []const transfer.BufferCopy) core.Error!void {
+    for (regions, 0..) |region, index| {
+        const size = region.size.bytes();
+        if (size == 0) return error.InvalidOptions;
+        const source_end = std.math.add(u64, region.source_offset.bytes(), size) catch return error.SizeOverflow;
+        const destination_end = std.math.add(u64, region.destination_offset.bytes(), size) catch return error.SizeOverflow;
+        if (region.source_offset.bytes() < destination_end and region.destination_offset.bytes() < source_end) return error.InvalidOptions;
+        for (regions[0..index]) |previous| {
+            const previous_size = previous.size.bytes();
+            const previous_source_end = std.math.add(u64, previous.source_offset.bytes(), previous_size) catch return error.SizeOverflow;
+            const previous_destination_end = std.math.add(u64, previous.destination_offset.bytes(), previous_size) catch return error.SizeOverflow;
+            if ((region.source_offset.bytes() < previous_destination_end and previous.destination_offset.bytes() < source_end) or
+                (region.destination_offset.bytes() < previous_source_end and previous.source_offset.bytes() < destination_end)) return error.InvalidOptions;
+        }
+    }
+}
+
+test "known image bounds validate compressed transfer regions" {
+    const owned: image.Image = .{
+        ._handle = @ptrFromInt(0x1000),
+        ._device_handle = @ptrFromInt(0x2000),
+        .format = .bc1_rgba_unorm_block,
+        .extent = .{ .width = 64, .height = 64, .depth = 1 },
+        .mip_levels = 4,
+        .array_layers = 2,
+        .allocation_callbacks = null,
+        .dispatch = undefined,
+    };
+    const layers: transfer.SubresourceLayers = .{ .aspects = .init(&.{.color}), .mip_level = 1, .layer_count = 2 };
+    try validateImageRegion(.{ .owned = &owned }, layers, .{ .x = 0, .y = 0, .z = 0 }, .{ .width = 32, .height = 32, .depth = 1 });
+    try std.testing.expectError(error.InvalidOptions, validateImageRegion(.{ .owned = &owned }, layers, .{ .x = 16, .y = 0, .z = 0 }, .{ .width = 32, .height = 32, .depth = 1 }));
+}
+
+test "same-buffer copy regions reject direct and cross-region overlap" {
+    try validateSameBufferCopyRegions(&.{.{
+        .source_offset = .fromBytes(0),
+        .destination_offset = .fromBytes(64),
+        .size = .fromBytes(32),
+    }});
+    try std.testing.expectError(error.InvalidOptions, validateSameBufferCopyRegions(&.{.{
+        .source_offset = .fromBytes(0),
+        .destination_offset = .fromBytes(16),
+        .size = .fromBytes(32),
+    }}));
+    try std.testing.expectError(error.InvalidOptions, validateSameBufferCopyRegions(&.{
+        .{ .source_offset = .fromBytes(0), .destination_offset = .fromBytes(128), .size = .fromBytes(32) },
+        .{ .source_offset = .fromBytes(112), .destination_offset = .fromBytes(256), .size = .fromBytes(32) },
+    }));
 }

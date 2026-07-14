@@ -48,6 +48,11 @@ pub const BufferImageCopy = struct {
             .imageExtent = value.image_extent.toRaw(),
         };
     }
+
+    pub fn toRaw2(value: BufferImageCopy) core.Error!raw.VkBufferImageCopy2 {
+        const legacy = try value.toRaw();
+        return .{ .sType = raw.VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2, .bufferOffset = legacy.bufferOffset, .bufferRowLength = legacy.bufferRowLength, .bufferImageHeight = legacy.bufferImageHeight, .imageSubresource = legacy.imageSubresource, .imageOffset = legacy.imageOffset, .imageExtent = legacy.imageExtent };
+    }
 };
 
 pub const ImageCopy = struct {
@@ -67,6 +72,11 @@ pub const ImageCopy = struct {
             .extent = value.extent.toRaw(),
         };
     }
+
+    pub fn toRaw2(value: ImageCopy) core.Error!raw.VkImageCopy2 {
+        const legacy = try value.toRaw();
+        return .{ .sType = raw.VK_STRUCTURE_TYPE_IMAGE_COPY_2, .srcSubresource = legacy.srcSubresource, .srcOffset = legacy.srcOffset, .dstSubresource = legacy.dstSubresource, .dstOffset = legacy.dstOffset, .extent = legacy.extent };
+    }
 };
 
 pub const ImageBlit = struct {
@@ -82,6 +92,11 @@ pub const ImageBlit = struct {
             .dstSubresource = try value.destination_subresource.toRaw(),
             .dstOffsets = .{ value.destination_offsets[0].toRaw(), value.destination_offsets[1].toRaw() },
         };
+    }
+
+    pub fn toRaw2(value: ImageBlit) core.Error!raw.VkImageBlit2 {
+        const legacy = try value.toRaw();
+        return .{ .sType = raw.VK_STRUCTURE_TYPE_IMAGE_BLIT_2, .srcSubresource = legacy.srcSubresource, .srcOffsets = legacy.srcOffsets, .dstSubresource = legacy.dstSubresource, .dstOffsets = legacy.dstOffsets };
     }
 };
 
@@ -101,6 +116,11 @@ pub const ImageResolve = struct {
             .dstOffset = value.destination_offset.toRaw(),
             .extent = value.extent.toRaw(),
         };
+    }
+
+    pub fn toRaw2(value: ImageResolve) core.Error!raw.VkImageResolve2 {
+        const legacy = try value.toRaw();
+        return .{ .sType = raw.VK_STRUCTURE_TYPE_IMAGE_RESOLVE_2, .srcSubresource = legacy.srcSubresource, .srcOffset = legacy.srcOffset, .dstSubresource = legacy.dstSubresource, .dstOffset = legacy.dstOffset, .extent = legacy.extent };
     }
 };
 

@@ -301,8 +301,8 @@ test "generated value types convert at the raw boundary" {
 
     const range: vk.ImageSubresourceRange = .{
         .aspect_mask = .init(&.{.color}),
-        .level_count = 4,
-        .layer_count = 2,
+        .level_count = .{ .count = 4 },
+        .layer_count = .{ .count = 2 },
     };
     const raw_range = range.toRaw();
     try std.testing.expectEqual(
