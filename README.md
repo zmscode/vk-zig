@@ -221,6 +221,19 @@ The debug-utils wrapper loads its own extension commands, rolls back partial cre
 messenger. Enable `VK_EXT_debug_utils` in `InstanceOptions.extensions` first:
 
 ```zig
+const diagnostic_support = vk.diagnostics.detect(.{
+    .validation = true,
+    .debug_messenger = true,
+    .gpu_labels = true,
+}, available_layers, available_extensions);
+
+if (diagnostic_support.validation_enabled) {
+    try enabled_layers.append(vk.layer.khronos_validation.name);
+}
+if (diagnostic_support.debug_utils_enabled) {
+    try enabled_extensions.append(vk.extension.ext_debug_utils.name);
+}
+
 const messenger_options: vk.ext.debug_utils.MessengerOptions = .{
     .callback = debugCallback,
 };
@@ -235,9 +248,14 @@ try queue.beginLabel(.{ .name = "opaque-pass", .color = .{ 0.2, 0.4, 1.0, 1.0 } 
 defer queue.endLabel() catch {};
 ```
 
-Use `vk.ext.debug_utils.Message.fromCallback(...)` for bounded callback text and label/object
-slices. Destroy swapchains before their device and surface, and extension objects/surfaces before
-their parent instance. See `examples/debug_utils.zig` for a complete callback signature.
+The messenger defaults accept warning/error severity and general/validation/performance message
+types. Customize them without raw casts through `debug_utils.severity_flags` and
+`debug_utils.message_type_flags`. Use `vk.ext.debug_utils.Message.fromCallback(...)` for bounded
+callback text, severity checks, and label/object slices. The logger and whether unavailable
+diagnostics are fatal remain application policy.
+
+Destroy swapchains before their device and surface, and extension objects/surfaces before their
+parent instance. See `examples/debug_utils.zig` for a complete callback signature.
 
 ## Commands
 

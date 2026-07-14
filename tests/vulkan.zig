@@ -78,6 +78,61 @@ test "generated extension names compose without duplicates" {
     try std.testing.expectError(error.CountOverflow, extensions.append("VK_EXT_fifth"));
 }
 
+test "diagnostic availability recognizes names and resolves independent requests" {
+    var validation_layer: vk.raw.VkLayerProperties = .{};
+    @memcpy(
+        validation_layer.layerName[0..vk.layer.khronos_validation.name.len],
+        vk.layer.khronos_validation.name,
+    );
+    var debug_extension: vk.raw.VkExtensionProperties = .{};
+    @memcpy(
+        debug_extension.extensionName[0..vk.extension.ext_debug_utils.name.len],
+        vk.extension.ext_debug_utils.name,
+    );
+
+    const available = vk.diagnostics.detect(.{
+        .validation = true,
+        .debug_messenger = true,
+        .gpu_labels = true,
+    }, &.{validation_layer}, &.{debug_extension});
+    try std.testing.expect(available.validation_enabled);
+    try std.testing.expect(available.debug_utils_enabled);
+    try std.testing.expect(available.debug_messenger_enabled);
+    try std.testing.expect(available.gpu_labels_enabled);
+
+    const missing_debug_utils = vk.diagnostics.resolve(.{
+        .validation = true,
+        .debug_messenger = true,
+        .gpu_labels = true,
+    }, true, false);
+    try std.testing.expect(missing_debug_utils.validation_enabled);
+    try std.testing.expect(!missing_debug_utils.debug_utils_enabled);
+    try std.testing.expect(!missing_debug_utils.debug_messenger_enabled);
+    try std.testing.expect(!missing_debug_utils.gpu_labels_enabled);
+
+    const missing_validation = vk.diagnostics.resolve(.{
+        .validation = true,
+        .debug_messenger = true,
+    }, false, true);
+    try std.testing.expect(!missing_validation.validation_enabled);
+    try std.testing.expect(missing_validation.debug_utils_enabled);
+    try std.testing.expect(missing_validation.debug_messenger_enabled);
+
+    const labels_without_messenger = vk.diagnostics.resolve(.{
+        .gpu_labels = true,
+    }, true, true);
+    try std.testing.expect(!labels_without_messenger.validation_enabled);
+    try std.testing.expect(labels_without_messenger.debug_utils_enabled);
+    try std.testing.expect(!labels_without_messenger.debug_messenger_enabled);
+    try std.testing.expect(labels_without_messenger.gpu_labels_enabled);
+
+    const disabled = vk.diagnostics.resolve(.{}, true, true);
+    try std.testing.expect(!disabled.validation_enabled);
+    try std.testing.expect(!disabled.debug_utils_enabled);
+    try std.testing.expect(!disabled.debug_messenger_enabled);
+    try std.testing.expect(!disabled.gpu_labels_enabled);
+}
+
 test "typed queue capabilities and memory selection avoid raw bit arithmetic" {
     const graphics_transfer: vk.QueueFamily = .{
         .index = 3,
@@ -124,6 +179,20 @@ test "debug utility options produce reusable callback and label views" {
         messenger_info.sType,
     );
     try std.testing.expect(messenger_info.pfnUserCallback != null);
+    try std.testing.expectEqual(
+        vk.ext.debug_utils.severity_flags.warning_and_error,
+        messenger_info.messageSeverity,
+    );
+    try std.testing.expectEqual(
+        vk.ext.debug_utils.message_type_flags.standard,
+        messenger_info.messageType,
+    );
+    try std.testing.expect(
+        (messenger_info.messageSeverity & vk.ext.debug_utils.severity_flags.info) == 0,
+    );
+    try std.testing.expect(
+        (messenger_info.messageSeverity & vk.ext.debug_utils.severity_flags.verbose) == 0,
+    );
 
     const label = (vk.ext.debug_utils.LabelOptions{
         .name = "frame",

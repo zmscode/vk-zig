@@ -10,7 +10,14 @@ pub fn main(init: std.process.Init) !void {
 
     const available = try entry.instanceExtensions(init.gpa, null);
     defer init.gpa.free(available);
-    if (!vk.supportsExtension(available, extensions[0])) return error.DebugUtilsUnavailable;
+    const available_layers = try entry.instanceLayers(init.gpa);
+    defer init.gpa.free(available_layers);
+    const diagnostics = vk.diagnostics.detect(
+        .{ .debug_messenger = true },
+        available_layers,
+        available,
+    );
+    if (!diagnostics.debug_messenger_enabled) return error.DebugUtilsUnavailable;
 
     const messenger_options: vk.ext.debug_utils.MessengerOptions = .{
         .callback = debugCallback,
@@ -40,6 +47,11 @@ fn debugCallback(
         message_type,
         callback_data,
     ) orelse return vk.raw.VK_FALSE;
-    std.log.info("Vulkan [{d}]: {s}", .{ severity, message.text() orelse "(no message)" });
+    const text = message.text() orelse "(no message)";
+    if (message.isError()) {
+        std.log.err("Vulkan: {s}", .{text});
+    } else {
+        std.log.warn("Vulkan: {s}", .{text});
+    }
     return vk.raw.VK_FALSE;
 }

@@ -12,6 +12,15 @@ pub const CommandFunction = command.FunctionType;
 pub const extension = command.extension;
 pub const Extension = command.Extension;
 
+pub const Layer = struct {
+    name: [:0]const u8,
+};
+
+/// Well-known Vulkan layers that applications commonly request by name.
+pub const layer = struct {
+    pub const khronos_validation: Layer = .{ .name = "VK_LAYER_KHRONOS_validation" };
+};
+
 pub const platform = build_options.platform;
 pub const registry_commit = build_options.registry_commit;
 
@@ -189,6 +198,50 @@ pub fn supportsLayer(properties: []const raw.VkLayerProperties, expected: []cons
     }
     return false;
 }
+
+/// Resolves optional validation and debug tooling without coupling independent requests.
+pub const diagnostics = struct {
+    pub const Requests = struct {
+        validation: bool = false,
+        debug_messenger: bool = false,
+        gpu_labels: bool = false,
+    };
+
+    pub const Availability = struct {
+        validation_enabled: bool,
+        debug_utils_enabled: bool,
+        debug_messenger_enabled: bool,
+        gpu_labels_enabled: bool,
+    };
+
+    pub fn resolve(
+        requests: Requests,
+        validation_layer_available: bool,
+        debug_utils_available: bool,
+    ) Availability {
+        const validation_enabled = requests.validation and validation_layer_available;
+        const debug_utils_requested = requests.debug_messenger or requests.gpu_labels;
+        const debug_utils_enabled = debug_utils_requested and debug_utils_available;
+        return .{
+            .validation_enabled = validation_enabled,
+            .debug_utils_enabled = debug_utils_enabled,
+            .debug_messenger_enabled = requests.debug_messenger and debug_utils_enabled,
+            .gpu_labels_enabled = requests.gpu_labels and debug_utils_enabled,
+        };
+    }
+
+    pub fn detect(
+        requests: Requests,
+        available_layers: []const raw.VkLayerProperties,
+        available_extensions: []const raw.VkExtensionProperties,
+    ) Availability {
+        return resolve(
+            requests,
+            supportsLayer(available_layers, layer.khronos_validation.name),
+            supportsExtension(available_extensions, extension.ext_debug_utils.name),
+        );
+    }
+};
 
 pub const Loader = struct {
     library: NativeLibrary,
@@ -1437,18 +1490,49 @@ pub const Queue = struct {
 
 pub const ext = struct {
     pub const debug_utils = struct {
+        pub const severity_flags = struct {
+            pub const verbose: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
+                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
+            );
+            pub const info: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
+                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+            );
+            pub const warning: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
+                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+            );
+            pub const err: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
+                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+            );
+            pub const warning_and_error: raw.VkDebugUtilsMessageSeverityFlagsEXT =
+                warning | err;
+            pub const all: raw.VkDebugUtilsMessageSeverityFlagsEXT =
+                verbose | info | warning | err;
+        };
+
+        pub const message_type_flags = struct {
+            pub const general: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
+                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT,
+            );
+            pub const validation: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
+                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+            );
+            pub const performance: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
+                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+            );
+            pub const device_address_binding: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
+                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT,
+            );
+            pub const standard: raw.VkDebugUtilsMessageTypeFlagsEXT =
+                general | validation | performance;
+            pub const all: raw.VkDebugUtilsMessageTypeFlagsEXT =
+                standard | device_address_binding;
+        };
+
         pub const MessengerOptions = struct {
             callback: CommandFunction(raw.PFN_vkDebugUtilsMessengerCallbackEXT),
             user_data: ?*anyopaque = null,
-            severity: raw.VkDebugUtilsMessageSeverityFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                    raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-            ),
-            message_type: raw.VkDebugUtilsMessageTypeFlagsEXT = @intCast(
-                raw.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                    raw.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                    raw.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-            ),
+            severity: raw.VkDebugUtilsMessageSeverityFlagsEXT = severity_flags.warning_and_error,
+            message_type: raw.VkDebugUtilsMessageTypeFlagsEXT = message_type_flags.standard,
             flags: raw.VkDebugUtilsMessengerCreateFlagsEXT = 0,
             next: ?*const anyopaque = null,
             allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
@@ -1496,11 +1580,19 @@ pub const ext = struct {
             }
 
             pub fn isError(message: Message) bool {
-                return (message.severity & raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0;
+                return (message.severity & severity_flags.err) != 0;
             }
 
             pub fn isWarning(message: Message) bool {
-                return (message.severity & raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0;
+                return (message.severity & severity_flags.warning) != 0;
+            }
+
+            pub fn isInfo(message: Message) bool {
+                return (message.severity & severity_flags.info) != 0;
+            }
+
+            pub fn isVerbose(message: Message) bool {
+                return (message.severity & severity_flags.verbose) != 0;
             }
 
             pub fn objects(message: Message) []const raw.VkDebugUtilsObjectNameInfoEXT {

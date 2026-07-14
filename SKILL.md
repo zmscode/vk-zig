@@ -73,9 +73,14 @@ Wrapper `deinit` methods are idempotent, but using an inactive owner returns
   `device.createSwapchain`. Handle every `AcquireResult` and `PresentStatus` tag; `.out_of_date`
   and `.suboptimal` are normal control flow for recreation, not generic errors.
 - Create an owned debug messenger with `vk.ext.debug_utils.Messenger.init(&instance, options)`.
+- Resolve validation, messenger, and GPU-label requests with `vk.diagnostics.detect`; use
+  `vk.layer.khronos_validation.name` and `vk.extension.ext_debug_utils.name` rather than repeating
+  string literals. Treat the returned booleans as availability, leaving fatal/fallback policy to
+  the application.
 - Reuse `MessengerOptions.createInfo()` in `InstanceOptions.next` when validation output is needed
   during instance creation/destruction. Decode callback pointers with
   `vk.ext.debug_utils.Message.fromCallback`.
+- Use `debug_utils.severity_flags` and `message_type_flags` instead of casting raw Vulkan bits.
 - Name wrapper and raw Vulkan objects with `device.setObjectName`; use queue and command-buffer
   label methods for GPU captures. Do not convert handles with `@intFromPtr` in consumer code.
 

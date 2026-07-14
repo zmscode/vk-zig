@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
         vk.supportsExtension(extensions, vk.extension.ext_debug_utils.name),
     });
     std.log.info("Khronos validation layer available: {}", .{
-        vk.supportsLayer(layers, "VK_LAYER_KHRONOS_validation"),
+        vk.supportsLayer(layers, vk.layer.khronos_validation.name),
     });
     for (vk.Portability.instanceExtensions()) |name| {
         std.log.info("platform requires instance extension: {s}", .{name});
