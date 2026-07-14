@@ -134,8 +134,8 @@ const graphics = for (families) |family| {
 
 const memory_type = try physical_device.findMemoryTypeIndex(.{
     .type_bits = requirements.memoryTypeBits,
-    .required_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-    .preferred_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    .required_flags = .init(&.{.host_visible}),
+    .preferred_flags = .init(&.{.host_coherent}),
 });
 ```
 
@@ -188,18 +188,27 @@ const present_modes = try physical_device.presentModes(gpa, &surface);
 defer gpa.free(present_modes);
 ```
 
+Fixed-capacity callers can avoid allocation by querying the count and providing storage:
+
+```zig
+var format_storage: [128]vk.SurfaceFormat = undefined;
+const format_count = try physical_device.surfaceFormatCount(&surface);
+if (format_count > format_storage.len) return error.TooManySurfaceFormats;
+const formats = try physical_device.surfaceFormatsInto(&surface, &format_storage);
+```
+
 `deviceExtensions` enumerates per-device support. Once `VK_KHR_swapchain` is enabled on the
 logical device, create and own a swapchain without manually loading its commands:
 
 ```zig
 var swapchain = try device.createSwapchain(.{
     .surface = &surface,
-    .min_image_count = capabilities.minImageCount,
+    .min_image_count = capabilities.image_count_min,
     .image_format = format.format,
-    .image_color_space = format.colorSpace,
+    .image_color_space = format.color_space,
     .image_extent = extent,
-    .image_usage = vk.raw.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-    .pre_transform = capabilities.currentTransform,
+    .image_usage = .init(&.{.color_attachment}),
+    .pre_transform = capabilities.transform_current,
 });
 defer swapchain.deinit();
 

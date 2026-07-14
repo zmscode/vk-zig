@@ -24,6 +24,11 @@ consumer unless the user explicitly needs a standalone snapshot.
 
 - Prefer `vk.Loader`, `Entry`, `Instance`, `PhysicalDevice`, `Device`, `Queue`, `Surface`, and
   `Swapchain`.
+- Use generated wrapper enums such as `vk.Format`, `vk.PresentMode`, and `vk.ImageLayout` instead
+  of raw integer constants. They are non-exhaustive and preserve driver values unknown to the
+  vendored registry.
+- Build domain-specific flags with `vk.ImageUsageFlags.init(&.{...})` and equivalent types. Do not
+  combine raw `VK_*_BIT` constants or interchange flag domains.
 - Use `vk.command.<snake_case_name>` with `entry.load`, `instance.load`, or `device.load`. The
   descriptor binds the PFN type, Vulkan name, and valid dispatch scope.
 - Use `entry.require`, `instance.require`, or `device.require` when absence is an error. Use `load`
@@ -59,6 +64,12 @@ to instance or device options. Do not duplicate string literals or hand-roll ded
 Enumerate queue families with `queueFamilies`, select them with `QueueFamily.supports`, and use
 `QueueFamily.presentationSupport` when a surface is involved. Use `findMemoryTypeIndex` with
 required and preferred property flags instead of manually scanning `memoryTypes`.
+
+Surface capabilities, formats, and present modes are typed. Use the allocating `surfaceFormats`
+and `presentModes` conveniences during startup, or pair `surfaceFormatCount`/`presentModeCount`
+with `surfaceFormatsInto`/`presentModesInto` when the consumer owns fixed storage. Treat
+`error.BufferTooSmall` as a bounded retry or an application capacity error; vk-zig will not hide a
+fallback allocation in an `Into` call.
 
 Deinitialize children before parents: swapchains, then devices, surfaces, instances, and finally
 the loader. An instance configured with a typed debug messenger owns and destroys that messenger
@@ -104,8 +115,8 @@ Keep raw enumeration results alive while using `vk.extensionName`, `layerName`,
 
 ## Generate and update bindings
 
-- Run `zig build bindings` to generate the selected target's raw ABI and command descriptors in
-  `zig-out/bindings/` from vendored inputs. This is offline and deterministic.
+- Run `zig build bindings` to generate the selected target's raw ABI, command descriptors, and
+  typed vocabulary in `zig-out/bindings/` from vendored inputs. This is offline and deterministic.
 - Select a target with `-Dtarget=...` and a window-system declaration set with
   `-Dplatform=none|metal|win32|xlib|xcb|wayland`.
 - Run `zig build update` only when intentionally updating the vendored Khronos revision. It uses

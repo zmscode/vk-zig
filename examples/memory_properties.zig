@@ -32,8 +32,8 @@ pub fn main(init: std.process.Init) !void {
         }
         const host_visible = device.findMemoryTypeIndex(.{
             .type_bits = std.math.maxInt(u32),
-            .required_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-            .preferred_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            .required_flags = .init(&.{.host_visible}),
+            .preferred_flags = .init(&.{.host_coherent}),
         }) catch null;
         if (host_visible) |index| {
             std.log.info("  preferred host-visible type: {d}", .{index});

@@ -6,11 +6,67 @@ const build_options = @import("vulkan_build_options");
 pub const raw = @import("vulkan_raw");
 /// Generated command descriptors bind each Vulkan name, PFN type, and dispatch scope.
 pub const command = @import("vulkan_commands");
+/// Generated, strongly typed Vulkan enums, flag sets, and common value structures.
+pub const types = @import("vulkan_types");
 /// Converts a translated optional `PFN_vk*` type into its storable function-pointer type.
 pub const CommandFunction = command.FunctionType;
 /// Generated Vulkan extension descriptors with stable sentinel-terminated names.
 pub const extension = command.extension;
 pub const Extension = command.Extension;
+
+pub const Flags = types.Flags;
+pub const PhysicalDeviceType = types.PhysicalDeviceType;
+pub const Format = types.Format;
+pub const ColorSpace = types.ColorSpace;
+pub const PresentMode = types.PresentMode;
+pub const ImageLayout = types.ImageLayout;
+pub const SharingMode = types.SharingMode;
+pub const ImageViewType = types.ImageViewType;
+pub const ComponentSwizzle = types.ComponentSwizzle;
+pub const CommandBufferLevel = types.CommandBufferLevel;
+pub const InstanceCreateBit = types.InstanceCreateBit;
+pub const InstanceCreateFlags = types.InstanceCreateFlags;
+pub const QueueBit = types.QueueBit;
+pub const QueueFlags = types.QueueFlags;
+pub const MemoryPropertyBit = types.MemoryPropertyBit;
+pub const MemoryPropertyFlags = types.MemoryPropertyFlags;
+pub const MemoryHeapBit = types.MemoryHeapBit;
+pub const MemoryHeapFlags = types.MemoryHeapFlags;
+pub const AccessBit = types.AccessBit;
+pub const AccessFlags = types.AccessFlags;
+pub const ImageUsageBit = types.ImageUsageBit;
+pub const ImageUsageFlags = types.ImageUsageFlags;
+pub const FenceCreateBit = types.FenceCreateBit;
+pub const FenceCreateFlags = types.FenceCreateFlags;
+pub const FormatFeatureBit = types.FormatFeatureBit;
+pub const FormatFeatureFlags = types.FormatFeatureFlags;
+pub const CommandBufferUsageBit = types.CommandBufferUsageBit;
+pub const CommandBufferUsageFlags = types.CommandBufferUsageFlags;
+pub const ImageAspectBit = types.ImageAspectBit;
+pub const ImageAspectFlags = types.ImageAspectFlags;
+pub const PipelineStageBit = types.PipelineStageBit;
+pub const PipelineStageFlags = types.PipelineStageFlags;
+pub const CommandPoolCreateBit = types.CommandPoolCreateBit;
+pub const CommandPoolCreateFlags = types.CommandPoolCreateFlags;
+pub const CompositeAlphaBit = types.CompositeAlphaBit;
+pub const CompositeAlphaFlags = types.CompositeAlphaFlags;
+pub const SurfaceTransformBit = types.SurfaceTransformBit;
+pub const SurfaceTransformFlags = types.SurfaceTransformFlags;
+pub const SwapchainCreateBit = types.SwapchainCreateBit;
+pub const SwapchainCreateFlags = types.SwapchainCreateFlags;
+pub const Extent2D = types.Extent2D;
+pub const Extent3D = types.Extent3D;
+pub const SurfaceFormat = types.SurfaceFormat;
+pub const SurfaceCapabilities = types.SurfaceCapabilities;
+pub const Offset2D = types.Offset2D;
+pub const Offset3D = types.Offset3D;
+pub const Rect2D = types.Rect2D;
+pub const Viewport = types.Viewport;
+pub const ComponentMapping = types.ComponentMapping;
+pub const ImageSubresourceRange = types.ImageSubresourceRange;
+pub const ClearColor = types.ClearColor;
+pub const ClearDepthStencil = types.ClearDepthStencil;
+pub const ClearValue = types.ClearValue;
 
 pub const Layer = struct {
     name: [:0]const u8,
@@ -62,6 +118,7 @@ pub const Error = error{
     MemoryTypeNotFound,
     SurfaceLost,
     NativeWindowInUse,
+    BufferTooSmall,
 };
 
 pub const LoaderError = error{
@@ -108,11 +165,11 @@ pub const Portability = struct {
         return if (platform == .metal) &portability_device_extensions else &.{};
     }
 
-    pub fn instanceFlags() raw.VkInstanceCreateFlags {
+    pub fn instanceFlags() InstanceCreateFlags {
         return if (platform == .metal)
-            @intCast(raw.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR)
+            .init(&.{.enumerate_portability_khr})
         else
-            0;
+            .empty;
     }
 };
 
@@ -448,7 +505,7 @@ pub const Entry = struct {
                 extension_pointers[extension_count] = portability_extension.ptr;
                 extension_count += 1;
             }
-            flags |= Portability.instanceFlags();
+            flags = flags.merge(Portability.instanceFlags());
         }
 
         const application_info: raw.VkApplicationInfo = .{
@@ -468,7 +525,7 @@ pub const Entry = struct {
         const create_info: raw.VkInstanceCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
             .pNext = instance_next,
-            .flags = flags,
+            .flags = flags.toRaw(),
             .pApplicationInfo = &application_info,
             .enabledLayerCount = @intCast(layer_count),
             .ppEnabledLayerNames = pointerArray(layer_pointers[0..layer_count]),
@@ -528,7 +585,7 @@ pub const InstanceOptions = struct {
     api_version: Version = .{ .major = 1, .minor = 0, .patch = 0 },
     layers: []const [:0]const u8 = &.{},
     extensions: []const [:0]const u8 = &.{},
-    flags: raw.VkInstanceCreateFlags = 0,
+    flags: InstanceCreateFlags = .empty,
     enumerate_portability: bool = false,
     application_next: ?*const anyopaque = null,
     next: ?*const anyopaque = null,
@@ -698,18 +755,18 @@ pub const Surface = struct {
 pub const SwapchainOptions = struct {
     surface: *const Surface,
     min_image_count: u32,
-    image_format: raw.VkFormat,
-    image_color_space: raw.VkColorSpaceKHR,
-    image_extent: raw.VkExtent2D,
-    image_usage: raw.VkImageUsageFlags,
+    image_format: Format,
+    image_color_space: ColorSpace,
+    image_extent: Extent2D,
+    image_usage: ImageUsageFlags,
     image_array_layers: u32 = 1,
     queue_family_indices: []const u32 = &.{},
-    pre_transform: raw.VkSurfaceTransformFlagBitsKHR = raw.VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
-    composite_alpha: raw.VkCompositeAlphaFlagBitsKHR = raw.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-    present_mode: raw.VkPresentModeKHR = raw.VK_PRESENT_MODE_FIFO_KHR,
+    pre_transform: SurfaceTransformBit = .identity,
+    composite_alpha: CompositeAlphaBit = .opaque_,
+    present_mode: PresentMode = .fifo,
     clipped: bool = true,
     old_swapchain: ?*const Swapchain = null,
-    flags: raw.VkSwapchainCreateFlagsKHR = 0,
+    flags: SwapchainCreateFlags = .empty,
     next: ?*const anyopaque = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
 
@@ -980,25 +1037,41 @@ pub const PhysicalDevice = struct {
     pub fn surfaceCapabilities(
         device: *const PhysicalDevice,
         surface: *const Surface,
-    ) Error!raw.VkSurfaceCapabilitiesKHR {
+    ) Error!SurfaceCapabilities {
         if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
-        const get_capabilities = device.dispatch.get_physical_device_surface_capabilities_khr orelse {
-            return error.MissingCommand;
-        };
+        const get_capabilities =
+            device.dispatch.get_physical_device_surface_capabilities_khr orelse {
+                return error.MissingCommand;
+            };
         var capabilities: raw.VkSurfaceCapabilitiesKHR = .{};
         try checkSuccess(get_capabilities(
             device._handle,
             try surface.rawHandle(),
             &capabilities,
         ));
-        return capabilities;
+        return .fromRaw(capabilities);
+    }
+
+    pub fn surfaceFormatCount(
+        device: *const PhysicalDevice,
+        surface: *const Surface,
+    ) Error!u32 {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        const get_formats = device.dispatch.get_physical_device_surface_formats_khr orelse {
+            return error.MissingCommand;
+        };
+        return surfaceFormatCountRaw(
+            get_formats,
+            device._handle,
+            try surface.rawHandle(),
+        );
     }
 
     pub fn surfaceFormats(
         device: *const PhysicalDevice,
         gpa: std.mem.Allocator,
         surface: *const Surface,
-    ) (Error || std.mem.Allocator.Error)![]raw.VkSurfaceFormatKHR {
+    ) (Error || std.mem.Allocator.Error)![]SurfaceFormat {
         if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
         const get_formats = device.dispatch.get_physical_device_surface_formats_khr orelse {
             return error.MissingCommand;
@@ -1011,20 +1084,72 @@ pub const PhysicalDevice = struct {
         );
     }
 
+    pub fn surfaceFormatsInto(
+        device: *const PhysicalDevice,
+        surface: *const Surface,
+        storage: []SurfaceFormat,
+    ) Error![]SurfaceFormat {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        const get_formats = device.dispatch.get_physical_device_surface_formats_khr orelse {
+            return error.MissingCommand;
+        };
+        return enumerateSurfaceFormatsInto(
+            get_formats,
+            device._handle,
+            try surface.rawHandle(),
+            storage,
+        );
+    }
+
+    pub fn presentModeCount(
+        device: *const PhysicalDevice,
+        surface: *const Surface,
+    ) Error!u32 {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        const get_present_modes =
+            device.dispatch.get_physical_device_surface_present_modes_khr orelse {
+                return error.MissingCommand;
+            };
+        return presentModeCountRaw(
+            get_present_modes,
+            device._handle,
+            try surface.rawHandle(),
+        );
+    }
+
     pub fn presentModes(
         device: *const PhysicalDevice,
         gpa: std.mem.Allocator,
         surface: *const Surface,
-    ) (Error || std.mem.Allocator.Error)![]raw.VkPresentModeKHR {
+    ) (Error || std.mem.Allocator.Error)![]PresentMode {
         if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
-        const get_present_modes = device.dispatch.get_physical_device_surface_present_modes_khr orelse {
-            return error.MissingCommand;
-        };
+        const get_present_modes =
+            device.dispatch.get_physical_device_surface_present_modes_khr orelse {
+                return error.MissingCommand;
+            };
         return enumeratePresentModes(
             gpa,
             get_present_modes,
             device._handle,
             try surface.rawHandle(),
+        );
+    }
+
+    pub fn presentModesInto(
+        device: *const PhysicalDevice,
+        surface: *const Surface,
+        storage: []PresentMode,
+    ) Error![]PresentMode {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        const get_present_modes =
+            device.dispatch.get_physical_device_surface_present_modes_khr orelse {
+                return error.MissingCommand;
+            };
+        return enumeratePresentModesInto(
+            get_present_modes,
+            device._handle,
+            try surface.rawHandle(),
+            storage,
         );
     }
 
@@ -1133,14 +1258,14 @@ pub const QueueFamily = struct {
 
     pub fn supports(family: QueueFamily, capability: QueueCapability) bool {
         if (family.properties.queueCount == 0) return false;
-        const bit: raw.VkQueueFlags = switch (capability) {
-            .graphics => @intCast(raw.VK_QUEUE_GRAPHICS_BIT),
-            .compute => @intCast(raw.VK_QUEUE_COMPUTE_BIT),
-            .transfer => @intCast(raw.VK_QUEUE_TRANSFER_BIT),
-            .sparse_binding => @intCast(raw.VK_QUEUE_SPARSE_BINDING_BIT),
-            .protected => @intCast(raw.VK_QUEUE_PROTECTED_BIT),
+        const bit: QueueBit = switch (capability) {
+            .graphics => .graphics,
+            .compute => .compute,
+            .transfer => .transfer,
+            .sparse_binding => .sparse_binding,
+            .protected => .protected,
         };
-        return (family.properties.queueFlags & bit) != 0;
+        return QueueFlags.fromRaw(family.properties.queueFlags).contains(bit);
     }
 
     pub fn presentationSupport(
@@ -1154,8 +1279,8 @@ pub const QueueFamily = struct {
 
 pub const MemoryTypeOptions = struct {
     type_bits: u32,
-    required_flags: raw.VkMemoryPropertyFlags,
-    preferred_flags: raw.VkMemoryPropertyFlags = 0,
+    required_flags: MemoryPropertyFlags,
+    preferred_flags: MemoryPropertyFlags = .empty,
 };
 
 /// Selects a compatible memory type, preferring the candidate with the most
@@ -1165,17 +1290,19 @@ pub fn selectMemoryTypeIndex(
     options: MemoryTypeOptions,
 ) Error!u32 {
     if (memory.memoryTypeCount > memory.memoryTypes.len) return error.InvalidOptions;
+    const required_flags = options.required_flags.toRaw();
+    const preferred_flags = options.preferred_flags.toRaw();
     var best_index: ?u32 = null;
     var best_score: u32 = 0;
     for (memory.memoryTypes[0..memory.memoryTypeCount], 0..) |memory_type, index| {
         const index_u32: u32 = @intCast(index);
         const type_bit = @as(u32, 1) << @intCast(index_u32);
         if ((options.type_bits & type_bit) == 0) continue;
-        if ((memory_type.propertyFlags & options.required_flags) != options.required_flags) {
+        if ((memory_type.propertyFlags & required_flags) != required_flags) {
             continue;
         }
         const score: u32 = @intCast(@popCount(
-            memory_type.propertyFlags & options.preferred_flags,
+            memory_type.propertyFlags & preferred_flags,
         ));
         if (best_index == null or score > best_score) {
             best_index = index_u32;
@@ -1257,6 +1384,7 @@ pub const Device = struct {
             queue_index,
             &handle,
         );
+        const insert_label = device.dispatch.queue_insert_debug_utils_label_ext;
         return .{
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = device_handle,
@@ -1265,7 +1393,7 @@ pub const Device = struct {
             .queue_present_khr = device.dispatch.queue_present_khr,
             .queue_begin_debug_utils_label_ext = device.dispatch.queue_begin_debug_utils_label_ext,
             .queue_end_debug_utils_label_ext = device.dispatch.queue_end_debug_utils_label_ext,
-            .queue_insert_debug_utils_label_ext = device.dispatch.queue_insert_debug_utils_label_ext,
+            .queue_insert_debug_utils_label_ext = insert_label,
         };
     }
 
@@ -1347,14 +1475,14 @@ pub const Device = struct {
         const create_info: raw.VkSwapchainCreateInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
             .pNext = options.next,
-            .flags = options.flags,
+            .flags = options.flags.toRaw(),
             .surface = try options.surface.rawHandle(),
             .minImageCount = options.min_image_count,
-            .imageFormat = options.image_format,
-            .imageColorSpace = options.image_color_space,
-            .imageExtent = options.image_extent,
+            .imageFormat = options.image_format.toRaw(),
+            .imageColorSpace = options.image_color_space.toRaw(),
+            .imageExtent = options.image_extent.toRaw(),
             .imageArrayLayers = options.image_array_layers,
-            .imageUsage = options.image_usage,
+            .imageUsage = options.image_usage.toRaw(),
             .imageSharingMode = if (concurrent)
                 raw.VK_SHARING_MODE_CONCURRENT
             else
@@ -1367,9 +1495,9 @@ pub const Device = struct {
                 options.queue_family_indices.ptr
             else
                 null,
-            .preTransform = options.pre_transform,
-            .compositeAlpha = options.composite_alpha,
-            .presentMode = options.present_mode,
+            .preTransform = options.pre_transform.toRaw(),
+            .compositeAlpha = options.composite_alpha.toRaw(),
+            .presentMode = options.present_mode.toRaw(),
             .clipped = if (options.clipped) raw.VK_TRUE else raw.VK_FALSE,
             .oldSwapchain = old_handle,
         };
@@ -1737,12 +1865,14 @@ pub const ext = struct {
             }
 
             pub fn queueLabels(message: Message) []const raw.VkDebugUtilsLabelEXT {
-                if (message.data.queueLabelCount == 0 or message.data.pQueueLabels == null) return &.{};
+                if (message.data.queueLabelCount == 0 or
+                    message.data.pQueueLabels == null) return &.{};
                 return message.data.pQueueLabels[0..message.data.queueLabelCount];
             }
 
             pub fn commandBufferLabels(message: Message) []const raw.VkDebugUtilsLabelEXT {
-                if (message.data.cmdBufLabelCount == 0 or message.data.pCmdBufLabels == null) return &.{};
+                if (message.data.cmdBufLabelCount == 0 or
+                    message.data.pCmdBufLabels == null) return &.{};
                 return message.data.pCmdBufLabels[0..message.data.cmdBufLabelCount];
             }
         };
@@ -2025,7 +2155,9 @@ pub const ext = struct {
                 const device_handle = device._handle orelse return error.InactiveObject;
                 switch (object) {
                     .device => |named_device| {
-                        if (try named_device.rawHandle() != device_handle) return error.InvalidHandle;
+                        if (try named_device.rawHandle() != device_handle) {
+                            return error.InvalidHandle;
+                        }
                     },
                     .queue => |queue| {
                         if (queue._device_handle != device_handle) return error.InvalidHandle;
@@ -2417,26 +2549,59 @@ fn enumerateSurfaceFormats(
     enumerate: CommandFunction(raw.PFN_vkGetPhysicalDeviceSurfaceFormatsKHR),
     physical_device: raw.VkPhysicalDevice,
     surface: raw.VkSurfaceKHR,
-) (Error || std.mem.Allocator.Error)![]raw.VkSurfaceFormatKHR {
-    var count: u32 = 0;
-    try checkSuccess(enumerate(physical_device, surface, &count, null));
-    try validateEnumerationCount(count);
-    if (count == 0) return gpa.alloc(raw.VkSurfaceFormatKHR, 0);
+) (Error || std.mem.Allocator.Error)![]SurfaceFormat {
+    var count = try surfaceFormatCountRaw(enumerate, physical_device, surface);
+    if (count == 0) return gpa.alloc(SurfaceFormat, 0);
 
-    var formats = try gpa.alloc(raw.VkSurfaceFormatKHR, count);
+    var formats = try gpa.alloc(SurfaceFormat, count);
     errdefer gpa.free(formats);
     for (0..enumeration_attempt_count_max) |_| {
-        var written: u32 = @intCast(formats.len);
-        const result = enumerate(physical_device, surface, &written, formats.ptr);
-        if (result == raw.VK_SUCCESS) return gpa.realloc(formats, written);
-        if (result != raw.VK_INCOMPLETE) try checkSuccess(result);
+        const written = enumerateSurfaceFormatsInto(
+            enumerate,
+            physical_device,
+            surface,
+            formats,
+        ) catch |enumeration_error| switch (enumeration_error) {
+            error.BufferTooSmall => null,
+            else => return enumeration_error,
+        };
+        if (written) |items| return gpa.realloc(formats, items.len);
 
-        count = 0;
-        try checkSuccess(enumerate(physical_device, surface, &count, null));
+        count = try surfaceFormatCountRaw(enumerate, physical_device, surface);
         count = try nextEnumerationCapacity(count, formats.len);
         formats = try gpa.realloc(formats, count);
     }
     return error.EnumerationUnstable;
+}
+
+fn surfaceFormatCountRaw(
+    enumerate: CommandFunction(raw.PFN_vkGetPhysicalDeviceSurfaceFormatsKHR),
+    physical_device: raw.VkPhysicalDevice,
+    surface: raw.VkSurfaceKHR,
+) Error!u32 {
+    var count: u32 = 0;
+    try checkSuccess(enumerate(physical_device, surface, &count, null));
+    try validateEnumerationCount(count);
+    return count;
+}
+
+fn enumerateSurfaceFormatsInto(
+    enumerate: CommandFunction(raw.PFN_vkGetPhysicalDeviceSurfaceFormatsKHR),
+    physical_device: raw.VkPhysicalDevice,
+    surface: raw.VkSurfaceKHR,
+    storage: []SurfaceFormat,
+) Error![]SurfaceFormat {
+    if (storage.len > std.math.maxInt(u32)) return error.CountOverflow;
+    var written: u32 = @intCast(storage.len);
+    const output: [*c]raw.VkSurfaceFormatKHR = if (storage.len == 0)
+        null
+    else
+        @ptrCast(storage.ptr);
+    const result = enumerate(physical_device, surface, &written, output);
+    if (result == raw.VK_INCOMPLETE) return error.BufferTooSmall;
+    try checkSuccess(result);
+    if (written > storage.len) return error.CountOverflow;
+    return storage[0..written];
 }
 
 fn enumeratePresentModes(
@@ -2444,26 +2609,59 @@ fn enumeratePresentModes(
     enumerate: CommandFunction(raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR),
     physical_device: raw.VkPhysicalDevice,
     surface: raw.VkSurfaceKHR,
-) (Error || std.mem.Allocator.Error)![]raw.VkPresentModeKHR {
-    var count: u32 = 0;
-    try checkSuccess(enumerate(physical_device, surface, &count, null));
-    try validateEnumerationCount(count);
-    if (count == 0) return gpa.alloc(raw.VkPresentModeKHR, 0);
+) (Error || std.mem.Allocator.Error)![]PresentMode {
+    var count = try presentModeCountRaw(enumerate, physical_device, surface);
+    if (count == 0) return gpa.alloc(PresentMode, 0);
 
-    var modes = try gpa.alloc(raw.VkPresentModeKHR, count);
+    var modes = try gpa.alloc(PresentMode, count);
     errdefer gpa.free(modes);
     for (0..enumeration_attempt_count_max) |_| {
-        var written: u32 = @intCast(modes.len);
-        const result = enumerate(physical_device, surface, &written, modes.ptr);
-        if (result == raw.VK_SUCCESS) return gpa.realloc(modes, written);
-        if (result != raw.VK_INCOMPLETE) try checkSuccess(result);
+        const written = enumeratePresentModesInto(
+            enumerate,
+            physical_device,
+            surface,
+            modes,
+        ) catch |enumeration_error| switch (enumeration_error) {
+            error.BufferTooSmall => null,
+            else => return enumeration_error,
+        };
+        if (written) |items| return gpa.realloc(modes, items.len);
 
-        count = 0;
-        try checkSuccess(enumerate(physical_device, surface, &count, null));
+        count = try presentModeCountRaw(enumerate, physical_device, surface);
         count = try nextEnumerationCapacity(count, modes.len);
         modes = try gpa.realloc(modes, count);
     }
     return error.EnumerationUnstable;
+}
+
+fn presentModeCountRaw(
+    enumerate: CommandFunction(raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR),
+    physical_device: raw.VkPhysicalDevice,
+    surface: raw.VkSurfaceKHR,
+) Error!u32 {
+    var count: u32 = 0;
+    try checkSuccess(enumerate(physical_device, surface, &count, null));
+    try validateEnumerationCount(count);
+    return count;
+}
+
+fn enumeratePresentModesInto(
+    enumerate: CommandFunction(raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR),
+    physical_device: raw.VkPhysicalDevice,
+    surface: raw.VkSurfaceKHR,
+    storage: []PresentMode,
+) Error![]PresentMode {
+    if (storage.len > std.math.maxInt(u32)) return error.CountOverflow;
+    var written: u32 = @intCast(storage.len);
+    const output: [*c]raw.VkPresentModeKHR = if (storage.len == 0)
+        null
+    else
+        @ptrCast(storage.ptr);
+    const result = enumerate(physical_device, surface, &written, output);
+    if (result == raw.VK_INCOMPLETE) return error.BufferTooSmall;
+    try checkSuccess(result);
+    if (written > storage.len) return error.CountOverflow;
+    return storage[0..written];
 }
 
 /// Maps errors for commands whose only successful result is `VK_SUCCESS`.
@@ -2788,6 +2986,52 @@ fn testSurfaceSupport(
     return test_surface_result;
 }
 
+fn testSurfaceFormats(
+    _: raw.VkPhysicalDevice,
+    _: raw.VkSurfaceKHR,
+    count: [*c]u32,
+    formats: [*c]raw.VkSurfaceFormatKHR,
+) callconv(.c) raw.VkResult {
+    if (formats == null) {
+        count[0] = 2;
+        return raw.VK_SUCCESS;
+    }
+    if (count[0] < 2) {
+        count[0] = 2;
+        return raw.VK_INCOMPLETE;
+    }
+    formats[0] = .{
+        .format = raw.VK_FORMAT_B8G8R8A8_SRGB,
+        .colorSpace = raw.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+    };
+    formats[1] = .{
+        .format = raw.VK_FORMAT_R8G8B8A8_SRGB,
+        .colorSpace = raw.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+    };
+    count[0] = 2;
+    return raw.VK_SUCCESS;
+}
+
+fn testPresentModes(
+    _: raw.VkPhysicalDevice,
+    _: raw.VkSurfaceKHR,
+    count: [*c]u32,
+    modes: [*c]raw.VkPresentModeKHR,
+) callconv(.c) raw.VkResult {
+    if (modes == null) {
+        count[0] = 2;
+        return raw.VK_SUCCESS;
+    }
+    if (count[0] < 2) {
+        count[0] = 2;
+        return raw.VK_INCOMPLETE;
+    }
+    modes[0] = raw.VK_PRESENT_MODE_FIFO_KHR;
+    modes[1] = raw.VK_PRESENT_MODE_MAILBOX_KHR;
+    count[0] = 2;
+    return raw.VK_SUCCESS;
+}
+
 fn testSetObjectName(
     _: raw.VkDevice,
     name_info: [*c]const raw.VkDebugUtilsObjectNameInfoEXT,
@@ -2911,6 +3155,63 @@ test "Vulkan u32 counts reject narrowing overflow" {
         const too_large = @as(usize, std.math.maxInt(u32)) + 1;
         try std.testing.expectError(error.CountOverflow, count32(too_large));
     }
+}
+
+test "surface enumeration supports typed caller storage" {
+    const physical_device = testHandle(raw.VkPhysicalDevice, 0x1100);
+    const surface = testHandle(raw.VkSurfaceKHR, 0x3000);
+
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        try surfaceFormatCountRaw(testSurfaceFormats, physical_device, surface),
+    );
+    var format_storage: [2]SurfaceFormat = undefined;
+    const formats = try enumerateSurfaceFormatsInto(
+        testSurfaceFormats,
+        physical_device,
+        surface,
+        &format_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 2), formats.len);
+    try std.testing.expectEqual(Format.b8g8r8a8_srgb, formats[0].format);
+    try std.testing.expectEqual(ColorSpace.srgb_nonlinear, formats[0].color_space);
+    var format_storage_small: [1]SurfaceFormat = undefined;
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        enumerateSurfaceFormatsInto(
+            testSurfaceFormats,
+            physical_device,
+            surface,
+            &format_storage_small,
+        ),
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        try presentModeCountRaw(testPresentModes, physical_device, surface),
+    );
+    var mode_storage: [2]PresentMode = undefined;
+    const modes = try enumeratePresentModesInto(
+        testPresentModes,
+        physical_device,
+        surface,
+        &mode_storage,
+    );
+    try std.testing.expectEqualSlices(
+        PresentMode,
+        &.{ .fifo, .mailbox },
+        modes,
+    );
+    var mode_storage_small: [1]PresentMode = undefined;
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        enumeratePresentModesInto(
+            testPresentModes,
+            physical_device,
+            surface,
+            &mode_storage_small,
+        ),
+    );
 }
 
 test "queue submit rejects oversized slices before dispatch" {

@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
 
     const cleaner = addBindingCleaner(b);
     const command_generator = addCommandGenerator(b);
+    const type_generator = addTypeGenerator(b);
     const translate_c = addTranslateC(
         b,
         target,
@@ -43,6 +44,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "vulkan_raw", .module = vulkan_raw }},
     });
+    const types = generateTypes(
+        b,
+        type_generator,
+        bindings,
+        b.path("vendor/registry/vk.xml"),
+        "vulkan_types.zig",
+    );
+    const vulkan_types = b.addModule("vulkan-types", .{
+        .root_source_file = types,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "vulkan_raw", .module = vulkan_raw }},
+    });
 
     const build_options = b.addOptions();
     build_options.addOption(Platform, "platform", platform);
@@ -56,15 +70,24 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "vulkan_raw", .module = vulkan_raw },
             .{ .name = "vulkan_commands", .module = vulkan_commands },
+            .{ .name = "vulkan_types", .module = vulkan_types },
             .{ .name = "vulkan_build_options", .module = build_options.createModule() },
         },
     });
     configureLoaderLibraries(vulkan, target.result.os.tag);
 
-    addBindingsStep(b, bindings, commands);
+    addBindingsStep(b, bindings, commands, types);
     addTestStep(b, target, optimize, vulkan);
     addExampleSteps(b, target, optimize, vulkan);
-    addUpdateStep(b, cleaner, command_generator, target, optimize, platform);
+    addUpdateStep(
+        b,
+        cleaner,
+        command_generator,
+        type_generator,
+        target,
+        optimize,
+        platform,
+    );
 }
 
 const Platform = enum {
@@ -152,6 +175,17 @@ fn addCommandGenerator(b: *std.Build) *std.Build.Step.Compile {
     });
 }
 
+fn addTypeGenerator(b: *std.Build) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = "generate-vulkan-types",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/generate_types.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+}
+
 fn cleanBindings(
     b: *std.Build,
     cleaner: *std.Build.Step.Compile,
@@ -164,6 +198,19 @@ fn cleanBindings(
 }
 
 fn generateCommands(
+    b: *std.Build,
+    generator: *std.Build.Step.Compile,
+    bindings: std.Build.LazyPath,
+    registry: std.Build.LazyPath,
+    output_name: []const u8,
+) std.Build.LazyPath {
+    const run_generator = b.addRunArtifact(generator);
+    run_generator.addFileArg(bindings);
+    run_generator.addFileArg(registry);
+    return run_generator.addOutputFileArg(output_name);
+}
+
+fn generateTypes(
     b: *std.Build,
     generator: *std.Build.Step.Compile,
     bindings: std.Build.LazyPath,
@@ -190,17 +237,21 @@ fn addBindingsStep(
     b: *std.Build,
     bindings: std.Build.LazyPath,
     commands: std.Build.LazyPath,
+    types: std.Build.LazyPath,
 ) void {
     const install_bindings = b.addInstallFile(bindings, "bindings/vulkan.zig");
     const install_commands = b.addInstallFile(commands, "bindings/commands.zig");
+    const install_types = b.addInstallFile(types, "bindings/types.zig");
     const bindings_step = b.step(
         "bindings",
         "Generate target-specific Vulkan bindings in zig-out/bindings",
     );
     bindings_step.dependOn(&install_bindings.step);
     bindings_step.dependOn(&install_commands.step);
+    bindings_step.dependOn(&install_types.step);
     b.getInstallStep().dependOn(&install_bindings.step);
     b.getInstallStep().dependOn(&install_commands.step);
+    b.getInstallStep().dependOn(&install_types.step);
 }
 
 fn addTestStep(
@@ -326,6 +377,7 @@ fn addUpdateStep(
     b: *std.Build,
     cleaner: *std.Build.Step.Compile,
     command_generator: *std.Build.Step.Compile,
+    type_generator: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     platform: Platform,
@@ -387,6 +439,20 @@ fn addUpdateStep(
             "pub const queue_submit =",
         },
     });
+    const verified_types = generateTypes(
+        b,
+        type_generator,
+        verified_bindings,
+        checkout.path(b, "registry/vk.xml"),
+        "updated_vulkan_types.zig",
+    );
+    const verify_types = b.addCheckFile(verified_types, .{
+        .expected_matches = &.{
+            "pub const Format = enum",
+            "pub const ImageUsageFlags =",
+            "pub const Extent2D = struct",
+        },
+    });
 
     const update_files = b.addUpdateSourceFiles();
     for (vendored_files) |file_path| {
@@ -410,6 +476,7 @@ fn addUpdateStep(
     update_files.addCopyFileToSource(revision_file, "vendor/VULKAN_HEADERS_COMMIT");
     update_files.step.dependOn(&verify.step);
     update_files.step.dependOn(&verify_commands.step);
+    update_files.step.dependOn(&verify_types.step);
 
     const update_step = b.step(
         "update",

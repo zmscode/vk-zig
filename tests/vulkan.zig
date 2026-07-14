@@ -213,6 +213,59 @@ test "generated extension names compose without duplicates" {
     try std.testing.expectError(error.CountOverflow, extensions.append("VK_EXT_fifth"));
 }
 
+test "generated enums preserve known and unknown Vulkan values" {
+    try std.testing.expectEqual(
+        @as(vk.raw.VkFormat, @intCast(vk.raw.VK_FORMAT_B8G8R8A8_SRGB)),
+        vk.Format.b8g8r8a8_srgb.toRaw(),
+    );
+    try std.testing.expectEqual(
+        @as(vk.raw.VkPresentModeKHR, @intCast(vk.raw.VK_PRESENT_MODE_FIFO_KHR)),
+        vk.PresentMode.fifo.toRaw(),
+    );
+
+    const unknown_raw: vk.raw.VkFormat = 0xf000_0001;
+    const unknown = vk.Format.fromRaw(unknown_raw);
+    try std.testing.expectEqual(unknown_raw, unknown.toRaw());
+}
+
+test "generated flag sets are typed and preserve unknown bits" {
+    const usage = vk.ImageUsageFlags.init(&.{ .transfer_dst, .color_attachment });
+    try std.testing.expect(usage.contains(.transfer_dst));
+    try std.testing.expect(usage.contains(.color_attachment));
+    try std.testing.expect(!usage.contains(.sampled));
+
+    const unknown_raw: vk.raw.VkImageUsageFlags = 0x8000_0000;
+    const extended = vk.ImageUsageFlags.fromRaw(unknown_raw).merge(usage);
+    try std.testing.expectEqual(unknown_raw, extended.toRaw() & unknown_raw);
+    try std.testing.expect(extended.containsAll(usage));
+    try std.testing.expect(extended.without(.transfer_dst).contains(.color_attachment));
+    try std.testing.expect(!extended.without(.transfer_dst).contains(.transfer_dst));
+    try std.testing.expect(vk.ImageUsageFlags.empty.isEmpty());
+    try std.testing.expect(vk.ImageUsageFlags != vk.MemoryPropertyFlags);
+}
+
+test "generated value types convert at the raw boundary" {
+    const extent: vk.Extent2D = .{ .width = 1920, .height = 1080 };
+    try std.testing.expectEqual(@as(u32, 1920), extent.toRaw().width);
+    try std.testing.expectEqual(extent, vk.Extent2D.fromRaw(extent.toRaw()));
+
+    const range: vk.ImageSubresourceRange = .{
+        .aspect_mask = .init(&.{.color}),
+        .level_count = 4,
+        .layer_count = 2,
+    };
+    const raw_range = range.toRaw();
+    try std.testing.expectEqual(
+        @as(vk.raw.VkImageAspectFlags, @intCast(vk.raw.VK_IMAGE_ASPECT_COLOR_BIT)),
+        raw_range.aspectMask,
+    );
+    try std.testing.expectEqual(@as(u32, 4), raw_range.levelCount);
+    try std.testing.expectEqual(@as(u32, 2), raw_range.layerCount);
+
+    const raw_color = (vk.ClearColor{ .float = .{ 0.1, 0.2, 0.3, 1.0 } }).toRaw();
+    try std.testing.expectEqual(@as(f32, 1.0), raw_color.float32[3]);
+}
+
 test "diagnostic availability recognizes names and resolves independent requests" {
     var validation_layer: vk.raw.VkLayerProperties = .{};
     @memcpy(
@@ -272,9 +325,7 @@ test "typed queue capabilities and memory selection avoid raw bit arithmetic" {
     const graphics_transfer: vk.QueueFamily = .{
         .index = 3,
         .properties = .{
-            .queueFlags = @intCast(
-                vk.raw.VK_QUEUE_GRAPHICS_BIT | vk.raw.VK_QUEUE_TRANSFER_BIT,
-            ),
+            .queueFlags = vk.QueueFlags.init(&.{ .graphics, .transfer }).toRaw(),
             .queueCount = 2,
         },
     };
@@ -285,20 +336,20 @@ test "typed queue capabilities and memory selection avoid raw bit arithmetic" {
 
     var memory: vk.raw.VkPhysicalDeviceMemoryProperties = .{};
     memory.memoryTypeCount = 3;
-    memory.memoryTypes[0].propertyFlags = vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-    memory.memoryTypes[1].propertyFlags = @intCast(
-        vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            vk.raw.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    );
-    memory.memoryTypes[2].propertyFlags = vk.raw.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    memory.memoryTypes[0].propertyFlags =
+        vk.MemoryPropertyFlags.init(&.{.host_visible}).toRaw();
+    memory.memoryTypes[1].propertyFlags =
+        vk.MemoryPropertyFlags.init(&.{ .host_visible, .host_coherent }).toRaw();
+    memory.memoryTypes[2].propertyFlags =
+        vk.MemoryPropertyFlags.init(&.{.device_local}).toRaw();
     try std.testing.expectEqual(@as(u32, 1), try vk.selectMemoryTypeIndex(memory, .{
         .type_bits = 0b111,
-        .required_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-        .preferred_flags = vk.raw.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        .required_flags = .init(&.{.host_visible}),
+        .preferred_flags = .init(&.{.host_coherent}),
     }));
     try std.testing.expectError(error.MemoryTypeNotFound, vk.selectMemoryTypeIndex(memory, .{
         .type_bits = 0b011,
-        .required_flags = vk.raw.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        .required_flags = .init(&.{.device_local}),
     }));
 }
 
@@ -514,14 +565,13 @@ test "portability helpers match the selected build platform" {
     if (vk.platform == .metal) {
         try std.testing.expectEqual(@as(usize, 1), vk.Portability.instanceExtensions().len);
         try std.testing.expectEqual(@as(usize, 1), vk.Portability.deviceExtensions().len);
-        try std.testing.expect(vk.Portability.instanceFlags() != 0);
+        try std.testing.expect(
+            vk.Portability.instanceFlags().contains(.enumerate_portability_khr),
+        );
     } else {
         try std.testing.expectEqual(@as(usize, 0), vk.Portability.instanceExtensions().len);
         try std.testing.expectEqual(@as(usize, 0), vk.Portability.deviceExtensions().len);
-        try std.testing.expectEqual(
-            @as(vk.raw.VkInstanceCreateFlags, 0),
-            vk.Portability.instanceFlags(),
-        );
+        try std.testing.expect(vk.Portability.instanceFlags().isEmpty());
     }
 }
 
