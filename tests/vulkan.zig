@@ -228,6 +228,36 @@ test "generated enums preserve known and unknown Vulkan values" {
     try std.testing.expectEqual(unknown_raw, unknown.toRaw());
 }
 
+test "typed versions and physical-device properties hide packed fields" {
+    try std.testing.expect(vk.Version.v1_4.atLeast(.v1_3));
+    try std.testing.expect(vk.Version.v1_0.lessThan(.v1_1));
+    try std.testing.expectEqual(vk.Version.v1_3, vk.Version.decode(vk.Version.v1_3.encode()));
+
+    var raw_properties: vk.raw.VkPhysicalDeviceProperties = .{};
+    raw_properties.apiVersion = vk.Version.v1_3.encode();
+    raw_properties.driverVersion = 77;
+    raw_properties.vendorID = 0x1234;
+    raw_properties.deviceID = 0x5678;
+    raw_properties.deviceType = @intCast(vk.raw.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+    const name = "typed-device";
+    @memcpy(raw_properties.deviceName[0..name.len], name);
+    raw_properties.limits.maxImageDimension2D = 8192;
+    raw_properties.limits.maxPushConstantsSize = 256;
+    raw_properties.limits.nonCoherentAtomSize = 64;
+    raw_properties.limits.timestampPeriod = 1.5;
+    raw_properties.sparseProperties.residencyStandard2DBlockShape = vk.raw.VK_TRUE;
+
+    const properties = vk.PhysicalDeviceProperties.fromRaw(&raw_properties);
+    try std.testing.expectEqualStrings(name, properties.name());
+    try std.testing.expect(properties.isDiscrete());
+    try std.testing.expect(properties.supportsApiVersion(.v1_2));
+    try std.testing.expectEqual(@as(u32, 0x1234), properties.vendor_id);
+    try std.testing.expectEqual(@as(u32, 8192), properties.limits.max_image_dimension_2d);
+    try std.testing.expectEqual(@as(u32, 256), properties.limits.max_push_constants_size);
+    try std.testing.expectEqual(@as(u64, 64), properties.limits.non_coherent_atom_size);
+    try std.testing.expect(properties.sparse.standard_2d_block_shape);
+}
+
 test "generated flag sets are typed and preserve unknown bits" {
     const usage = vk.ImageUsageFlags.init(&.{ .transfer_dst, .color_attachment });
     try std.testing.expect(usage.contains(.transfer_dst));
@@ -264,6 +294,78 @@ test "generated value types convert at the raw boundary" {
 
     const raw_color = (vk.ClearColor{ .float = .{ 0.1, 0.2, 0.3, 1.0 } }).toRaw();
     try std.testing.expectEqual(@as(f32, 1.0), raw_color.float32[3]);
+}
+
+test "swapchain selection helpers clamp capabilities and report fallbacks" {
+    const capabilities: vk.SurfaceCapabilities = .{
+        .image_count_min = 2,
+        .image_count_max = 4,
+        .extent_current = null,
+        .extent_min = .{ .width = 320, .height = 200 },
+        .extent_max = .{ .width = 1920, .height = 1080 },
+        .image_array_layer_count_max = 1,
+        .transforms_supported = .init(&.{ .identity, .rotate_90 }),
+        .transform_current = .rotate_90,
+        .composite_alpha_supported = .init(&.{ .opaque_, .inherit }),
+        .image_usage_supported = .init(&.{ .color_attachment, .transfer_dst }),
+    };
+
+    try std.testing.expectEqual(
+        vk.Extent2D{ .width = 320, .height = 1080 },
+        vk.clampSurfaceExtent(capabilities, .{ .width = 100, .height = 2000 }),
+    );
+    const count_default = vk.chooseSwapchainImageCount(capabilities, null);
+    try std.testing.expectEqual(@as(u32, 3), count_default.value);
+    try std.testing.expect(count_default.preferred);
+    const count_clamped = vk.chooseSwapchainImageCount(capabilities, 8);
+    try std.testing.expectEqual(@as(u32, 4), count_clamped.value);
+    try std.testing.expect(!count_clamped.preferred);
+
+    const wanted_format: vk.SurfaceFormat = .{
+        .format = .b8g8r8a8_srgb,
+        .color_space = .srgb_nonlinear,
+    };
+    const format = try vk.chooseSurfaceFormat(&.{wanted_format}, &.{wanted_format});
+    try std.testing.expectEqual(wanted_format.format, format.value.format);
+    try std.testing.expect(format.preferred);
+    try std.testing.expectError(
+        error.UnsupportedSurfaceConfiguration,
+        vk.chooseSurfaceFormat(&.{}, &.{wanted_format}),
+    );
+
+    const mode = try vk.choosePresentMode(&.{ .fifo, .mailbox }, &.{.mailbox});
+    try std.testing.expectEqual(vk.PresentMode.mailbox, mode.value);
+    try std.testing.expect(mode.preferred);
+    const fallback_mode = try vk.choosePresentMode(&.{.fifo}, &.{.mailbox});
+    try std.testing.expectEqual(vk.PresentMode.fifo, fallback_mode.value);
+    try std.testing.expect(!fallback_mode.preferred);
+
+    const transform = vk.chooseSurfaceTransform(capabilities, &.{.identity});
+    try std.testing.expectEqual(vk.SurfaceTransformBit.identity, transform.value);
+    try std.testing.expect(transform.preferred);
+    const alpha = try vk.chooseCompositeAlpha(
+        capabilities.composite_alpha_supported,
+        &.{.pre_multiplied},
+    );
+    try std.testing.expectEqual(vk.CompositeAlphaBit.opaque_, alpha.value);
+    try std.testing.expect(!alpha.preferred);
+
+    const usage = try vk.chooseImageUsage(
+        capabilities.image_usage_supported,
+        .init(&.{.color_attachment}),
+        .init(&.{.transfer_dst}),
+    );
+    try std.testing.expect(usage.value.contains(.color_attachment));
+    try std.testing.expect(usage.value.contains(.transfer_dst));
+    try std.testing.expect(usage.preferred);
+    try std.testing.expectError(
+        error.UnsupportedSurfaceConfiguration,
+        vk.chooseImageUsage(
+            capabilities.image_usage_supported,
+            .init(&.{.sampled}),
+            .empty,
+        ),
+    );
 }
 
 test "diagnostic availability recognizes names and resolves independent requests" {
@@ -324,15 +426,35 @@ test "diagnostic availability recognizes names and resolves independent requests
 test "typed queue capabilities and memory selection avoid raw bit arithmetic" {
     const graphics_transfer: vk.QueueFamily = .{
         .index = .fromRaw(3),
-        .properties = .{
-            .queueFlags = vk.QueueFlags.init(&.{ .graphics, .transfer }).toRaw(),
-            .queueCount = 2,
-        },
+        .flags = .init(&.{ .graphics, .transfer }),
+        .queue_count = 2,
+        .timestamp_valid_bits = 48,
+        .minimum_image_transfer_granularity = .{ .width = 1, .height = 1, .depth = 1 },
     };
     try std.testing.expect(graphics_transfer.supports(.graphics));
     try std.testing.expect(graphics_transfer.supports(.transfer));
     try std.testing.expect(!graphics_transfer.supports(.compute));
     try std.testing.expectEqual(@as(u32, 2), graphics_transfer.queueCount());
+    const compute_only: vk.QueueFamily = .{
+        .index = .fromRaw(4),
+        .flags = .init(&.{.compute}),
+        .queue_count = 1,
+        .timestamp_valid_bits = 64,
+        .minimum_image_transfer_granularity = .{ .width = 1, .height = 1, .depth = 1 },
+    };
+    try std.testing.expectEqual(
+        vk.QueueFamilyIndex.fromRaw(3),
+        try vk.selectQueueFamily(&.{ graphics_transfer, compute_only }, .{
+            .required = .init(&.{.transfer}),
+            .preferred = .init(&.{.graphics}),
+        }),
+    );
+    try std.testing.expectError(
+        error.QueueFamilyNotFound,
+        vk.selectQueueFamily(&.{graphics_transfer}, .{
+            .required = .init(&.{.sparse_binding}),
+        }),
+    );
 
     var memory: vk.raw.VkPhysicalDeviceMemoryProperties = .{};
     memory.memoryHeapCount = 1;
@@ -723,6 +845,9 @@ test "all public wrapper declarations compile" {
     _ = &vk.Instance.adoptSurface;
     _ = &vk.Instance.physicalDevices;
     _ = &vk.PhysicalDevice.properties;
+    _ = &vk.PhysicalDevice.propertiesRaw;
+    _ = &vk.PhysicalDevice.formatProperties;
+    _ = &vk.PhysicalDevice.imageFormatProperties;
     _ = &vk.PhysicalDevice.features;
     _ = &vk.PhysicalDevice.features2;
     _ = &vk.PhysicalDevice.memoryProperties;
@@ -736,6 +861,15 @@ test "all public wrapper declarations compile" {
     _ = &vk.PhysicalDevice.surfaceFormats;
     _ = &vk.PhysicalDevice.presentModes;
     _ = &vk.PhysicalDevice.findMemoryTypeIndex;
+    _ = &vk.clampSurfaceExtent;
+    _ = &vk.chooseSwapchainImageCount;
+    _ = &vk.chooseSurfaceFormat;
+    _ = &vk.choosePresentMode;
+    _ = &vk.chooseSurfaceTransform;
+    _ = &vk.chooseCompositeAlpha;
+    _ = &vk.chooseImageUsage;
+    _ = &vk.selectQueueFamily;
+    _ = &vk.selectQueueFamilyForSurface;
     _ = &vk.MemoryProperties.fromRaw;
     _ = &vk.MemoryProperties.initFromRaw;
     _ = &vk.MemoryProperties.types;

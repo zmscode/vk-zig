@@ -66,6 +66,18 @@ const enum_specs = [_]EnumSpec{
         .constant_prefix = "VK_IMAGE_VIEW_TYPE_",
     },
     .{
+        .registry_name = "VkImageType",
+        .zig_name = "ImageType",
+        .raw_name = "VkImageType",
+        .constant_prefix = "VK_IMAGE_TYPE_",
+    },
+    .{
+        .registry_name = "VkImageTiling",
+        .zig_name = "ImageTiling",
+        .raw_name = "VkImageTiling",
+        .constant_prefix = "VK_IMAGE_TILING_",
+    },
+    .{
         .registry_name = "VkComponentSwizzle",
         .zig_name = "ComponentSwizzle",
         .raw_name = "VkComponentSwizzle",
@@ -121,6 +133,20 @@ const flag_specs = [_]FlagSpec{
         .flags_name = "ImageUsageFlags",
         .raw_flags_name = "VkImageUsageFlags",
         .constant_prefix = "VK_IMAGE_USAGE_",
+    },
+    .{
+        .registry_name = "VkImageCreateFlagBits",
+        .bit_name = "ImageCreateBit",
+        .flags_name = "ImageCreateFlags",
+        .raw_flags_name = "VkImageCreateFlags",
+        .constant_prefix = "VK_IMAGE_CREATE_",
+    },
+    .{
+        .registry_name = "VkSampleCountFlagBits",
+        .bit_name = "SampleCountBit",
+        .flags_name = "SampleCountFlags",
+        .raw_flags_name = "VkSampleCountFlags",
+        .constant_prefix = "VK_SAMPLE_COUNT_",
     },
     .{
         .registry_name = "VkFenceCreateFlagBits",

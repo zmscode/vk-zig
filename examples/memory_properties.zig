@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     for (devices) |*device| {
         const device_properties = device.properties();
         const memory = try device.memoryProperties();
-        std.log.info("{s} memory heaps:", .{vk.physicalDeviceName(&device_properties)});
+        std.log.info("{s} memory heaps:", .{device_properties.name()});
 
         for (memory.heaps()) |heap| {
             const size_mib = @divFloor(heap.size_bytes, 1024 * 1024);

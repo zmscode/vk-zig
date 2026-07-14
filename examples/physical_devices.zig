@@ -15,17 +15,17 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("{d} physical devices:", .{devices.len});
     for (devices) |*device| {
         const properties = device.properties();
-        const version = vk.Version.decode(properties.apiVersion);
+        const version = properties.api_version;
         std.log.info(
             "  {s}: {s}, Vulkan {d}.{d}.{d}, vendor=0x{x}, device=0x{x}",
             .{
-                vk.physicalDeviceName(&properties),
-                support.deviceTypeName(properties.deviceType),
+                properties.name(),
+                support.deviceTypeName(properties.device_type),
                 version.major,
                 version.minor,
                 version.patch,
-                properties.vendorID,
-                properties.deviceID,
+                properties.vendor_id,
+                properties.device_id,
             },
         );
     }

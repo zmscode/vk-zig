@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     for (devices) |*device| {
         const features = try device.features2(null);
         const properties = device.properties();
-        std.log.info("{s} selected features:", .{vk.physicalDeviceName(&properties)});
+        std.log.info("{s} selected features:", .{properties.name()});
         std.log.info(
             "  geometry shader: {s}",
             .{support.boolName(features.features.geometryShader)},

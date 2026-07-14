@@ -17,15 +17,18 @@ pub fn main(init: std.process.Init) !void {
         const families = try device.queueFamilies(init.gpa);
         defer init.gpa.free(families);
 
-        std.log.info("{s} queue families:", .{vk.physicalDeviceName(&device_properties)});
+        std.log.info("{s} queue families:", .{device_properties.name()});
         for (families) |family| {
             std.log.info(
-                "  {d}: queues={d}, flags=0x{x}, timestamp bits={d}",
+                "  {d}: queues={d}, flags=0x{x}, timestamp bits={d}, transfer granularity={d}x{d}x{d}",
                 .{
-                    family.index,
+                    family.index.toRaw(),
                     family.queueCount(),
-                    family.properties.queueFlags,
-                    family.properties.timestampValidBits,
+                    family.flags.toRaw(),
+                    family.timestamp_valid_bits,
+                    family.minimum_image_transfer_granularity.width,
+                    family.minimum_image_transfer_granularity.height,
+                    family.minimum_image_transfer_granularity.depth,
                 },
             );
         }

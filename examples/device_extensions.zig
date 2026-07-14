@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
         const extensions = try device.deviceExtensions(init.gpa, null);
         defer init.gpa.free(extensions);
         std.log.info("{s}: {d} device extensions", .{
-            vk.physicalDeviceName(&properties),
+            properties.name(),
             extensions.len,
         });
         std.log.info("  VK_KHR_swapchain: {}", .{

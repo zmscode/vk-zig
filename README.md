@@ -86,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(physical_devices);
     for (physical_devices) |*physical_device| {
         const properties = physical_device.properties();
-        std.log.info("{s}", .{vk.physicalDeviceName(&properties)});
+        std.log.info("{s}", .{properties.name()});
     }
 }
 ```
@@ -205,6 +205,26 @@ defer gpa.free(formats);
 const present_modes = try physical_device.presentModes(gpa, &surface);
 defer gpa.free(present_modes);
 ```
+
+Capability helpers apply Vulkan's clamping rules while reporting whether a preference was met:
+
+```zig
+const selected_format = try vk.chooseSurfaceFormat(formats, &.{.{
+    .format = .b8g8r8a8_srgb,
+    .color_space = .srgb_nonlinear,
+}});
+const selected_mode = try vk.choosePresentMode(present_modes, &.{ .mailbox, .fifo });
+const extent = vk.clampSurfaceExtent(capabilities, window_extent);
+const image_count = vk.chooseSwapchainImageCount(capabilities, 3);
+const transform = vk.chooseSurfaceTransform(capabilities, &.{.identity});
+const composite_alpha = try vk.chooseCompositeAlpha(
+    capabilities.composite_alpha_supported,
+    &.{.opaque_},
+);
+```
+
+The returned `.preferred` field is false when a valid fallback or clamp was required. Selection
+policy remains explicit: callers supply ordered preferences and can reject any fallback.
 
 Fixed-capacity callers can avoid allocation by querying the count and providing storage:
 
@@ -398,6 +418,27 @@ zig build update -Dvulkan-ref=v1.4.356
 Running the example requires an installed Vulkan loader; on macOS that normally means a Vulkan
 SDK or MoltenVK installation discoverable as `libvulkan` or `libMoltenVK`.
 See `examples/README.md` for the complete example matrix and named run commands.
+
+### Linux GCC 16 `.sframe` linker failure
+
+Some current Linux hosts use GCC 16 startup objects containing `.sframe` relocations that Zig
+0.16's linker cannot consume. If a native `zig build test` or `zig build examples` fails in
+`crt1.o:.sframe` with `unhandled relocation type R_X86_64_PC64`, select an explicit target so Zig
+uses its target runtime instead of the incompatible host startup object:
+
+```sh
+# Match the host glibc ABI when testing native loader/runtime integration.
+zig build test -Dtarget=x86_64-linux-gnu.2.43
+zig build examples -Dtarget=x86_64-linux-gnu.2.43
+
+# Or use musl for portable compile/test validation.
+zig build test -Dtarget=x86_64-linux-musl
+zig build examples -Dtarget=x86_64-linux-musl
+```
+
+Replace `x86_64` and the glibc version with the host architecture and ABI when necessary. This
+failure occurs while linking the system C runtime before vk-zig tests or Vulkan loader discovery
+run; it does not indicate invalid generated bindings or a missing Vulkan installation.
 
 `zig build update` requires Git and network access. It translates and checks the downloaded
 headers before modifying the vendored files, then records the exact commit in

@@ -38,6 +38,6 @@ pub fn main(init: std.process.Init) !void {
     const properties = physical_device.properties();
     std.log.info(
         "created a logical device and graphics queue for {s}",
-        .{vk.physicalDeviceName(&properties)},
+        .{properties.name()},
     );
 }

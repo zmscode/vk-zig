@@ -22,6 +22,8 @@ pub const PresentMode = types.PresentMode;
 pub const ImageLayout = types.ImageLayout;
 pub const SharingMode = types.SharingMode;
 pub const ImageViewType = types.ImageViewType;
+pub const ImageType = types.ImageType;
+pub const ImageTiling = types.ImageTiling;
 pub const ComponentSwizzle = types.ComponentSwizzle;
 pub const CommandBufferLevel = types.CommandBufferLevel;
 pub const InstanceCreateBit = types.InstanceCreateBit;
@@ -36,6 +38,10 @@ pub const AccessBit = types.AccessBit;
 pub const AccessFlags = types.AccessFlags;
 pub const ImageUsageBit = types.ImageUsageBit;
 pub const ImageUsageFlags = types.ImageUsageFlags;
+pub const ImageCreateBit = types.ImageCreateBit;
+pub const ImageCreateFlags = types.ImageCreateFlags;
+pub const SampleCountBit = types.SampleCountBit;
+pub const SampleCountFlags = types.SampleCountFlags;
 pub const FenceCreateBit = types.FenceCreateBit;
 pub const FenceCreateFlags = types.FenceCreateFlags;
 pub const FormatFeatureBit = types.FormatFeatureBit;
@@ -67,6 +73,128 @@ pub const ImageSubresourceRange = types.ImageSubresourceRange;
 pub const ClearColor = types.ClearColor;
 pub const ClearDepthStencil = types.ClearDepthStencil;
 pub const ClearValue = types.ClearValue;
+
+/// A capability choice and whether the caller's preferred value was available.
+pub fn Choice(comptime T: type) type {
+    return struct {
+        value: T,
+        preferred: bool,
+    };
+}
+
+pub fn clampSurfaceExtent(
+    capabilities: SurfaceCapabilities,
+    desired: Extent2D,
+) Extent2D {
+    return capabilities.extent_current orelse .{
+        .width = @min(
+            @max(desired.width, capabilities.extent_min.width),
+            capabilities.extent_max.width,
+        ),
+        .height = @min(
+            @max(desired.height, capabilities.extent_min.height),
+            capabilities.extent_max.height,
+        ),
+    };
+}
+
+pub fn chooseSwapchainImageCount(
+    capabilities: SurfaceCapabilities,
+    preferred: ?u32,
+) Choice(u32) {
+    const default_count = if (capabilities.image_count_min == std.math.maxInt(u32))
+        capabilities.image_count_min
+    else
+        capabilities.image_count_min + 1;
+    const requested = preferred orelse default_count;
+    const maximum = capabilities.image_count_max orelse std.math.maxInt(u32);
+    const selected = @min(@max(requested, capabilities.image_count_min), maximum);
+    return .{ .value = selected, .preferred = preferred == null or selected == requested };
+}
+
+pub fn chooseSurfaceFormat(
+    available: []const SurfaceFormat,
+    preferred: []const SurfaceFormat,
+) Error!Choice(SurfaceFormat) {
+    if (available.len == 0) return error.UnsupportedSurfaceConfiguration;
+    if (available.len == 1 and available[0].format == .undefined_) {
+        return .{
+            .value = if (preferred.len == 0) available[0] else preferred[0],
+            .preferred = preferred.len != 0,
+        };
+    }
+    for (preferred) |wanted| {
+        for (available) |candidate| {
+            if (candidate.format == wanted.format and
+                candidate.color_space == wanted.color_space)
+            {
+                return .{ .value = candidate, .preferred = true };
+            }
+        }
+    }
+    return .{ .value = available[0], .preferred = false };
+}
+
+pub fn choosePresentMode(
+    available: []const PresentMode,
+    preferred: []const PresentMode,
+) Error!Choice(PresentMode) {
+    if (available.len == 0) return error.UnsupportedSurfaceConfiguration;
+    for (preferred) |wanted| {
+        for (available) |candidate| {
+            if (candidate == wanted) return .{ .value = candidate, .preferred = true };
+        }
+    }
+    for (available) |candidate| {
+        if (candidate == .fifo) return .{ .value = candidate, .preferred = false };
+    }
+    return .{ .value = available[0], .preferred = false };
+}
+
+pub fn chooseSurfaceTransform(
+    capabilities: SurfaceCapabilities,
+    preferred: []const SurfaceTransformBit,
+) Choice(SurfaceTransformBit) {
+    for (preferred) |wanted| {
+        if (capabilities.transforms_supported.contains(wanted)) {
+            return .{ .value = wanted, .preferred = true };
+        }
+    }
+    return .{ .value = capabilities.transform_current, .preferred = false };
+}
+
+pub fn chooseCompositeAlpha(
+    supported: CompositeAlphaFlags,
+    preferred: []const CompositeAlphaBit,
+) Error!Choice(CompositeAlphaBit) {
+    for (preferred) |wanted| {
+        if (supported.contains(wanted)) return .{ .value = wanted, .preferred = true };
+    }
+    const fallback_order = [_]CompositeAlphaBit{
+        .opaque_,
+        .pre_multiplied,
+        .post_multiplied,
+        .inherit,
+    };
+    for (fallback_order) |candidate| {
+        if (supported.contains(candidate)) return .{ .value = candidate, .preferred = false };
+    }
+    return error.UnsupportedSurfaceConfiguration;
+}
+
+pub fn chooseImageUsage(
+    supported: ImageUsageFlags,
+    required: ImageUsageFlags,
+    preferred: ImageUsageFlags,
+) Error!Choice(ImageUsageFlags) {
+    if (!supported.containsAll(required)) return error.UnsupportedSurfaceConfiguration;
+    const optional_bits = supported.toRaw() & preferred.toRaw();
+    const selected = ImageUsageFlags.fromRaw(required.toRaw() | optional_bits);
+    return .{
+        .value = selected,
+        .preferred = supported.containsAll(preferred),
+    };
+}
 
 /// Index of a queue family reported by a physical device.
 pub const QueueFamilyIndex = enum(u32) {
@@ -236,6 +364,8 @@ pub const Error = error{
     BufferTooSmall,
     InvalidProperties,
     SizeOverflow,
+    UnsupportedSurfaceConfiguration,
+    QueueFamilyNotFound,
 };
 
 pub const LoaderError = error{
@@ -264,6 +394,25 @@ pub const Version = struct {
             .patch = @truncate(encoded),
         };
     }
+
+    pub fn lessThan(version: Version, other: Version) bool {
+        return version.encode() < other.encode();
+    }
+
+    pub fn atLeast(version: Version, minimum: Version) bool {
+        return !version.lessThan(minimum);
+    }
+
+    pub fn format(version: Version, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (version.variant != 0) try writer.print("{d}:", .{version.variant});
+        try writer.print("{d}.{d}.{d}", .{ version.major, version.minor, version.patch });
+    }
+
+    pub const v1_0: Version = .{ .major = 1, .minor = 0, .patch = 0 };
+    pub const v1_1: Version = .{ .major = 1, .minor = 1, .patch = 0 };
+    pub const v1_2: Version = .{ .major = 1, .minor = 2, .patch = 0 };
+    pub const v1_3: Version = .{ .major = 1, .minor = 3, .patch = 0 };
+    pub const v1_4: Version = .{ .major = 1, .minor = 4, .patch = 0 };
 };
 
 const portability_instance_extensions = [_][:0]const u8{
@@ -1418,6 +1567,163 @@ pub const Swapchain = struct {
     }
 };
 
+pub const PhysicalDeviceLimits = struct {
+    max_image_dimension_2d: u32,
+    max_image_dimension_3d: u32,
+    max_image_dimension_cube: u32,
+    max_memory_allocation_count: u32,
+    max_sampler_allocation_count: u32,
+    buffer_image_granularity: u64,
+    sparse_address_space_size: u64,
+    max_bound_descriptor_sets: u32,
+    max_push_constants_size: u32,
+    max_compute_shared_memory_size: u32,
+    max_compute_work_group_count: [3]u32,
+    max_compute_work_group_invocations: u32,
+    max_compute_work_group_size: [3]u32,
+    max_sampler_anisotropy: f32,
+    max_viewports: u32,
+    max_viewport_dimensions: [2]u32,
+    viewport_bounds_range: [2]f32,
+    min_uniform_buffer_offset_alignment: u64,
+    min_storage_buffer_offset_alignment: u64,
+    non_coherent_atom_size: u64,
+    max_framebuffer_width: u32,
+    max_framebuffer_height: u32,
+    max_framebuffer_layers: u32,
+    max_color_attachments: u32,
+    timestamp_period_nanoseconds: f32,
+
+    pub fn fromRaw(value: *const raw.VkPhysicalDeviceLimits) PhysicalDeviceLimits {
+        return .{
+            .max_image_dimension_2d = value.maxImageDimension2D,
+            .max_image_dimension_3d = value.maxImageDimension3D,
+            .max_image_dimension_cube = value.maxImageDimensionCube,
+            .max_memory_allocation_count = value.maxMemoryAllocationCount,
+            .max_sampler_allocation_count = value.maxSamplerAllocationCount,
+            .buffer_image_granularity = value.bufferImageGranularity,
+            .sparse_address_space_size = value.sparseAddressSpaceSize,
+            .max_bound_descriptor_sets = value.maxBoundDescriptorSets,
+            .max_push_constants_size = value.maxPushConstantsSize,
+            .max_compute_shared_memory_size = value.maxComputeSharedMemorySize,
+            .max_compute_work_group_count = value.maxComputeWorkGroupCount,
+            .max_compute_work_group_invocations = value.maxComputeWorkGroupInvocations,
+            .max_compute_work_group_size = value.maxComputeWorkGroupSize,
+            .max_sampler_anisotropy = value.maxSamplerAnisotropy,
+            .max_viewports = value.maxViewports,
+            .max_viewport_dimensions = value.maxViewportDimensions,
+            .viewport_bounds_range = value.viewportBoundsRange,
+            .min_uniform_buffer_offset_alignment = value.minUniformBufferOffsetAlignment,
+            .min_storage_buffer_offset_alignment = value.minStorageBufferOffsetAlignment,
+            .non_coherent_atom_size = value.nonCoherentAtomSize,
+            .max_framebuffer_width = value.maxFramebufferWidth,
+            .max_framebuffer_height = value.maxFramebufferHeight,
+            .max_framebuffer_layers = value.maxFramebufferLayers,
+            .max_color_attachments = value.maxColorAttachments,
+            .timestamp_period_nanoseconds = value.timestampPeriod,
+        };
+    }
+};
+
+pub const SparseProperties = struct {
+    standard_2d_block_shape: bool,
+    standard_2d_multisample_block_shape: bool,
+    standard_3d_block_shape: bool,
+    aligned_mip_size: bool,
+    non_resident_strict: bool,
+
+    pub fn fromRaw(value: *const raw.VkPhysicalDeviceSparseProperties) SparseProperties {
+        return .{
+            .standard_2d_block_shape = value.residencyStandard2DBlockShape != raw.VK_FALSE,
+            .standard_2d_multisample_block_shape = value.residencyStandard2DMultisampleBlockShape != raw.VK_FALSE,
+            .standard_3d_block_shape = value.residencyStandard3DBlockShape != raw.VK_FALSE,
+            .aligned_mip_size = value.residencyAlignedMipSize != raw.VK_FALSE,
+            .non_resident_strict = value.residencyNonResidentStrict != raw.VK_FALSE,
+        };
+    }
+};
+
+pub const PhysicalDeviceProperties = struct {
+    api_version: Version,
+    driver_version_raw: u32,
+    vendor_id: u32,
+    device_id: u32,
+    device_type: PhysicalDeviceType,
+    device_name: [raw.VK_MAX_PHYSICAL_DEVICE_NAME_SIZE]u8,
+    pipeline_cache_uuid: [raw.VK_UUID_SIZE]u8,
+    limits: PhysicalDeviceLimits,
+    sparse: SparseProperties,
+
+    pub fn fromRaw(value: *const raw.VkPhysicalDeviceProperties) PhysicalDeviceProperties {
+        return .{
+            .api_version = .decode(value.apiVersion),
+            .driver_version_raw = value.driverVersion,
+            .vendor_id = value.vendorID,
+            .device_id = value.deviceID,
+            .device_type = .fromRaw(value.deviceType),
+            .device_name = value.deviceName,
+            .pipeline_cache_uuid = value.pipelineCacheUUID,
+            .limits = .fromRaw(&value.limits),
+            .sparse = .fromRaw(&value.sparseProperties),
+        };
+    }
+
+    pub fn name(properties: *const PhysicalDeviceProperties) []const u8 {
+        return boundedCString(&properties.device_name);
+    }
+
+    pub fn isDiscrete(properties: PhysicalDeviceProperties) bool {
+        return properties.device_type == .discrete_gpu;
+    }
+
+    pub fn supportsApiVersion(
+        properties: PhysicalDeviceProperties,
+        minimum: Version,
+    ) bool {
+        return properties.api_version.atLeast(minimum);
+    }
+};
+
+pub const FormatProperties = struct {
+    linear_tiling_features: FormatFeatureFlags,
+    optimal_tiling_features: FormatFeatureFlags,
+    buffer_features: FormatFeatureFlags,
+
+    pub fn fromRaw(value: raw.VkFormatProperties) FormatProperties {
+        return .{
+            .linear_tiling_features = .fromRaw(value.linearTilingFeatures),
+            .optimal_tiling_features = .fromRaw(value.optimalTilingFeatures),
+            .buffer_features = .fromRaw(value.bufferFeatures),
+        };
+    }
+};
+
+pub const ImageFormatOptions = struct {
+    format: Format,
+    image_type: ImageType,
+    tiling: ImageTiling,
+    usage: ImageUsageFlags,
+    flags: ImageCreateFlags = .empty,
+};
+
+pub const ImageFormatProperties = struct {
+    extent_max: Extent3D,
+    mip_level_count_max: u32,
+    array_layer_count_max: u32,
+    sample_counts: SampleCountFlags,
+    resource_size_max: u64,
+
+    pub fn fromRaw(value: raw.VkImageFormatProperties) ImageFormatProperties {
+        return .{
+            .extent_max = .fromRaw(value.maxExtent),
+            .mip_level_count_max = value.maxMipLevels,
+            .array_layer_count_max = value.maxArrayLayers,
+            .sample_counts = .fromRaw(value.sampleCounts),
+            .resource_size_max = value.maxResourceSize,
+        };
+    }
+};
+
 pub const PhysicalDevice = struct {
     _handle: PhysicalDeviceHandle,
     _instance_handle: InstanceHandle,
@@ -1428,10 +1734,47 @@ pub const PhysicalDevice = struct {
         return device._handle;
     }
 
-    pub fn properties(device: *const PhysicalDevice) raw.VkPhysicalDeviceProperties {
+    pub fn propertiesRaw(device: *const PhysicalDevice) raw.VkPhysicalDeviceProperties {
         var value: raw.VkPhysicalDeviceProperties = .{};
         device.dispatch.get_physical_device_properties(device._handle, &value);
         return value;
+    }
+
+    pub fn properties(device: *const PhysicalDevice) PhysicalDeviceProperties {
+        const value = device.propertiesRaw();
+        return .fromRaw(&value);
+    }
+
+    pub fn formatProperties(
+        device: *const PhysicalDevice,
+        format: Format,
+    ) FormatProperties {
+        var value: raw.VkFormatProperties = .{};
+        device.dispatch.get_physical_device_format_properties(
+            device._handle,
+            format.toRaw(),
+            &value,
+        );
+        return .fromRaw(value);
+    }
+
+    pub fn imageFormatProperties(
+        device: *const PhysicalDevice,
+        options: ImageFormatOptions,
+    ) Error!?ImageFormatProperties {
+        var value: raw.VkImageFormatProperties = .{};
+        const result = device.dispatch.get_physical_device_image_format_properties(
+            device._handle,
+            options.format.toRaw(),
+            options.image_type.toRaw(),
+            options.tiling.toRaw(),
+            options.usage.toRaw(),
+            options.flags.toRaw(),
+            &value,
+        );
+        if (result == raw.VK_ERROR_FORMAT_NOT_SUPPORTED) return null;
+        try checkSuccess(result);
+        return .fromRaw(value);
     }
 
     pub fn features(device: *const PhysicalDevice) raw.VkPhysicalDeviceFeatures {
@@ -1521,7 +1864,12 @@ pub const PhysicalDevice = struct {
         for (families, queue_properties, 0..) |*family, property, index| {
             family.* = .{
                 .index = .fromRaw(@intCast(index)),
-                .properties = property,
+                .flags = .fromRaw(property.queueFlags),
+                .queue_count = property.queueCount,
+                .timestamp_valid_bits = property.timestampValidBits,
+                .minimum_image_transfer_granularity = .fromRaw(
+                    property.minImageTransferGranularity,
+                ),
             };
         }
         return families;
@@ -1777,14 +2125,17 @@ pub const QueueCapability = enum {
 
 pub const QueueFamily = struct {
     index: QueueFamilyIndex,
-    properties: raw.VkQueueFamilyProperties,
+    flags: QueueFlags,
+    queue_count: u32,
+    timestamp_valid_bits: u32,
+    minimum_image_transfer_granularity: Extent3D,
 
     pub fn queueCount(family: QueueFamily) u32 {
-        return family.properties.queueCount;
+        return family.queue_count;
     }
 
     pub fn supports(family: QueueFamily, capability: QueueCapability) bool {
-        if (family.properties.queueCount == 0) return false;
+        if (family.queue_count == 0) return false;
         const bit: QueueBit = switch (capability) {
             .graphics => .graphics,
             .compute => .compute,
@@ -1792,7 +2143,7 @@ pub const QueueFamily = struct {
             .sparse_binding => .sparse_binding,
             .protected => .protected,
         };
-        return QueueFlags.fromRaw(family.properties.queueFlags).contains(bit);
+        return family.flags.contains(bit);
     }
 
     pub fn presentationSupport(
@@ -1803,6 +2154,54 @@ pub const QueueFamily = struct {
         return device.surfaceSupport(surface, family.index);
     }
 };
+
+pub const QueueFamilySelectionOptions = struct {
+    required: QueueFlags,
+    preferred: QueueFlags = .empty,
+};
+
+pub fn selectQueueFamily(
+    families: []const QueueFamily,
+    options: QueueFamilySelectionOptions,
+) Error!QueueFamilyIndex {
+    var selected: ?QueueFamilyIndex = null;
+    var selected_score: u32 = 0;
+    for (families) |family| {
+        if (family.queue_count == 0) continue;
+        if (!family.flags.containsAll(options.required)) continue;
+        const score: u32 = @intCast(@popCount(
+            family.flags.toRaw() & options.preferred.toRaw(),
+        ));
+        if (selected == null or score > selected_score) {
+            selected = family.index;
+            selected_score = score;
+        }
+    }
+    return selected orelse error.QueueFamilyNotFound;
+}
+
+pub fn selectQueueFamilyForSurface(
+    device: *const PhysicalDevice,
+    families: []const QueueFamily,
+    surface: *const Surface,
+    options: QueueFamilySelectionOptions,
+) Error!QueueFamilyIndex {
+    var selected: ?QueueFamilyIndex = null;
+    var selected_score: u32 = 0;
+    for (families) |family| {
+        if (family.queue_count == 0) continue;
+        if (!family.flags.containsAll(options.required)) continue;
+        if (!try family.presentationSupport(device, surface)) continue;
+        const score: u32 = @intCast(@popCount(
+            family.flags.toRaw() & options.preferred.toRaw(),
+        ));
+        if (selected == null or score > selected_score) {
+            selected = family.index;
+            selected_score = score;
+        }
+    }
+    return selected orelse error.QueueFamilyNotFound;
+}
 
 pub const MemoryTypeOptions = struct {
     type_bits: u32,
@@ -3151,6 +3550,12 @@ const InstanceDispatch = struct {
     destroy_instance: CommandFunction(raw.PFN_vkDestroyInstance),
     enumerate_physical_devices: CommandFunction(raw.PFN_vkEnumeratePhysicalDevices),
     get_physical_device_properties: CommandFunction(raw.PFN_vkGetPhysicalDeviceProperties),
+    get_physical_device_format_properties: CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceFormatProperties,
+    ),
+    get_physical_device_image_format_properties: CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceImageFormatProperties,
+    ),
     get_physical_device_features: CommandFunction(raw.PFN_vkGetPhysicalDeviceFeatures),
     get_physical_device_features2: ?CommandFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
     get_physical_device_memory_properties: CommandFunction(
@@ -3205,6 +3610,18 @@ const InstanceDispatch = struct {
                 handle,
                 raw.PFN_vkGetPhysicalDeviceProperties,
                 "vkGetPhysicalDeviceProperties",
+            ),
+            .get_physical_device_format_properties = try loadInstanceRequired(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceFormatProperties,
+                "vkGetPhysicalDeviceFormatProperties",
+            ),
+            .get_physical_device_image_format_properties = try loadInstanceRequired(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceImageFormatProperties,
+                "vkGetPhysicalDeviceImageFormatProperties",
             ),
             .get_physical_device_features = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -3964,6 +4381,9 @@ var test_acquire_result: raw.VkResult = raw.VK_SUCCESS;
 var test_acquire_image_index: u32 = 0;
 var test_present_result: raw.VkResult = raw.VK_SUCCESS;
 var test_memory_properties: raw.VkPhysicalDeviceMemoryProperties = .{};
+var test_format_properties: raw.VkFormatProperties = .{};
+var test_image_format_properties: raw.VkImageFormatProperties = .{};
+var test_image_format_result: raw.VkResult = raw.VK_SUCCESS;
 
 fn testHandle(comptime OptionalHandle: type, address: usize) NonNullHandle(OptionalHandle) {
     return @ptrFromInt(address);
@@ -4032,6 +4452,27 @@ fn testGetPhysicalDeviceMemoryProperties(
     properties: [*c]raw.VkPhysicalDeviceMemoryProperties,
 ) callconv(.c) void {
     properties.* = test_memory_properties;
+}
+
+fn testGetPhysicalDeviceFormatProperties(
+    _: raw.VkPhysicalDevice,
+    _: raw.VkFormat,
+    properties: [*c]raw.VkFormatProperties,
+) callconv(.c) void {
+    properties.* = test_format_properties;
+}
+
+fn testGetPhysicalDeviceImageFormatProperties(
+    _: raw.VkPhysicalDevice,
+    _: raw.VkFormat,
+    _: raw.VkImageType,
+    _: raw.VkImageTiling,
+    _: raw.VkImageUsageFlags,
+    _: raw.VkImageCreateFlags,
+    properties: [*c]raw.VkImageFormatProperties,
+) callconv(.c) raw.VkResult {
+    properties.* = test_image_format_properties;
+    return test_image_format_result;
 }
 
 fn testCreateImageView(
@@ -4363,6 +4804,8 @@ fn testInstance() Instance {
             .destroy_instance = testDestroyInstance,
             .enumerate_physical_devices = testFunction(raw.PFN_vkEnumeratePhysicalDevices),
             .get_physical_device_properties = testFunction(raw.PFN_vkGetPhysicalDeviceProperties),
+            .get_physical_device_format_properties = testGetPhysicalDeviceFormatProperties,
+            .get_physical_device_image_format_properties = testGetPhysicalDeviceImageFormatProperties,
             .get_physical_device_features = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures),
             .get_physical_device_features2 = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
             .get_physical_device_memory_properties = testGetPhysicalDeviceMemoryProperties,
@@ -4980,4 +5423,68 @@ test "physical device memory queries produce validated owned snapshots" {
     test_memory_properties = .{};
     try std.testing.expectEqual(@as(usize, 1), returned.types().len);
     try std.testing.expectEqual(@as(u64, 512), try returned.deviceLocalBytes());
+}
+
+test "physical device format queries preserve support and typed capabilities" {
+    test_format_properties = .{
+        .linearTilingFeatures = @intCast(raw.VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT),
+        .optimalTilingFeatures = @intCast(
+            raw.VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                raw.VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+        ),
+        .bufferFeatures = @intCast(raw.VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT),
+    };
+    test_image_format_properties = .{
+        .maxExtent = .{ .width = 4096, .height = 4096, .depth = 1 },
+        .maxMipLevels = 13,
+        .maxArrayLayers = 256,
+        .sampleCounts = @intCast(
+            raw.VK_SAMPLE_COUNT_1_BIT |
+                raw.VK_SAMPLE_COUNT_4_BIT,
+        ),
+        .maxResourceSize = 1 << 30,
+    };
+    test_image_format_result = raw.VK_SUCCESS;
+
+    var instance = testInstance();
+    defer instance.deinit();
+    const physical_device: PhysicalDevice = .{
+        ._handle = testHandle(raw.VkPhysicalDevice, 0x1100),
+        ._instance_handle = testHandle(raw.VkInstance, 0x1000),
+        .dispatch = instance.dispatch,
+    };
+
+    const format = physical_device.formatProperties(.b8g8r8a8_srgb);
+    try std.testing.expect(format.optimal_tiling_features.contains(.sampled_image));
+    try std.testing.expect(format.optimal_tiling_features.contains(.color_attachment));
+    try std.testing.expect(format.buffer_features.contains(.vertex_buffer));
+
+    const image = (try physical_device.imageFormatProperties(.{
+        .format = .b8g8r8a8_srgb,
+        .image_type = ._2d,
+        .tiling = .optimal,
+        .usage = .init(&.{ .sampled, .color_attachment }),
+    })).?;
+    try std.testing.expectEqual(@as(u32, 4096), image.extent_max.width);
+    try std.testing.expectEqual(@as(u32, 13), image.mip_level_count_max);
+    try std.testing.expect(image.sample_counts.contains(._4));
+
+    test_image_format_result = raw.VK_ERROR_FORMAT_NOT_SUPPORTED;
+    try std.testing.expect((try physical_device.imageFormatProperties(.{
+        .format = .b8g8r8a8_srgb,
+        .image_type = ._2d,
+        .tiling = .optimal,
+        .usage = .init(&.{.sampled}),
+    })) == null);
+    test_image_format_result = raw.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    try std.testing.expectError(
+        error.OutOfDeviceMemory,
+        physical_device.imageFormatProperties(.{
+            .format = .b8g8r8a8_srgb,
+            .image_type = ._2d,
+            .tiling = .optimal,
+            .usage = .init(&.{.sampled}),
+        }),
+    );
+    test_image_format_result = raw.VK_SUCCESS;
 }

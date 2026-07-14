@@ -9,11 +9,11 @@ pub fn createInstance(entry: *const vk.Entry) !vk.Instance {
     });
 }
 
-pub fn deviceTypeName(device_type: vk.raw.VkPhysicalDeviceType) []const u8 {
-    if (device_type == vk.raw.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) return "integrated GPU";
-    if (device_type == vk.raw.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return "discrete GPU";
-    if (device_type == vk.raw.VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU) return "virtual GPU";
-    if (device_type == vk.raw.VK_PHYSICAL_DEVICE_TYPE_CPU) return "CPU";
+pub fn deviceTypeName(device_type: vk.PhysicalDeviceType) []const u8 {
+    if (device_type == .integrated_gpu) return "integrated GPU";
+    if (device_type == .discrete_gpu) return "discrete GPU";
+    if (device_type == .virtual_gpu) return "virtual GPU";
+    if (device_type == .cpu) return "CPU";
     return "other";
 }
 
