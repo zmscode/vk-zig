@@ -22,8 +22,8 @@ consumer unless the user explicitly needs a standalone snapshot.
 
 ## Choose the API level
 
-- Prefer `vk.Loader`, `Entry`, `Instance`, `PhysicalDevice`, `Device`, `Queue`, `Surface`, and
-  `Swapchain`.
+- Prefer `vk.Loader`, `Entry`, `Instance`, `PhysicalDevice`, `Device`, `Queue`, `Surface`,
+  `Swapchain`, and the owned frame-resource wrappers.
 - Use generated wrapper enums such as `vk.Format`, `vk.PresentMode`, and `vk.ImageLayout` instead
   of raw integer constants. They are non-exhaustive and preserve driver values unknown to the
   vendored registry.
@@ -65,7 +65,12 @@ Enumerate queue families with `queueFamilies`, select them with `QueueFamily.sup
 `QueueFamily.presentationSupport` when a surface is involved. Use `findMemoryTypeIndex` with
 required and preferred property flags instead of manually scanning `memoryTypes`.
 
-Surface capabilities, formats, and present modes are typed. Use the allocating `surfaceFormats`
+Keep `QueueFamilyIndex`, `QueueIndex`, and `SwapchainImageIndex` distinct. Use
+`vk.QueueIndex.first` for the common first queue; do not cast one index domain into another.
+
+Surface capabilities, formats, and present modes are typed. `extent_current == null` means the
+surface extent is selected by the application, and `image_count_max == null` means Vulkan reports
+no maximum. Use the allocating `surfaceFormats`
 and `presentModes` conveniences during startup, or pair `surfaceFormatCount`/`presentModeCount`
 with `surfaceFormatsInto`/`presentModesInto` when the consumer owns fixed storage. Treat
 `error.BufferTooSmall` as a bounded retry or an application capacity error; vk-zig will not hide a
@@ -76,6 +81,17 @@ the loader. An instance configured with a typed debug messenger owns and destroy
 before destroying itself. Queues and swapchain images are non-owning and need no deinit.
 Wrapper `deinit` methods are idempotent, but using an inactive owner returns
 `error.InactiveObject`.
+
+For a frame, create `ImageView`, `CommandPool`, `Semaphore`, and `Fence` through `Device`.
+Allocate a borrowed `CommandBuffer` from its pool, enumerate borrowed images with
+`swapchain.images` or `imagesInto`, and record transitions with `imageBarrier` and
+`clearColorImage`. Use `Fence.wait(Timeout)` and handle `.success`/`.timeout`, then call
+`Queue.submit(SubmitOptions)` and `Queue.present(PresentOptions)`. Keep resources alive until GPU
+work is complete. Follow `examples/frame_resources.zig` for a complete raw-free clear frame.
+
+Prefer `beginLabel` on command buffers and `beginLabelScope` on queues when labels are enabled.
+Call the returned scope's `deinit`; its end operation is idempotent. Use `submitRaw` and the
+device's raw command-label methods only for advanced interop paths that cannot use typed wrappers.
 
 ## Use common extensions
 

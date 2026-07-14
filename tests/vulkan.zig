@@ -323,7 +323,7 @@ test "diagnostic availability recognizes names and resolves independent requests
 
 test "typed queue capabilities and memory selection avoid raw bit arithmetic" {
     const graphics_transfer: vk.QueueFamily = .{
-        .index = 3,
+        .index = .fromRaw(3),
         .properties = .{
             .queueFlags = vk.QueueFlags.init(&.{ .graphics, .transfer }).toRaw(),
             .queueCount = 2,
@@ -507,12 +507,12 @@ test "bounded property names and support checks do not allocate" {
 test "typed device options reject invalid input before dispatch" {
     const priorities = [_]f32{1.0};
     const queue: vk.DeviceQueueOptions = .{
-        .family_index = 0,
+        .family_index = .fromRaw(0),
         .priorities = &priorities,
     };
     try (vk.DeviceOptions{ .queues = &.{queue} }).validate();
     const second_queue: vk.DeviceQueueOptions = .{
-        .family_index = 1,
+        .family_index = .fromRaw(1),
         .priorities = &priorities,
     };
     try (vk.DeviceOptions{ .queues = &.{ queue, second_queue } }).validate();
@@ -527,7 +527,7 @@ test "typed device options reject invalid input before dispatch" {
     try std.testing.expectError(
         error.InvalidOptions,
         (vk.DeviceOptions{ .queues = &.{.{
-            .family_index = 0,
+            .family_index = .fromRaw(0),
             .priorities = &.{},
         }} }).validate(),
     );
@@ -539,7 +539,7 @@ test "typed device options reject invalid input before dispatch" {
 
     const valid_boundary_priorities = [_]f32{ 0.0, 1.0 };
     try (vk.DeviceOptions{ .queues = &.{.{
-        .family_index = 1,
+        .family_index = .fromRaw(1),
         .priorities = &valid_boundary_priorities,
     }} }).validate();
 
@@ -554,7 +554,7 @@ test "typed device options reject invalid input before dispatch" {
         try std.testing.expectError(
             error.InvalidOptions,
             (vk.DeviceOptions{ .queues = &.{.{
-                .family_index = 1,
+                .family_index = .fromRaw(1),
                 .priorities = &.{priority},
             }} }).validate(),
         );
@@ -645,22 +645,44 @@ test "all public wrapper declarations compile" {
     _ = &vk.Device.waitIdle;
     _ = &vk.Device.queue;
     _ = &vk.Device.setObjectName;
+    _ = &vk.Device.createImageView;
+    _ = &vk.Device.createSemaphore;
+    _ = &vk.Device.createFence;
+    _ = &vk.Device.createCommandPool;
     _ = &vk.Device.createSwapchain;
-    _ = &vk.Device.beginCommandBufferLabel;
-    _ = &vk.Device.endCommandBufferLabel;
-    _ = &vk.Device.insertCommandBufferLabel;
+    _ = &vk.Device.beginCommandBufferLabelRaw;
+    _ = &vk.Device.endCommandBufferLabelRaw;
+    _ = &vk.Device.insertCommandBufferLabelRaw;
     _ = &vk.Surface.deinit;
     _ = &vk.Instance.debugMessengerActive;
     _ = &vk.Swapchain.deinit;
+    _ = &vk.Swapchain.imageCount;
     _ = &vk.Swapchain.images;
+    _ = &vk.Swapchain.imagesInto;
     _ = &vk.Swapchain.acquireNextImage;
+    _ = &vk.ImageView.deinit;
+    _ = &vk.Semaphore.deinit;
+    _ = &vk.Fence.deinit;
+    _ = &vk.Fence.reset;
+    _ = &vk.Fence.wait;
+    _ = &vk.CommandPool.deinit;
+    _ = &vk.CommandPool.allocateCommandBuffer;
+    _ = &vk.CommandBuffer.begin;
+    _ = &vk.CommandBuffer.end;
+    _ = &vk.CommandBuffer.reset;
+    _ = &vk.CommandBuffer.imageBarrier;
+    _ = &vk.CommandBuffer.clearColorImage;
+    _ = &vk.CommandBuffer.beginLabel;
+    _ = &vk.CommandBuffer.insertLabel;
     _ = &vk.ext.debug_utils.Messenger.init;
     _ = &vk.ext.debug_utils.MessengerConfig.fromHandler;
     _ = &vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext;
     _ = &vk.Queue.submit;
+    _ = &vk.Queue.submitRaw;
     _ = &vk.Queue.waitIdle;
     _ = &vk.Queue.present;
     _ = &vk.Queue.beginLabel;
+    _ = &vk.Queue.beginLabelScope;
     _ = &vk.Queue.endLabel;
     _ = &vk.Queue.insertLabel;
 }

@@ -14,7 +14,10 @@ The audit is based on:
 - all generated command and extension descriptors; and
 - the Vulkan 1.0 through 1.4 core command set in the vendored `vk.xml` registry;
 - Bloc's aggregate game plan and all executable phase plans from Phase 00 through Phase 20; and
-- Bloc's current Phase 03 presentation implementation as a concrete consumer trace.
+- Bloc's Phase 03 presentation implementation at commit `4f8715d` as a concrete consumer trace;
+  and
+- a post-implementation comparison against vk-zig commit `5952f19`, followed by the Phase 03
+  frame-resource implementation that resolves GitHub issue #10.
 
 The goal is not to remove `vk.raw`. A complete ABI and explicit escape hatch are essential. The
 goal is that normal Vulkan rendering, compute, presentation, resource management, and diagnostics
@@ -27,7 +30,7 @@ strongest at runtime loading, instance/device discovery, basic device creation, 
 swapchain ownership, and debug messages. It does not yet cover a complete rendering or compute
 workflow.
 
-The current generated target contains:
+At the original audit snapshot, the generated target contained:
 
 - 771 Vulkan command descriptors;
 - 696 extension-name descriptors; and
@@ -39,17 +42,18 @@ have no wrapper implementation. This is not a precise percentage of user-facing 
 because some referenced commands are internal loader operations, but it accurately shows the
 scale of the missing wrapper layer.
 
-A consumer currently cannot implement any of the following without raw Vulkan:
+A consumer can now implement swapchain image enumeration, image-view creation, a clear-only
+command buffer, fence/semaphore synchronization, legacy submission, and presentation without raw
+Vulkan. It still cannot implement the following broader workflows without raw Vulkan:
 
 - buffer or image creation and memory binding;
 - memory allocation, mapping, flushing, or invalidation;
 - shader-module creation;
 - descriptor layouts, pools, sets, or updates;
 - pipeline layouts, graphics pipelines, or compute pipelines;
-- command pools, command buffers, or command recording;
-- fences, semaphores, timeline semaphores, or events;
-- synchronization barriers;
-- draw, dispatch, copy, clear, blit, or resolve commands;
+- timeline semaphores or events;
+- synchronization2 and general buffer/image/memory barriers beyond the first image-barrier API;
+- draw, dispatch, copy, blit, or resolve commands;
 - render passes, framebuffers, or dynamic rendering;
 - queries and timestamps;
 - platform surface creation; or
@@ -79,10 +83,21 @@ dependency-ordered slices:
    APIs alongside allocating conveniences. `Into` never falls back to hidden allocation and
    reports `error.BufferTooSmall` when capacity is insufficient.
 
-These changes partially address FOUND-01, FOUND-02, FOUND-03, FOUND-11, and FOUND-12. They do not
-yet close those findings across the full registry. The next implementation slice is typed command
-pools, command buffers, fences, semaphores, image views, recording, and submission for Bloc Phase
-03.
+5. **Owned frame resources:** image views, command pools, semaphores, and fences now use checked,
+   idempotent ownership wrappers with provisional-handle rollback. Command buffers and swapchain
+   images are explicitly borrowed from their owners.
+6. **Typed frame operations:** command-buffer begin/end/reset, typed image barriers, clear-color,
+   fence wait/reset, acquire, legacy submit, and present keep raw structs and pointer/count assembly
+   inside vk-zig. `submitRaw` remains an explicit escape hatch.
+7. **Semantic values and indices:** variable surface extents and unlimited maximum image counts are
+   optionals; queue-family ownership has an `.ignored` semantic case; queue-family, queue, and
+   swapchain-image indices are distinct types; timeouts use `Timeout`.
+8. **Paired scopes and test coverage:** command-buffer and queue label scopes are idempotent, and
+   the internal wrapper unit tests are now part of `zig build test` rather than dormant source-only
+   tests. `examples/frame_resources.zig` compiles the complete raw-free clear/present path.
+
+These changes close the Phase 03 portions of FOUND-07, FOUND-08, FOUND-12, FOUND-16, FOUND-17, and
+FOUND-18. The findings remain open where they deliberately cover later Vulkan functionality.
 
 ## Audit rules
 
@@ -121,21 +136,21 @@ workflows.
 | Diagnostic detection | `diagnostics.detect` accepts raw layer/extension slices | The typed diagnostic API still depends on raw enumeration output. |
 | Instance options | raw flags, `application_next`, `next`, allocation callbacks | Common extension configuration reintroduces manual `pNext`. |
 | Surface adoption | raw `VkSurfaceKHR` and allocation callbacks | Every platform surface must first be created with raw Vulkan. |
-| Swapchain options | raw format, color space, extent, usage, transform, alpha, mode, flags | Almost every swapchain choice requires raw values. |
-| Image acquisition | raw semaphore and fence handles | The typed status union is surrounded by unwrapped synchronization. |
-| Presentation | raw semaphore slices | A normal frame loop cannot remain in the wrapper. |
-| Swapchain images | `[]raw.VkImage` | Consumers immediately need raw image-view and transition commands. |
+| Swapchain options | typed format, color space, extent, usage, transform, alpha, mode, and flags; raw `pNext`/callbacks remain | Common swapchain creation is raw-free; extension chains remain an escape hatch. |
+| Image acquisition | typed semaphore/fence references, timeout, and image index | Common acquisition is raw-free with command-specific statuses. |
+| Presentation | typed semaphore references and swapchain-image index | Common presentation is raw-free. |
+| Swapchain images | allocating and caller-storage borrowed `SwapchainImage` slices | Image views and common transitions consume the borrowed wrapper. |
 | Device properties | raw properties/features/memory structures | Device selection and feature checks require raw fields and `VkBool32`. |
 | Feature chains | mutable `?*anyopaque` plus raw feature structures | Consumers build, initialize, link, and keep `pNext` nodes alive manually. |
-| Surface queries | raw capabilities, formats, and presentation modes | Choosing a valid swapchain requires raw field/constant knowledge. |
-| Queue family | public raw `VkQueueFamilyProperties` field | Capabilities are partially typed, but granularity/timestamps/flags are raw. |
+| Surface queries | typed capabilities, formats, and presentation modes | Extended capability chains still require raw access. |
+| Queue family | typed index/capabilities plus public raw `VkQueueFamilyProperties` field | Granularity, timestamps, and extended properties remain raw. |
 | Memory selection | raw physical-memory structure and property flags | Even the helper example uses `VK_MEMORY_PROPERTY_*`. |
 | Device creation | raw enabled-features pointer, flags, `next`, allocation callbacks | Enabling modern Vulkan features requires a raw feature chain. |
-| Debug labels | raw command-buffer handles | Queue labels are typed, command-buffer labels are not. |
-| Queue submission | `[]raw.VkSubmitInfo` plus raw fence | Submission remains fully C-shaped. |
+| Debug labels | typed queue and command-buffer label APIs; old device/raw methods remain | Normal labels and idempotent scopes are raw-free. |
+| Queue submission | typed waits, command buffers, signals, and fence; `submitRaw` escape hatch | Legacy submission is raw-free; submit2 remains open. |
 | Debug messages | raw public message fields and raw object/label slices | Simple logging is typed; structured inspection is not. |
-| Object naming | raw handles for every object not already wrapped | Most Vulkan objects can only be named through raw union variants. |
-| Result mapping | `checkSuccess(raw.VkResult)` | Necessary for all manually loaded commands and incomplete for all statuses. |
+| Object naming | typed variants for frame-resource wrappers and raw variants for unwrapped objects | The Phase 03 object set is raw-free; later object wrappers remain open. |
+| Result mapping | command-specific fence/acquire/present statuses plus `checkSuccess` for raw calls | Covered operations preserve normal statuses; future wrappers need the same pattern. |
 
 ## Cross-cutting architecture gaps
 
@@ -518,6 +533,73 @@ parallel command table.
 
 Priority: **P0** for core/WSI methods; **P1** for common extensions.
 
+### FOUND-17: Semantic sentinel values remain raw protocol knowledge
+
+Vulkan frequently encodes a distinct semantic state as an otherwise ordinary integer. Typed enums
+and structs remove the C type names, but they do not make these values idiomatic when consumers
+must still remember protocol rules such as:
+
+- `currentExtent.width == maxInt(u32)` means the surface extent is selected by the application;
+- `maxImageCount == 0` means there is no advertised maximum;
+- `VK_QUEUE_FAMILY_IGNORED` means no queue-family ownership transfer;
+- `VK_WHOLE_SIZE` means the remainder of a memory range;
+- `VK_REMAINING_MIP_LEVELS` and `VK_REMAINING_ARRAY_LAYERS` mean the rest of a subresource range;
+  and
+- `maxInt(u64)` means an infinite timeout in several commands.
+
+Bloc has to recognize the first two rules in its surface policy and spell the ignored-family
+constant four times in two image barriers. These are not renderer preferences; they are Vulkan
+encoding rules and belong at the wrapper boundary.
+
+Recommended design:
+
+- normalize optional surface values, for example `extent_current: ?Extent2D` and
+  `image_count_max: ?u32`, while preserving raw access for diagnostics;
+- represent barrier ownership as `.ignored` or `.transfer { .source, .destination }` rather than
+  two uncorrelated integers;
+- use optionals or small tagged unions for whole/remaining ranges and infinite timeouts; and
+- generate named semantic conversions for registry constants that are not enum or flag members.
+
+Acceptance criteria:
+
+- normal wrapper options never require a `VK_*` sentinel constant;
+- paired sentinel fields cannot disagree, such as only one dimension of a variable extent; and
+- raw values round-trip through an explicit advanced conversion.
+
+Priority: **P0** for barriers, surface capabilities, ranges, and timeouts; **P1** for specialty
+sentinels.
+
+### FOUND-18: Paired command scopes lack idempotent typed tokens
+
+Several Vulkan operations form begin/end scopes whose end command is infallible once dispatch and
+handle validity have been established: debug labels, render passes, dynamic rendering, queries,
+conditional rendering, transform feedback, and video coding. A pair of unrelated methods makes
+error-path cleanup the consumer's responsibility.
+
+Bloc's command-buffer label path demonstrates the failure mode. It installs an `errdefer` that
+ends the label, explicitly ends the label on the success path, and then calls the fallible command-
+buffer finalizer. If finalization fails, the still-armed `errdefer` ends the same label a second
+time. A consumer can add a boolean manually, but that is exactly the state a Zig scope token should
+own.
+
+Recommended design:
+
+```zig
+var label = try command_buffer.beginLabel(.{ .name = "frame" });
+defer label.deinit();
+
+// Recording can return at any point. `deinit` ends the label at most once.
+try command_buffer.clearColorImage(...);
+label.end(); // Optional early end; disarms `deinit`.
+```
+
+The token should store the already-resolved end command, be non-owning, make `end`/`deinit`
+idempotent, and not hide command-buffer recording or submission errors. Fallible pairs such as
+command-buffer `begin`/`end` need an explicit recording-state object rather than pretending that a
+destructor can propagate the final error.
+
+Priority: **P1** for debug labels and common recording scopes; **P2** for specialty extensions.
+
 ## Functionality-by-functionality audit
 
 ### 0. Build integration and platform declaration selection
@@ -751,11 +833,11 @@ Raw boundary:
 - `QueueFamily.properties` is raw.
 - Timestamp validity, transfer granularity, video capabilities, optical-flow capabilities, and
   global priorities require raw access.
-- `family_index` remains a plain `u32`, so it is easy to mix with queue indices or image indices.
+- Extended queue-family properties still live inside the raw property structure.
 
 Recommended design:
 
-- distinct `QueueFamilyIndex` and `QueueIndex` non-exhaustive integer enums;
+- keep the implemented distinct `QueueFamilyIndex` and `QueueIndex` types at every new boundary;
 - typed `QueueCapabilities` flags;
 - direct accessors for timestamp bits and minimum transfer granularity;
 - a generated property-chain query for extended queue properties; and
@@ -1655,6 +1737,59 @@ The Phase 02 context also still needs raw types for the RGFW surface type bounda
 booleans, physical memory heaps, memory flags, and physical-device type. The surface handle is a
 legitimate FFI boundary; the other uses should be removed by typed vk-zig views.
 
+### Post-implementation source re-audit
+
+The Bloc source was scanned again at commit `4f8715d` after the first vk-zig implementation slice
+landed at `5952f19`. Bloc is still pinned to vk-zig `451064c`, so a raw reference in Bloc is not
+automatically evidence that the current wrapper still lacks that API.
+
+The lexical inventory is:
+
+- 113 `vk.raw` references across the entire Bloc source tree;
+- 100 production references and 13 test-only references;
+- 90 production references in `Presentation.zig` and 10 in `VulkanContext.zig`;
+- 16 manually required device commands, mirrored by 16 local PFN type aliases; and
+- 11 manually initialized Vulkan create, submit, barrier, range, or clear structures in the
+  production presentation path.
+
+No other Bloc Zig source file imports a raw Vulkan type, value, or command. In particular,
+`diagnostics.zig`, `DeviceSelector.zig`, and `SurfacePolicy.zig` are raw-free. The latter two are
+useful evidence of policy that should remain in Bloc rather than move into the base wrapper.
+
+| Source cluster | Production `vk.raw` references | Classification against vk-zig `5952f19` |
+| --- | ---: | --- |
+| RGFW surface creation in `VulkanContext.zig` | 1 raw type plus one `rawHandle()` call | Intentional checked FFI boundary. Keep `adoptSurface`; a window adapter could hide the type spelling but is not required for wrapper completeness. |
+| Device features, properties, type, and memory heaps in `VulkanContext.zig` | 9 | Still-open gaps in typed physical-device views, Zig booleans, memory heaps, and semantic index types. Covered by FOUND-01 through FOUND-03 and Sections 6, 8, 9, and 11. |
+| Command-pool setup, fence/semaphore storage, reset, and legacy submission | 16 | Resolved in vk-zig: owned command/synchronization wrappers, typed legacy submission, and internal dispatch are implemented. Bloc still needs to migrate. |
+| Swapchain recreation options | 1 | Already removed by the current typed `ImageUsageFlags` and typed `SwapchainOptions`; this remains only because Bloc is pinned to `451064c`. |
+| Command recording and the private dispatch table | 26 | Resolved for the Phase 03 clear path: typed command buffers, begin/end/reset, image barriers, clear color, labels, and internal dispatch are implemented. Later draw/copy commands remain separate roadmap work. |
+| Borrowed swapchain images and owned image views | 13 | Resolved: `SwapchainImage`, `ImageView`, rollback, typed naming, and `swapchain.imagesInto` are implemented. |
+| Surface capability, format, mode, transform, alpha, and usage selection | 19 | Resolved at the wrapper boundary, including optional variable extent and unlimited maximum image count. Preference ordering remains Bloc policy. |
+| Semaphore/fence creation and fence wait result handling | 15 | Resolved for binary synchronization: owned primitives, typed wait/reset status, `Timeout`, and device-lost mapping are implemented. Timeline synchronization remains later work. |
+| Image-view rollback test | 13 test-only | Not a separate public API requirement. The raw C mock exists because Bloc owns a private PFN table; it disappears when destruction and rollback live in `ImageView`/swapchain helpers. |
+
+This comparison changes the interpretation of the original count: the raw WSI constants are now
+migration debt in Bloc, while the command/resource/synchronization references remain current
+vk-zig gaps. The original audit did not miss a major Phase 03 object or command category.
+
+It did miss or understate these granular requirements:
+
+The five granular Phase 03 requirements found by the source review are now implemented:
+
+1. **Semantic sentinel normalization (FOUND-17):** optional surface maximum/extent values and
+   semantic queue-family ownership.
+2. **Idempotent paired scopes (FOUND-18):** typed command-buffer and queue label scopes.
+3. **Caller-storage swapchain image enumeration:** `Swapchain.imagesInto`.
+4. **Result mapping per operation:** typed fence wait, acquire, and present outcomes; submit keeps
+   its success/error contract.
+5. **Typed indices at every boundary:** `QueueFamilyIndex`, `QueueIndex`, and
+   `SwapchainImageIndex`.
+
+The source review also found one concrete Bloc-side correctness issue rather than a vk-zig API
+category: `Presentation.recordClear` can end a debug label twice if the explicit label end succeeds
+and `vkEndCommandBuffer` then fails. Bloc should disarm that cleanup today; FOUND-18 describes the
+wrapper API that should make the mistake structurally difficult.
+
 ### Phase-to-feature requirement matrix
 
 | Bloc phase | Vulkan work required | vk-zig support required for a raw-free consumer | Ownership of higher policy |
@@ -1679,8 +1814,8 @@ object introduced earlier.
 
 ### Requirements the initial audit underemphasized
 
-The phase-plan review found these additional general requirements. They are now represented by
-FOUND-12 through FOUND-16:
+The phase-plan and source reviews found these additional general requirements. They are now
+represented by FOUND-12 through FOUND-18:
 
 1. **Caller-provided enumeration storage.** Bloc permits temporary allocation during startup but
    deliberately uses fixed-capacity state for frame and renderer paths. Both allocating and `Into`
@@ -1697,6 +1832,11 @@ FOUND-12 through FOUND-16:
 5. **Generated internal dispatch coverage.** The need for a 16-command private table in the first
    presentation milestone proves that command descriptors alone are not an ergonomic dispatch
    layer.
+6. **Semantic sentinel normalization.** Magic integer encodings for optional extents, unlimited
+   counts, ignored ownership, remaining ranges, whole sizes, and infinite waits belong at the raw
+   conversion boundary.
+7. **Idempotent paired scopes.** Debug labels and other infallible begin/end recording scopes need
+   tokens that own and disarm their active state across Zig error returns.
 
 The plans also sharpen several already-recorded requirements:
 
@@ -1742,7 +1882,7 @@ over the thin wrapper:
 - `RetirementQueue(T, capacity)` for releasing caller-supplied destruction records after a fence or
   timeline value;
 - `MemoryTypeSelector` with named common requirements and explicit fallback reporting;
-- scoped command-buffer debug labels;
+- idempotent scoped command-buffer debug-label tokens;
 - a one-time command helper that still makes the queue wait/completion policy explicit; and
 - pipeline-cache load/store helpers that operate on caller-owned bytes or streams.
 
@@ -1804,7 +1944,8 @@ The concrete Phase 03 acceptance test is stronger than a synthetic unit test:
 3. Generate extension metadata and command aliases.
 4. Generate structure-chain metadata.
 5. Expand command-specific result/status mapping infrastructure.
-6. Add compile-time equivalence tests against raw constants.
+6. Generate or hand-model semantic sentinel conversions for common ranges, indices, and timeouts.
+7. Add compile-time equivalence tests against raw constants.
 
 Exit condition: common options can be defined without raw constants, and later wrappers do not
 need hand-written enum/flag conversions.
@@ -1818,6 +1959,7 @@ need hand-written enum/flag conversions.
 5. Pipeline layouts and compute pipelines.
 6. Command pools/buffers and dispatch.
 7. Fences, semaphores, synchronization2, and submit2.
+8. Idempotent scope tokens for debug labels and applicable recording scopes.
 
 Exit condition: a compute shader can upload input, dispatch, wait, invalidate/read back output, and
 clean up without `vk.raw`.
@@ -1832,6 +1974,7 @@ clean up without `vk.raw`.
 6. Draw/bind/dynamic-state commands.
 7. Transfer commands and image transitions.
 8. Typed acquire/submit/present frame loop.
+9. Optional current extent, optional maximum image count, and caller-storage swapchain images.
 
 Exit condition: a validated resize-aware textured triangle contains no `vk.raw` references.
 

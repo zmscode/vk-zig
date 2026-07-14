@@ -260,6 +260,9 @@ fn addTestStep(
     optimize: std.builtin.OptimizeMode,
     vulkan: *std.Build.Module,
 ) void {
+    const unit_tests = b.addTest(.{ .root_module = vulkan });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/vulkan.zig"),
@@ -270,6 +273,7 @@ fn addTestStep(
     });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Build and run the Vulkan binding tests");
+    test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_tests.step);
 
     const invalid_function = addCompileFailureTest(
@@ -371,6 +375,7 @@ const examples = [_]Example{
     .{ .name = "platform", .path = "examples/platform.zig" },
     .{ .name = "capabilities", .path = "examples/capabilities.zig" },
     .{ .name = "debug-utils", .path = "examples/debug_utils.zig" },
+    .{ .name = "frame-resources", .path = "examples/frame_resources.zig" },
 };
 
 fn addUpdateStep(

@@ -498,6 +498,7 @@ fn writeEnumFooter(writer: *std.Io.Writer, raw_name: []const u8) !void {
 fn writeHeader(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\// Generated from the Vulkan registry. Do not edit.
+        \\const std = @import("std");
         \\const raw = @import("vulkan_raw");
         \\
         \\pub fn Flags(comptime Raw: type, comptime Bit: type) type {
@@ -613,8 +614,10 @@ fn writeValueTypes(writer: *std.Io.Writer) !void {
         \\
         \\pub const SurfaceCapabilities = struct {
         \\    image_count_min: u32,
-        \\    image_count_max: u32,
-        \\    extent_current: Extent2D,
+        \\    /// `null` means the surface does not advertise a maximum image count.
+        \\    image_count_max: ?u32,
+        \\    /// `null` means the application chooses an extent within `extent_min` and `extent_max`.
+        \\    extent_current: ?Extent2D,
         \\    extent_min: Extent2D,
         \\    extent_max: Extent2D,
         \\    image_array_layer_count_max: u32,
@@ -624,10 +627,16 @@ fn writeValueTypes(writer: *std.Io.Writer) !void {
         \\    image_usage_supported: ImageUsageFlags,
         \\
         \\    pub fn fromRaw(value: raw.VkSurfaceCapabilitiesKHR) SurfaceCapabilities {
+        \\        const variable_width = value.currentExtent.width == std.math.maxInt(u32);
+        \\        const variable_height = value.currentExtent.height == std.math.maxInt(u32);
+        \\        std.debug.assert(variable_width == variable_height);
         \\        return .{
         \\            .image_count_min = value.minImageCount,
-        \\            .image_count_max = value.maxImageCount,
-        \\            .extent_current = .fromRaw(value.currentExtent),
+        \\            .image_count_max = if (value.maxImageCount == 0)
+        \\                null
+        \\            else
+        \\                value.maxImageCount,
+        \\            .extent_current = if (variable_width) null else .fromRaw(value.currentExtent),
         \\            .extent_min = .fromRaw(value.minImageExtent),
         \\            .extent_max = .fromRaw(value.maxImageExtent),
         \\            .image_array_layer_count_max = value.maxImageArrayLayers,

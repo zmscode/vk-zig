@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer device.deinit();
 
-    const queue = try device.queue(family.index, 0);
+    const queue = try device.queue(family.index, .first);
     try queue.waitIdle();
     try device.waitIdle();
 

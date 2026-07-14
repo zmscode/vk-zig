@@ -24,6 +24,7 @@ Each example also has a named run step:
 | `platform.zig` | `zig build run-platform` | Target-specific declaration generation |
 | `capabilities.zig` | `zig build run-capabilities` | Allocation-free extension/layer support checks |
 | `debug_utils.zig` | `zig build run-debug-utils` | Typed, instance-owned `VK_EXT_debug_utils` messenger |
+| `frame_resources.zig` | `zig build run-frame-resources` | Raw-free image-view, command, synchronization, acquire, submit, and present flow |
 
 Except for `platform.zig`, running these programs requires a discoverable Vulkan loader and, for
 device examples, a working Vulkan implementation. On macOS, install MoltenVK or the Vulkan SDK.

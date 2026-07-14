@@ -105,7 +105,7 @@ var device = try physical_device.createDevice(.{
 });
 defer device.deinit();
 
-const queue = try device.queue(graphics_family, 0);
+const queue = try device.queue(graphics_family, .first);
 ```
 
 Generated names remove repeated string literals, while `ExtensionSet` combines platform/windowing
@@ -182,6 +182,8 @@ var surface = try instance.adoptSurface(raw_surface, allocation_callbacks);
 defer surface.deinit();
 const can_present = try physical_device.surfaceSupport(&surface, graphics_family);
 const capabilities = try physical_device.surfaceCapabilities(&surface);
+const extent = capabilities.extent_current orelse chooseWindowExtent(capabilities);
+const image_count_max = capabilities.image_count_max; // null means no advertised maximum
 const formats = try physical_device.surfaceFormats(gpa, &surface);
 defer gpa.free(formats);
 const present_modes = try physical_device.presentModes(gpa, &surface);
@@ -212,7 +214,12 @@ var swapchain = try device.createSwapchain(.{
 });
 defer swapchain.deinit();
 
-const acquired = try swapchain.acquireNextImage(.{ .semaphore = image_available });
+var image_available = try device.createSemaphore(.{});
+defer image_available.deinit();
+var render_finished = try device.createSemaphore(.{});
+defer render_finished.deinit();
+
+const acquired = try swapchain.acquireNextImage(.{ .semaphore = &image_available });
 const image_index = switch (acquired) {
     .success, .suboptimal => |index| index,
     .timeout, .not_ready => return,
@@ -221,10 +228,39 @@ const image_index = switch (acquired) {
 const status = try queue.present(.{
     .swapchain = &swapchain,
     .image_index = image_index,
-    .wait_semaphores = &.{render_finished},
+    .wait_semaphores = &.{&render_finished},
 });
 if (status != .success) try recreateSwapchain();
 ```
+
+The frame-resource layer also owns image views, command pools, semaphores, and fences. Command
+buffers are borrowed from their pool, and swapchain images are borrowed from their swapchain.
+Normal clear/submit/present code does not need `vk.raw`:
+
+```zig
+var command_pool = try device.createCommandPool(.{
+    .family_index = graphics_family,
+    .flags = .init(&.{.reset_command_buffer}),
+});
+defer command_pool.deinit();
+var command_buffer = try command_pool.allocateCommandBuffer(.{});
+var frame_finished = try device.createFence(.{ .signaled = true });
+defer frame_finished.deinit();
+
+try command_buffer.begin(.{ .flags = .init(&.{.one_time_submit}) });
+// imageBarrier and clearColorImage accept typed stages, access, layouts, and ranges.
+try command_buffer.end();
+try frame_finished.reset();
+try queue.submit(.{
+    .command_buffers = &.{&command_buffer},
+    .signals = &.{&render_finished},
+    .fence = &frame_finished,
+});
+```
+
+See `examples/frame_resources.zig` for the complete undefined → transfer-destination → present
+transition, clear, acquire, submit, and present sequence. `submitRaw` remains available as an
+explicit advanced escape hatch.
 
 The debug-utils wrapper owns Vulkan's C callback trampoline, create-info chain, extension loading,
 and messenger lifetime. Application handlers receive a typed `Message` and do not need `vk.raw`:

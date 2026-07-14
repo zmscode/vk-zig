@@ -68,6 +68,84 @@ pub const ClearColor = types.ClearColor;
 pub const ClearDepthStencil = types.ClearDepthStencil;
 pub const ClearValue = types.ClearValue;
 
+/// Index of a queue family reported by a physical device.
+pub const QueueFamilyIndex = enum(u32) {
+    _,
+
+    pub fn fromRaw(value: u32) QueueFamilyIndex {
+        return @enumFromInt(value);
+    }
+
+    pub fn toRaw(index: QueueFamilyIndex) u32 {
+        return @intFromEnum(index);
+    }
+};
+
+/// Index of a queue within a queue family.
+pub const QueueIndex = enum(u32) {
+    first = 0,
+    _,
+
+    pub fn fromRaw(value: u32) QueueIndex {
+        return @enumFromInt(value);
+    }
+
+    pub fn toRaw(index: QueueIndex) u32 {
+        return @intFromEnum(index);
+    }
+};
+
+/// Index of a borrowed image owned by a swapchain.
+pub const SwapchainImageIndex = enum(u32) {
+    _,
+
+    pub fn fromRaw(value: u32) SwapchainImageIndex {
+        return @enumFromInt(value);
+    }
+
+    pub fn toRaw(index: SwapchainImageIndex) u32 {
+        return @intFromEnum(index);
+    }
+};
+
+/// Vulkan timeout without exposing the `maxInt(u64)` infinite-time sentinel.
+pub const Timeout = union(enum) {
+    infinite,
+    nanoseconds: u64,
+
+    pub const immediate: Timeout = .{ .nanoseconds = 0 };
+
+    fn toRaw(timeout: Timeout) u64 {
+        return switch (timeout) {
+            .infinite => std.math.maxInt(u64),
+            .nanoseconds => |value| value,
+        };
+    }
+};
+
+/// Queue-family ownership encoded without `VK_QUEUE_FAMILY_IGNORED` at call sites.
+pub const QueueFamilyOwnership = union(enum) {
+    ignored,
+    transfer: struct {
+        source: QueueFamilyIndex,
+        destination: QueueFamilyIndex,
+    },
+
+    fn sourceRaw(ownership: QueueFamilyOwnership) u32 {
+        return switch (ownership) {
+            .ignored => raw.VK_QUEUE_FAMILY_IGNORED,
+            .transfer => |transfer| transfer.source.toRaw(),
+        };
+    }
+
+    fn destinationRaw(ownership: QueueFamilyOwnership) u32 {
+        return switch (ownership) {
+            .ignored => raw.VK_QUEUE_FAMILY_IGNORED,
+            .transfer => |transfer| transfer.destination.toRaw(),
+        };
+    }
+};
+
 pub const Layer = struct {
     name: [:0]const u8,
 };
@@ -84,6 +162,8 @@ const enumeration_attempt_count_max = 4;
 const enumeration_item_count_max = 4096;
 const name_count_max = 256;
 const device_queue_count_max = 64;
+const submission_item_count_max = 64;
+const swapchain_image_count_max = 4096;
 
 const InstanceHandle = NonNullHandle(raw.VkInstance);
 const PhysicalDeviceHandle = NonNullHandle(raw.VkPhysicalDevice);
@@ -92,6 +172,12 @@ const QueueHandle = NonNullHandle(raw.VkQueue);
 const SurfaceHandle = NonNullHandle(raw.VkSurfaceKHR);
 const DebugMessengerHandle = NonNullHandle(raw.VkDebugUtilsMessengerEXT);
 const SwapchainHandle = NonNullHandle(raw.VkSwapchainKHR);
+const ImageHandle = NonNullHandle(raw.VkImage);
+const ImageViewHandle = NonNullHandle(raw.VkImageView);
+const CommandPoolHandle = NonNullHandle(raw.VkCommandPool);
+const CommandBufferHandle = NonNullHandle(raw.VkCommandBuffer);
+const SemaphoreHandle = NonNullHandle(raw.VkSemaphore);
+const FenceHandle = NonNullHandle(raw.VkFence);
 
 pub const Error = error{
     OutOfHostMemory,
@@ -752,6 +838,361 @@ pub const Surface = struct {
     }
 };
 
+/// A non-owning image whose lifetime is controlled by its swapchain.
+pub const SwapchainImage = struct {
+    _handle: ImageHandle,
+    _device_handle: DeviceHandle,
+    _swapchain_handle: SwapchainHandle,
+    index: SwapchainImageIndex,
+
+    /// Returns the valid raw image handle for explicit FFI integration.
+    pub fn rawHandle(image: SwapchainImage) raw.VkImage {
+        return image._handle;
+    }
+};
+
+pub const ImageViewOptions = struct {
+    image: *const SwapchainImage,
+    format: Format,
+    view_type: ImageViewType = ._2d,
+    components: ComponentMapping = .{},
+    subresource_range: ImageSubresourceRange,
+};
+
+/// An owned image view. Destroy it before its parent device and source image.
+pub const ImageView = struct {
+    _handle: ?ImageViewHandle,
+    _device_handle: DeviceHandle,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
+
+    pub fn deinit(view: *ImageView) void {
+        const handle = view._handle orelse return;
+        view.destroy_image_view(view._device_handle, handle, view.allocation_callbacks);
+        view._handle = null;
+    }
+
+    /// Returns the live raw handle for explicit FFI integration.
+    pub fn rawHandle(view: *const ImageView) Error!raw.VkImageView {
+        return view._handle orelse error.InactiveObject;
+    }
+};
+
+pub const SemaphoreOptions = struct {};
+
+/// An owned binary semaphore.
+pub const Semaphore = struct {
+    _handle: ?SemaphoreHandle,
+    _device_handle: DeviceHandle,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    destroy_semaphore: CommandFunction(raw.PFN_vkDestroySemaphore),
+
+    pub fn deinit(semaphore: *Semaphore) void {
+        const handle = semaphore._handle orelse return;
+        semaphore.destroy_semaphore(
+            semaphore._device_handle,
+            handle,
+            semaphore.allocation_callbacks,
+        );
+        semaphore._handle = null;
+    }
+
+    /// Returns the live raw handle for explicit FFI integration.
+    pub fn rawHandle(semaphore: *const Semaphore) Error!raw.VkSemaphore {
+        return semaphore._handle orelse error.InactiveObject;
+    }
+};
+
+pub const FenceOptions = struct {
+    signaled: bool = false,
+};
+
+pub const FenceWaitStatus = enum {
+    success,
+    timeout,
+};
+
+/// An owned fence with operation-specific wait and reset behavior.
+pub const Fence = struct {
+    _handle: ?FenceHandle,
+    _device_handle: DeviceHandle,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    destroy_fence: CommandFunction(raw.PFN_vkDestroyFence),
+    reset_fences: CommandFunction(raw.PFN_vkResetFences),
+    wait_for_fences: CommandFunction(raw.PFN_vkWaitForFences),
+
+    pub fn deinit(fence: *Fence) void {
+        const handle = fence._handle orelse return;
+        fence.destroy_fence(fence._device_handle, handle, fence.allocation_callbacks);
+        fence._handle = null;
+    }
+
+    pub fn reset(fence: *const Fence) Error!void {
+        const handle = fence._handle orelse return error.InactiveObject;
+        try checkSuccess(fence.reset_fences(fence._device_handle, 1, @ptrCast(&handle)));
+    }
+
+    pub fn wait(fence: *const Fence, timeout: Timeout) Error!FenceWaitStatus {
+        const handle = fence._handle orelse return error.InactiveObject;
+        const result = fence.wait_for_fences(
+            fence._device_handle,
+            1,
+            @ptrCast(&handle),
+            raw.VK_TRUE,
+            timeout.toRaw(),
+        );
+        if (result == raw.VK_SUCCESS) return .success;
+        if (result == raw.VK_TIMEOUT) return .timeout;
+        try checkSuccess(result);
+        unreachable;
+    }
+
+    /// Returns the live raw handle for explicit FFI integration.
+    pub fn rawHandle(fence: *const Fence) Error!raw.VkFence {
+        return fence._handle orelse error.InactiveObject;
+    }
+};
+
+pub const CommandPoolOptions = struct {
+    family_index: QueueFamilyIndex,
+    flags: CommandPoolCreateFlags = .empty,
+};
+
+pub const CommandBufferOptions = struct {
+    level: CommandBufferLevel = .primary,
+};
+
+pub const CommandBufferBeginOptions = struct {
+    flags: CommandBufferUsageFlags = .empty,
+};
+
+pub const ImageBarrierOptions = struct {
+    source_stage: PipelineStageFlags,
+    destination_stage: PipelineStageFlags,
+    source_access: AccessFlags = .empty,
+    destination_access: AccessFlags = .empty,
+    old_layout: ImageLayout,
+    new_layout: ImageLayout,
+    ownership: QueueFamilyOwnership = .ignored,
+    image: *const SwapchainImage,
+    subresource_range: ImageSubresourceRange,
+};
+
+pub const ClearColorImageOptions = struct {
+    image: *const SwapchainImage,
+    layout: ImageLayout,
+    color: ClearColor,
+    subresource_range: ImageSubresourceRange,
+};
+
+const CommandBufferState = enum {
+    initial,
+    recording,
+    executable,
+};
+
+/// A command buffer allocated from and owned by a command pool.
+pub const CommandBuffer = struct {
+    _handle: CommandBufferHandle,
+    _device_handle: DeviceHandle,
+    _pool_handle: CommandPoolHandle,
+    can_reset: bool,
+    state: CommandBufferState = .initial,
+    begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
+    end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
+    reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
+    cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
+    cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
+    cmd_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdBeginDebugUtilsLabelEXT),
+    cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
+    cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
+
+    pub fn begin(buffer: *CommandBuffer, options: CommandBufferBeginOptions) Error!void {
+        if (buffer.state != .initial) return error.InvalidOptions;
+        const begin_info: raw.VkCommandBufferBeginInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = options.flags.toRaw(),
+        };
+        try checkSuccess(buffer.begin_command_buffer(buffer._handle, &begin_info));
+        buffer.state = .recording;
+    }
+
+    pub fn end(buffer: *CommandBuffer) Error!void {
+        if (buffer.state != .recording) return error.InvalidOptions;
+        try checkSuccess(buffer.end_command_buffer(buffer._handle));
+        buffer.state = .executable;
+    }
+
+    pub fn reset(buffer: *CommandBuffer, release_resources: bool) Error!void {
+        if (buffer.state == .recording) return error.InvalidOptions;
+        if (!buffer.can_reset) return error.InvalidOptions;
+        const flags: raw.VkCommandBufferResetFlags = if (release_resources)
+            @intCast(raw.VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT)
+        else
+            0;
+        try checkSuccess(buffer.reset_command_buffer(buffer._handle, flags));
+        buffer.state = .initial;
+    }
+
+    pub fn imageBarrier(buffer: *const CommandBuffer, options: ImageBarrierOptions) Error!void {
+        if (buffer.state != .recording) return error.InvalidOptions;
+        if (options.image._device_handle != buffer._device_handle) return error.InvalidHandle;
+        const barrier: raw.VkImageMemoryBarrier = .{
+            .sType = raw.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = options.source_access.toRaw(),
+            .dstAccessMask = options.destination_access.toRaw(),
+            .oldLayout = options.old_layout.toRaw(),
+            .newLayout = options.new_layout.toRaw(),
+            .srcQueueFamilyIndex = options.ownership.sourceRaw(),
+            .dstQueueFamilyIndex = options.ownership.destinationRaw(),
+            .image = options.image._handle,
+            .subresourceRange = options.subresource_range.toRaw(),
+        };
+        buffer.cmd_pipeline_barrier(
+            buffer._handle,
+            options.source_stage.toRaw(),
+            options.destination_stage.toRaw(),
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            &barrier,
+        );
+    }
+
+    pub fn clearColorImage(
+        buffer: *const CommandBuffer,
+        options: ClearColorImageOptions,
+    ) Error!void {
+        if (buffer.state != .recording) return error.InvalidOptions;
+        if (options.image._device_handle != buffer._device_handle) return error.InvalidHandle;
+        const color = options.color.toRaw();
+        const subresource_range = options.subresource_range.toRaw();
+        buffer.cmd_clear_color_image(
+            buffer._handle,
+            options.image._handle,
+            options.layout.toRaw(),
+            &color,
+            1,
+            &subresource_range,
+        );
+    }
+
+    pub fn beginLabel(
+        buffer: *const CommandBuffer,
+        options: ext.debug_utils.LabelOptions,
+    ) Error!CommandBufferLabelScope {
+        if (buffer.state != .recording) return error.InvalidOptions;
+        const begin_label = buffer.cmd_begin_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        const end_label = buffer.cmd_end_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        const label = options.createInfo();
+        begin_label(buffer._handle, &label);
+        return .{ .command_buffer = buffer._handle, .end_label = end_label };
+    }
+
+    pub fn insertLabel(
+        buffer: *const CommandBuffer,
+        options: ext.debug_utils.LabelOptions,
+    ) Error!void {
+        if (buffer.state != .recording) return error.InvalidOptions;
+        const insert_label = buffer.cmd_insert_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        const label = options.createInfo();
+        insert_label(buffer._handle, &label);
+    }
+
+    /// Returns the valid raw handle for explicit FFI integration.
+    pub fn rawHandle(buffer: *const CommandBuffer) raw.VkCommandBuffer {
+        return buffer._handle;
+    }
+};
+
+/// An idempotent command-buffer label scope.
+pub const CommandBufferLabelScope = struct {
+    command_buffer: CommandBufferHandle,
+    end_label: CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
+    active: bool = true,
+
+    pub fn end(scope: *CommandBufferLabelScope) void {
+        if (!scope.active) return;
+        scope.end_label(scope.command_buffer);
+        scope.active = false;
+    }
+
+    pub fn deinit(scope: *CommandBufferLabelScope) void {
+        scope.end();
+    }
+};
+
+/// An owned command pool. Allocated command buffers are invalid after `deinit`.
+pub const CommandPool = struct {
+    _handle: ?CommandPoolHandle,
+    _device_handle: DeviceHandle,
+    buffers_can_reset: bool,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    destroy_command_pool: CommandFunction(raw.PFN_vkDestroyCommandPool),
+    allocate_command_buffers: CommandFunction(raw.PFN_vkAllocateCommandBuffers),
+    begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
+    end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
+    reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
+    cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
+    cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
+    cmd_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdBeginDebugUtilsLabelEXT),
+    cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
+    cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
+
+    pub fn deinit(pool: *CommandPool) void {
+        const handle = pool._handle orelse return;
+        pool.destroy_command_pool(pool._device_handle, handle, pool.allocation_callbacks);
+        pool._handle = null;
+    }
+
+    pub fn allocateCommandBuffer(
+        pool: *const CommandPool,
+        options: CommandBufferOptions,
+    ) Error!CommandBuffer {
+        const pool_handle = pool._handle orelse return error.InactiveObject;
+        const allocate_info: raw.VkCommandBufferAllocateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = pool_handle,
+            .level = options.level.toRaw(),
+            .commandBufferCount = 1,
+        };
+        var handle: raw.VkCommandBuffer = null;
+        try checkSuccess(pool.allocate_command_buffers(
+            pool._device_handle,
+            &allocate_info,
+            &handle,
+        ));
+        return .{
+            ._handle = handle orelse return error.InvalidHandle,
+            ._device_handle = pool._device_handle,
+            ._pool_handle = pool_handle,
+            .can_reset = pool.buffers_can_reset,
+            .begin_command_buffer = pool.begin_command_buffer,
+            .end_command_buffer = pool.end_command_buffer,
+            .reset_command_buffer = pool.reset_command_buffer,
+            .cmd_pipeline_barrier = pool.cmd_pipeline_barrier,
+            .cmd_clear_color_image = pool.cmd_clear_color_image,
+            .cmd_begin_debug_utils_label_ext = pool.cmd_begin_debug_utils_label_ext,
+            .cmd_end_debug_utils_label_ext = pool.cmd_end_debug_utils_label_ext,
+            .cmd_insert_debug_utils_label_ext = pool.cmd_insert_debug_utils_label_ext,
+        };
+    }
+
+    /// Returns the live raw handle for explicit FFI integration.
+    pub fn rawHandle(pool: *const CommandPool) Error!raw.VkCommandPool {
+        return pool._handle orelse error.InactiveObject;
+    }
+};
+
 pub const SwapchainOptions = struct {
     surface: *const Surface,
     min_image_count: u32,
@@ -760,7 +1201,7 @@ pub const SwapchainOptions = struct {
     image_extent: Extent2D,
     image_usage: ImageUsageFlags,
     image_array_layers: u32 = 1,
-    queue_family_indices: []const u32 = &.{},
+    queue_family_indices: []const QueueFamilyIndex = &.{},
     pre_transform: SurfaceTransformBit = .identity,
     composite_alpha: CompositeAlphaBit = .opaque_,
     present_mode: PresentMode = .fifo,
@@ -781,6 +1222,9 @@ pub const SwapchainOptions = struct {
             return error.InvalidOptions;
         }
         _ = try count32(options.queue_family_indices.len);
+        if (options.queue_family_indices.len > device_queue_count_max) {
+            return error.CountOverflow;
+        }
         for (options.queue_family_indices, 0..) |family_index, index| {
             for (options.queue_family_indices[0..index]) |previous_index| {
                 if (family_index == previous_index) return error.InvalidOptions;
@@ -794,14 +1238,14 @@ pub const SwapchainOptions = struct {
 };
 
 pub const AcquireOptions = struct {
-    timeout_ns: u64 = std.math.maxInt(u64),
-    semaphore: raw.VkSemaphore = null,
-    fence: raw.VkFence = null,
+    timeout: Timeout = .infinite,
+    semaphore: ?*const Semaphore = null,
+    fence: ?*const Fence = null,
 };
 
 pub const AcquireResult = union(enum) {
-    success: u32,
-    suboptimal: u32,
+    success: SwapchainImageIndex,
+    suboptimal: SwapchainImageIndex,
     timeout,
     not_ready,
     out_of_date,
@@ -809,8 +1253,8 @@ pub const AcquireResult = union(enum) {
 
 pub const PresentOptions = struct {
     swapchain: *const Swapchain,
-    image_index: u32,
-    wait_semaphores: []const raw.VkSemaphore = &.{},
+    image_index: SwapchainImageIndex,
+    wait_semaphores: []const *const Semaphore = &.{},
     next: ?*const anyopaque = null,
 };
 
@@ -843,11 +1287,7 @@ pub const Swapchain = struct {
         return swapchain._handle orelse error.InactiveObject;
     }
 
-    /// Returns non-owning images whose lifetime is controlled by the swapchain.
-    pub fn images(
-        swapchain: *const Swapchain,
-        gpa: std.mem.Allocator,
-    ) (Error || std.mem.Allocator.Error)![]raw.VkImage {
+    pub fn imageCount(swapchain: *const Swapchain) Error!u32 {
         const handle = try swapchain.rawHandle();
         var count: u32 = 0;
         try checkSuccess(swapchain.get_swapchain_images(
@@ -857,32 +1297,62 @@ pub const Swapchain = struct {
             null,
         ));
         try validateEnumerationCount(count);
-        if (count == 0) return gpa.alloc(raw.VkImage, 0);
+        return count;
+    }
 
-        var image_handles = try gpa.alloc(raw.VkImage, count);
-        errdefer gpa.free(image_handles);
+    /// Returns non-owning images whose lifetime is controlled by the swapchain.
+    pub fn images(
+        swapchain: *const Swapchain,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]SwapchainImage {
+        var images_buffer = try gpa.alloc(SwapchainImage, try swapchain.imageCount());
+        errdefer gpa.free(images_buffer);
         for (0..enumeration_attempt_count_max) |_| {
-            var written: u32 = @intCast(image_handles.len);
-            const result = swapchain.get_swapchain_images(
-                swapchain._device_handle,
-                handle,
-                &written,
-                image_handles.ptr,
-            );
-            if (result == raw.VK_SUCCESS) return gpa.realloc(image_handles, written);
-            if (result != raw.VK_INCOMPLETE) try checkSuccess(result);
-
-            count = 0;
-            try checkSuccess(swapchain.get_swapchain_images(
-                swapchain._device_handle,
-                handle,
-                &count,
-                null,
-            ));
-            count = try nextEnumerationCapacity(count, image_handles.len);
-            image_handles = try gpa.realloc(image_handles, count);
+            const written = swapchain.imagesInto(images_buffer) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const count = try nextEnumerationCapacity(
+                        try swapchain.imageCount(),
+                        images_buffer.len,
+                    );
+                    images_buffer = try gpa.realloc(images_buffer, count);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return gpa.realloc(images_buffer, written.len);
         }
         return error.EnumerationUnstable;
+    }
+
+    /// Writes borrowed swapchain images into caller-owned storage without allocation.
+    pub fn imagesInto(
+        swapchain: *const Swapchain,
+        storage: []SwapchainImage,
+    ) Error![]SwapchainImage {
+        if (storage.len > swapchain_image_count_max) return error.CountOverflow;
+        const handle = try swapchain.rawHandle();
+        const live_handle = handle orelse return error.InvalidHandle;
+        var raw_images: [swapchain_image_count_max]raw.VkImage = undefined;
+        var written: u32 = @intCast(storage.len);
+        const output: [*c]raw.VkImage = if (storage.len == 0) null else &raw_images;
+        const result = swapchain.get_swapchain_images(
+            swapchain._device_handle,
+            handle,
+            &written,
+            output,
+        );
+        if (result == raw.VK_INCOMPLETE) return error.BufferTooSmall;
+        try checkSuccess(result);
+        if (written > storage.len) return error.BufferTooSmall;
+        for (storage[0..written], raw_images[0..written], 0..) |*image, raw_image, index| {
+            image.* = .{
+                ._handle = raw_image orelse return error.InvalidHandle,
+                ._device_handle = swapchain._device_handle,
+                ._swapchain_handle = live_handle,
+                .index = .fromRaw(@intCast(index)),
+            };
+        }
+        return storage[0..written];
     }
 
     pub fn acquireNextImage(
@@ -890,17 +1360,25 @@ pub const Swapchain = struct {
         options: AcquireOptions,
     ) Error!AcquireResult {
         if (options.semaphore == null and options.fence == null) return error.InvalidOptions;
+        const semaphore = if (options.semaphore) |semaphore| blk: {
+            if (semaphore._device_handle != swapchain._device_handle) return error.InvalidHandle;
+            break :blk try semaphore.rawHandle();
+        } else null;
+        const fence = if (options.fence) |fence| blk: {
+            if (fence._device_handle != swapchain._device_handle) return error.InvalidHandle;
+            break :blk try fence.rawHandle();
+        } else null;
         var image_index: u32 = 0;
         const result = swapchain.acquire_next_image(
             swapchain._device_handle,
             try swapchain.rawHandle(),
-            options.timeout_ns,
-            options.semaphore,
-            options.fence,
+            options.timeout.toRaw(),
+            semaphore,
+            fence,
             &image_index,
         );
-        if (result == raw.VK_SUCCESS) return .{ .success = image_index };
-        if (result == raw.VK_SUBOPTIMAL_KHR) return .{ .suboptimal = image_index };
+        if (result == raw.VK_SUCCESS) return .{ .success = .fromRaw(image_index) };
+        if (result == raw.VK_SUBOPTIMAL_KHR) return .{ .suboptimal = .fromRaw(image_index) };
         if (result == raw.VK_TIMEOUT) return .timeout;
         if (result == raw.VK_NOT_READY) return .not_ready;
         if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
@@ -994,7 +1472,7 @@ pub const PhysicalDevice = struct {
         const families = try gpa.alloc(QueueFamily, queue_properties.len);
         for (families, queue_properties, 0..) |*family, property, index| {
             family.* = .{
-                .index = @intCast(index),
+                .index = .fromRaw(@intCast(index)),
                 .properties = property,
             };
         }
@@ -1017,7 +1495,7 @@ pub const PhysicalDevice = struct {
     pub fn surfaceSupport(
         device: *const PhysicalDevice,
         surface: *const Surface,
-        family_index: u32,
+        family_index: QueueFamilyIndex,
     ) Error!bool {
         if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
         const surface_handle = try surface.rawHandle();
@@ -1027,7 +1505,7 @@ pub const PhysicalDevice = struct {
         var supported: raw.VkBool32 = raw.VK_FALSE;
         try checkSuccess(get_support(
             device._handle,
-            family_index,
+            family_index.toRaw(),
             surface_handle,
             &supported,
         ));
@@ -1172,7 +1650,7 @@ pub const PhysicalDevice = struct {
                 .sType = raw.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                 .pNext = queue.next,
                 .flags = queue.flags,
-                .queueFamilyIndex = queue.family_index,
+                .queueFamilyIndex = queue.family_index.toRaw(),
                 .queueCount = @intCast(queue.priorities.len),
                 .pQueuePriorities = queue.priorities.ptr,
             };
@@ -1249,7 +1727,7 @@ pub const QueueCapability = enum {
 };
 
 pub const QueueFamily = struct {
-    index: u32,
+    index: QueueFamilyIndex,
     properties: raw.VkQueueFamilyProperties,
 
     pub fn queueCount(family: QueueFamily) u32 {
@@ -1313,7 +1791,7 @@ pub fn selectMemoryTypeIndex(
 }
 
 pub const DeviceQueueOptions = struct {
-    family_index: u32,
+    family_index: QueueFamilyIndex,
     priorities: []const f32,
     flags: raw.VkDeviceQueueCreateFlags = 0,
     next: ?*const anyopaque = null,
@@ -1375,13 +1853,17 @@ pub const Device = struct {
         try checkSuccess(device.dispatch.device_wait_idle(handle));
     }
 
-    pub fn queue(device: *const Device, family_index: u32, queue_index: u32) Error!Queue {
+    pub fn queue(
+        device: *const Device,
+        family_index: QueueFamilyIndex,
+        queue_index: QueueIndex,
+    ) Error!Queue {
         const device_handle = device._handle orelse return error.InactiveObject;
         var handle: raw.VkQueue = null;
         device.dispatch.get_device_queue(
             device_handle,
-            family_index,
-            queue_index,
+            family_index.toRaw(),
+            queue_index.toRaw(),
             &handle,
         );
         const insert_label = device.dispatch.queue_insert_debug_utils_label_ext;
@@ -1448,6 +1930,164 @@ pub const Device = struct {
         try checkSuccess(set_name(device_handle, &name_info));
     }
 
+    pub fn createImageView(
+        device: *const Device,
+        options: ImageViewOptions,
+    ) Error!ImageView {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        if (options.image._device_handle != device_handle) return error.InvalidHandle;
+        const create_info: raw.VkImageViewCreateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = options.image._handle,
+            .viewType = options.view_type.toRaw(),
+            .format = options.format.toRaw(),
+            .components = options.components.toRaw(),
+            .subresourceRange = options.subresource_range.toRaw(),
+        };
+        var handle: raw.VkImageView = null;
+        const result = device.dispatch.create_image_view(
+            device_handle,
+            &create_info,
+            device.allocation_callbacks,
+            &handle,
+        );
+        if (result != raw.VK_SUCCESS) {
+            if (handle) |provisional_handle| {
+                device.dispatch.destroy_image_view(
+                    device_handle,
+                    provisional_handle,
+                    device.allocation_callbacks,
+                );
+            }
+            try checkSuccess(result);
+            unreachable;
+        }
+        return .{
+            ._handle = handle orelse return error.InvalidHandle,
+            ._device_handle = device_handle,
+            .allocation_callbacks = device.allocation_callbacks,
+            .destroy_image_view = device.dispatch.destroy_image_view,
+        };
+    }
+
+    pub fn createSemaphore(
+        device: *const Device,
+        _: SemaphoreOptions,
+    ) Error!Semaphore {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        const create_info: raw.VkSemaphoreCreateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        };
+        var handle: raw.VkSemaphore = null;
+        const result = device.dispatch.create_semaphore(
+            device_handle,
+            &create_info,
+            device.allocation_callbacks,
+            &handle,
+        );
+        if (result != raw.VK_SUCCESS) {
+            if (handle) |provisional_handle| {
+                device.dispatch.destroy_semaphore(
+                    device_handle,
+                    provisional_handle,
+                    device.allocation_callbacks,
+                );
+            }
+            try checkSuccess(result);
+            unreachable;
+        }
+        return .{
+            ._handle = handle orelse return error.InvalidHandle,
+            ._device_handle = device_handle,
+            .allocation_callbacks = device.allocation_callbacks,
+            .destroy_semaphore = device.dispatch.destroy_semaphore,
+        };
+    }
+
+    pub fn createFence(device: *const Device, options: FenceOptions) Error!Fence {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        const flags = if (options.signaled)
+            FenceCreateFlags.init(&.{.signaled})
+        else
+            FenceCreateFlags.empty;
+        const create_info: raw.VkFenceCreateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .flags = flags.toRaw(),
+        };
+        var handle: raw.VkFence = null;
+        const result = device.dispatch.create_fence(
+            device_handle,
+            &create_info,
+            device.allocation_callbacks,
+            &handle,
+        );
+        if (result != raw.VK_SUCCESS) {
+            if (handle) |provisional_handle| {
+                device.dispatch.destroy_fence(
+                    device_handle,
+                    provisional_handle,
+                    device.allocation_callbacks,
+                );
+            }
+            try checkSuccess(result);
+            unreachable;
+        }
+        return .{
+            ._handle = handle orelse return error.InvalidHandle,
+            ._device_handle = device_handle,
+            .allocation_callbacks = device.allocation_callbacks,
+            .destroy_fence = device.dispatch.destroy_fence,
+            .reset_fences = device.dispatch.reset_fences,
+            .wait_for_fences = device.dispatch.wait_for_fences,
+        };
+    }
+
+    pub fn createCommandPool(
+        device: *const Device,
+        options: CommandPoolOptions,
+    ) Error!CommandPool {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        const create_info: raw.VkCommandPoolCreateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = options.flags.toRaw(),
+            .queueFamilyIndex = options.family_index.toRaw(),
+        };
+        var handle: raw.VkCommandPool = null;
+        const result = device.dispatch.create_command_pool(
+            device_handle,
+            &create_info,
+            device.allocation_callbacks,
+            &handle,
+        );
+        if (result != raw.VK_SUCCESS) {
+            if (handle) |provisional_handle| {
+                device.dispatch.destroy_command_pool(
+                    device_handle,
+                    provisional_handle,
+                    device.allocation_callbacks,
+                );
+            }
+            try checkSuccess(result);
+            unreachable;
+        }
+        return .{
+            ._handle = handle orelse return error.InvalidHandle,
+            ._device_handle = device_handle,
+            .buffers_can_reset = options.flags.contains(.reset_command_buffer),
+            .allocation_callbacks = device.allocation_callbacks,
+            .destroy_command_pool = device.dispatch.destroy_command_pool,
+            .allocate_command_buffers = device.dispatch.allocate_command_buffers,
+            .begin_command_buffer = device.dispatch.begin_command_buffer,
+            .end_command_buffer = device.dispatch.end_command_buffer,
+            .reset_command_buffer = device.dispatch.reset_command_buffer,
+            .cmd_pipeline_barrier = device.dispatch.cmd_pipeline_barrier,
+            .cmd_clear_color_image = device.dispatch.cmd_clear_color_image,
+            .cmd_begin_debug_utils_label_ext = device.dispatch.cmd_begin_debug_utils_label_ext,
+            .cmd_end_debug_utils_label_ext = device.dispatch.cmd_end_debug_utils_label_ext,
+            .cmd_insert_debug_utils_label_ext = device.dispatch.cmd_insert_debug_utils_label_ext,
+        };
+    }
+
     pub fn createSwapchain(
         device: *const Device,
         options: SwapchainOptions,
@@ -1472,6 +2112,10 @@ pub const Device = struct {
         else
             null;
         const concurrent = options.queue_family_indices.len > 1;
+        var queue_family_indices_raw: [device_queue_count_max]u32 = undefined;
+        for (options.queue_family_indices, queue_family_indices_raw[0..options.queue_family_indices.len]) |family_index, *raw_index| {
+            raw_index.* = family_index.toRaw();
+        }
         const create_info: raw.VkSwapchainCreateInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
             .pNext = options.next,
@@ -1492,7 +2136,7 @@ pub const Device = struct {
             else
                 0,
             .pQueueFamilyIndices = if (concurrent)
-                options.queue_family_indices.ptr
+                queue_family_indices_raw[0..options.queue_family_indices.len].ptr
             else
                 null,
             .preTransform = options.pre_transform.toRaw(),
@@ -1525,7 +2169,7 @@ pub const Device = struct {
         };
     }
 
-    pub fn beginCommandBufferLabel(
+    pub fn beginCommandBufferLabelRaw(
         device: *const Device,
         command_buffer: raw.VkCommandBuffer,
         options: ext.debug_utils.LabelOptions,
@@ -1539,7 +2183,7 @@ pub const Device = struct {
         begin_label(live_command_buffer, &label);
     }
 
-    pub fn endCommandBufferLabel(
+    pub fn endCommandBufferLabelRaw(
         device: *const Device,
         command_buffer: raw.VkCommandBuffer,
     ) Error!void {
@@ -1550,7 +2194,7 @@ pub const Device = struct {
         end_label(command_buffer orelse return error.InvalidHandle);
     }
 
-    pub fn insertCommandBufferLabel(
+    pub fn insertCommandBufferLabelRaw(
         device: *const Device,
         command_buffer: raw.VkCommandBuffer,
         options: ext.debug_utils.LabelOptions,
@@ -1562,6 +2206,34 @@ pub const Device = struct {
         const live_command_buffer = command_buffer orelse return error.InvalidHandle;
         const label = options.createInfo();
         insert_label(live_command_buffer, &label);
+    }
+};
+
+pub const SemaphoreWait = struct {
+    semaphore: *const Semaphore,
+    stage: PipelineStageFlags,
+};
+
+pub const SubmitOptions = struct {
+    waits: []const SemaphoreWait = &.{},
+    command_buffers: []const *const CommandBuffer = &.{},
+    signals: []const *const Semaphore = &.{},
+    fence: ?*const Fence = null,
+};
+
+pub const QueueLabelScope = struct {
+    queue: QueueHandle,
+    end_label: CommandFunction(raw.PFN_vkQueueEndDebugUtilsLabelEXT),
+    active: bool = true,
+
+    pub fn end(scope: *QueueLabelScope) void {
+        if (!scope.active) return;
+        scope.end_label(scope.queue);
+        scope.active = false;
+    }
+
+    pub fn deinit(scope: *QueueLabelScope) void {
+        scope.end();
     }
 };
 
@@ -1581,6 +2253,56 @@ pub const Queue = struct {
     }
 
     pub fn submit(
+        queue: *const Queue,
+        options: SubmitOptions,
+    ) Error!void {
+        if (options.waits.len > submission_item_count_max or
+            options.command_buffers.len > submission_item_count_max or
+            options.signals.len > submission_item_count_max)
+        {
+            return error.CountOverflow;
+        }
+
+        var wait_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
+        var wait_stages: [submission_item_count_max]raw.VkPipelineStageFlags = undefined;
+        for (options.waits, wait_handles[0..options.waits.len], wait_stages[0..options.waits.len]) |wait, *handle, *stage| {
+            if (wait.semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
+            handle.* = try wait.semaphore.rawHandle();
+            stage.* = wait.stage.toRaw();
+        }
+
+        var command_handles: [submission_item_count_max]raw.VkCommandBuffer = undefined;
+        for (options.command_buffers, command_handles[0..options.command_buffers.len]) |command_buffer, *handle| {
+            if (command_buffer._device_handle != queue._device_handle) return error.InvalidHandle;
+            if (command_buffer.state != .executable) return error.InvalidOptions;
+            handle.* = command_buffer.rawHandle();
+        }
+
+        var signal_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
+        for (options.signals, signal_handles[0..options.signals.len]) |semaphore, *handle| {
+            if (semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
+            handle.* = try semaphore.rawHandle();
+        }
+
+        const fence_handle = if (options.fence) |fence| blk: {
+            if (fence._device_handle != queue._device_handle) return error.InvalidHandle;
+            break :blk try fence.rawHandle();
+        } else null;
+        const submit_info: raw.VkSubmitInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .waitSemaphoreCount = @intCast(options.waits.len),
+            .pWaitSemaphores = if (options.waits.len == 0) null else wait_handles[0..options.waits.len].ptr,
+            .pWaitDstStageMask = if (options.waits.len == 0) null else wait_stages[0..options.waits.len].ptr,
+            .commandBufferCount = @intCast(options.command_buffers.len),
+            .pCommandBuffers = if (options.command_buffers.len == 0) null else command_handles[0..options.command_buffers.len].ptr,
+            .signalSemaphoreCount = @intCast(options.signals.len),
+            .pSignalSemaphores = if (options.signals.len == 0) null else signal_handles[0..options.signals.len].ptr,
+        };
+        try checkSuccess(queue.queue_submit(queue._handle, 1, &submit_info, fence_handle));
+    }
+
+    /// Submits raw Vulkan structures for advanced extension or interop use.
+    pub fn submitRaw(
         queue: *const Queue,
         submit_infos: []const raw.VkSubmitInfo,
         fence: raw.VkFence,
@@ -1606,6 +2328,17 @@ pub const Queue = struct {
         begin_label(queue._handle, &label);
     }
 
+    pub fn beginLabelScope(
+        queue: *const Queue,
+        options: ext.debug_utils.LabelOptions,
+    ) Error!QueueLabelScope {
+        const end_label = queue.queue_end_debug_utils_label_ext orelse {
+            return error.MissingCommand;
+        };
+        try queue.beginLabel(options);
+        return .{ .queue = queue._handle, .end_label = end_label };
+    }
+
     pub fn endLabel(queue: *const Queue) Error!void {
         const end_label = queue.queue_end_debug_utils_label_ext orelse {
             return error.MissingCommand;
@@ -1624,8 +2357,15 @@ pub const Queue = struct {
     pub fn present(queue: *const Queue, options: PresentOptions) Error!PresentStatus {
         const present_command = queue.queue_present_khr orelse return error.MissingCommand;
         if (options.swapchain._device_handle != queue._device_handle) return error.InvalidHandle;
+        if (options.wait_semaphores.len > submission_item_count_max) return error.CountOverflow;
         const wait_count = try count32(options.wait_semaphores.len);
+        var wait_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
+        for (options.wait_semaphores, wait_handles[0..options.wait_semaphores.len]) |semaphore, *handle| {
+            if (semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
+            handle.* = try semaphore.rawHandle();
+        }
         const swapchain_handle = try options.swapchain.rawHandle();
+        const image_index = options.image_index.toRaw();
         const present_info: raw.VkPresentInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = options.next,
@@ -1633,10 +2373,10 @@ pub const Queue = struct {
             .pWaitSemaphores = if (options.wait_semaphores.len == 0)
                 null
             else
-                options.wait_semaphores.ptr,
+                wait_handles[0..options.wait_semaphores.len].ptr,
             .swapchainCount = 1,
             .pSwapchains = @ptrCast(&swapchain_handle),
-            .pImageIndices = @ptrCast(&options.image_index),
+            .pImageIndices = @ptrCast(&image_index),
             .pResults = null,
         };
         const result = present_command(queue._handle, &present_info);
@@ -2068,16 +2808,22 @@ pub const ext = struct {
             queue: *const Queue,
             surface: *const Surface,
             swapchain: *const Swapchain,
-            semaphore: raw.VkSemaphore,
-            command_buffer: raw.VkCommandBuffer,
-            fence: raw.VkFence,
+            semaphore: *const Semaphore,
+            command_buffer: *const CommandBuffer,
+            fence: *const Fence,
+            image: *const SwapchainImage,
+            image_view: *const ImageView,
+            command_pool: *const CommandPool,
+            raw_semaphore: raw.VkSemaphore,
+            raw_command_buffer: raw.VkCommandBuffer,
+            raw_fence: raw.VkFence,
             device_memory: raw.VkDeviceMemory,
             buffer: raw.VkBuffer,
-            image: raw.VkImage,
+            raw_image: raw.VkImage,
             event: raw.VkEvent,
             query_pool: raw.VkQueryPool,
             buffer_view: raw.VkBufferView,
-            image_view: raw.VkImageView,
+            raw_image_view: raw.VkImageView,
             shader_module: raw.VkShaderModule,
             pipeline_cache: raw.VkPipelineCache,
             pipeline_layout: raw.VkPipelineLayout,
@@ -2088,7 +2834,7 @@ pub const ext = struct {
             descriptor_pool: raw.VkDescriptorPool,
             descriptor_set: raw.VkDescriptorSet,
             framebuffer: raw.VkFramebuffer,
-            command_pool: raw.VkCommandPool,
+            raw_command_pool: raw.VkCommandPool,
             raw_surface: raw.VkSurfaceKHR,
             raw_swapchain: raw.VkSwapchainKHR,
 
@@ -2115,6 +2861,30 @@ pub const ext = struct {
                         .object_type = @intCast(raw.VK_OBJECT_TYPE_SWAPCHAIN_KHR),
                         .handle = try handleValue(try swapchain.rawHandle()),
                     },
+                    .semaphore => |semaphore| .{
+                        .object_type = @intCast(raw.VK_OBJECT_TYPE_SEMAPHORE),
+                        .handle = try handleValue(try semaphore.rawHandle()),
+                    },
+                    .command_buffer => |command_buffer| .{
+                        .object_type = @intCast(raw.VK_OBJECT_TYPE_COMMAND_BUFFER),
+                        .handle = try handleValue(command_buffer.rawHandle()),
+                    },
+                    .fence => |fence| .{
+                        .object_type = @intCast(raw.VK_OBJECT_TYPE_FENCE),
+                        .handle = try handleValue(try fence.rawHandle()),
+                    },
+                    .image => |image| .{
+                        .object_type = @intCast(raw.VK_OBJECT_TYPE_IMAGE),
+                        .handle = try handleValue(image.rawHandle()),
+                    },
+                    .image_view => |image_view| .{
+                        .object_type = @intCast(raw.VK_OBJECT_TYPE_IMAGE_VIEW),
+                        .handle = try handleValue(try image_view.rawHandle()),
+                    },
+                    .command_pool => |command_pool| .{
+                        .object_type = @intCast(raw.VK_OBJECT_TYPE_COMMAND_POOL),
+                        .handle = try handleValue(try command_pool.rawHandle()),
+                    },
                     inline else => |handle, tag| .{
                         .object_type = objectType(tag),
                         .handle = try handleValue(handle),
@@ -2124,17 +2894,27 @@ pub const ext = struct {
 
             fn objectType(comptime tag: std.meta.Tag(Object)) raw.VkObjectType {
                 return @intCast(switch (tag) {
-                    .device, .queue, .surface, .swapchain => unreachable,
-                    .semaphore => raw.VK_OBJECT_TYPE_SEMAPHORE,
-                    .command_buffer => raw.VK_OBJECT_TYPE_COMMAND_BUFFER,
-                    .fence => raw.VK_OBJECT_TYPE_FENCE,
+                    .device,
+                    .queue,
+                    .surface,
+                    .swapchain,
+                    .semaphore,
+                    .command_buffer,
+                    .fence,
+                    .image,
+                    .image_view,
+                    .command_pool,
+                    => unreachable,
+                    .raw_semaphore => raw.VK_OBJECT_TYPE_SEMAPHORE,
+                    .raw_command_buffer => raw.VK_OBJECT_TYPE_COMMAND_BUFFER,
+                    .raw_fence => raw.VK_OBJECT_TYPE_FENCE,
                     .device_memory => raw.VK_OBJECT_TYPE_DEVICE_MEMORY,
                     .buffer => raw.VK_OBJECT_TYPE_BUFFER,
-                    .image => raw.VK_OBJECT_TYPE_IMAGE,
+                    .raw_image => raw.VK_OBJECT_TYPE_IMAGE,
                     .event => raw.VK_OBJECT_TYPE_EVENT,
                     .query_pool => raw.VK_OBJECT_TYPE_QUERY_POOL,
                     .buffer_view => raw.VK_OBJECT_TYPE_BUFFER_VIEW,
-                    .image_view => raw.VK_OBJECT_TYPE_IMAGE_VIEW,
+                    .raw_image_view => raw.VK_OBJECT_TYPE_IMAGE_VIEW,
                     .shader_module => raw.VK_OBJECT_TYPE_SHADER_MODULE,
                     .pipeline_cache => raw.VK_OBJECT_TYPE_PIPELINE_CACHE,
                     .pipeline_layout => raw.VK_OBJECT_TYPE_PIPELINE_LAYOUT,
@@ -2145,7 +2925,7 @@ pub const ext = struct {
                     .descriptor_pool => raw.VK_OBJECT_TYPE_DESCRIPTOR_POOL,
                     .descriptor_set => raw.VK_OBJECT_TYPE_DESCRIPTOR_SET,
                     .framebuffer => raw.VK_OBJECT_TYPE_FRAMEBUFFER,
-                    .command_pool => raw.VK_OBJECT_TYPE_COMMAND_POOL,
+                    .raw_command_pool => raw.VK_OBJECT_TYPE_COMMAND_POOL,
                     .raw_surface => raw.VK_OBJECT_TYPE_SURFACE_KHR,
                     .raw_swapchain => raw.VK_OBJECT_TYPE_SWAPCHAIN_KHR,
                 });
@@ -2169,6 +2949,28 @@ pub const ext = struct {
                     },
                     .swapchain => |swapchain| {
                         if (swapchain._device_handle != device_handle) return error.InvalidHandle;
+                    },
+                    .semaphore => |semaphore| {
+                        if (semaphore._device_handle != device_handle) return error.InvalidHandle;
+                        _ = try semaphore.rawHandle();
+                    },
+                    .command_buffer => |command_buffer| {
+                        if (command_buffer._device_handle != device_handle) return error.InvalidHandle;
+                    },
+                    .fence => |fence| {
+                        if (fence._device_handle != device_handle) return error.InvalidHandle;
+                        _ = try fence.rawHandle();
+                    },
+                    .image => |image| {
+                        if (image._device_handle != device_handle) return error.InvalidHandle;
+                    },
+                    .image_view => |image_view| {
+                        if (image_view._device_handle != device_handle) return error.InvalidHandle;
+                        _ = try image_view.rawHandle();
+                    },
+                    .command_pool => |command_pool| {
+                        if (command_pool._device_handle != device_handle) return error.InvalidHandle;
+                        _ = try command_pool.rawHandle();
                     },
                     else => {},
                 }
@@ -2314,6 +3116,22 @@ const DeviceDispatch = struct {
     queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
     device_wait_idle: CommandFunction(raw.PFN_vkDeviceWaitIdle),
+    create_image_view: CommandFunction(raw.PFN_vkCreateImageView),
+    destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
+    create_semaphore: CommandFunction(raw.PFN_vkCreateSemaphore),
+    destroy_semaphore: CommandFunction(raw.PFN_vkDestroySemaphore),
+    create_fence: CommandFunction(raw.PFN_vkCreateFence),
+    destroy_fence: CommandFunction(raw.PFN_vkDestroyFence),
+    reset_fences: CommandFunction(raw.PFN_vkResetFences),
+    wait_for_fences: CommandFunction(raw.PFN_vkWaitForFences),
+    create_command_pool: CommandFunction(raw.PFN_vkCreateCommandPool),
+    destroy_command_pool: CommandFunction(raw.PFN_vkDestroyCommandPool),
+    allocate_command_buffers: CommandFunction(raw.PFN_vkAllocateCommandBuffers),
+    begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
+    end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
+    reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
+    cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
+    cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
     create_swapchain_khr: ?CommandFunction(raw.PFN_vkCreateSwapchainKHR),
     destroy_swapchain_khr: ?CommandFunction(raw.PFN_vkDestroySwapchainKHR),
     get_swapchain_images_khr: ?CommandFunction(raw.PFN_vkGetSwapchainImagesKHR),
@@ -2362,6 +3180,102 @@ const DeviceDispatch = struct {
                 handle,
                 raw.PFN_vkDeviceWaitIdle,
                 "vkDeviceWaitIdle",
+            ),
+            .create_image_view = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateImageView,
+                "vkCreateImageView",
+            ),
+            .destroy_image_view = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyImageView,
+                "vkDestroyImageView",
+            ),
+            .create_semaphore = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateSemaphore,
+                "vkCreateSemaphore",
+            ),
+            .destroy_semaphore = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroySemaphore,
+                "vkDestroySemaphore",
+            ),
+            .create_fence = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateFence,
+                "vkCreateFence",
+            ),
+            .destroy_fence = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyFence,
+                "vkDestroyFence",
+            ),
+            .reset_fences = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkResetFences,
+                "vkResetFences",
+            ),
+            .wait_for_fences = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkWaitForFences,
+                "vkWaitForFences",
+            ),
+            .create_command_pool = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateCommandPool,
+                "vkCreateCommandPool",
+            ),
+            .destroy_command_pool = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyCommandPool,
+                "vkDestroyCommandPool",
+            ),
+            .allocate_command_buffers = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkAllocateCommandBuffers,
+                "vkAllocateCommandBuffers",
+            ),
+            .begin_command_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkBeginCommandBuffer,
+                "vkBeginCommandBuffer",
+            ),
+            .end_command_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkEndCommandBuffer,
+                "vkEndCommandBuffer",
+            ),
+            .reset_command_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkResetCommandBuffer,
+                "vkResetCommandBuffer",
+            ),
+            .cmd_pipeline_barrier = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdPipelineBarrier,
+                "vkCmdPipelineBarrier",
+            ),
+            .cmd_clear_color_image = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdClearColorImage,
+                "vkCmdClearColorImage",
             ),
             .create_swapchain_khr = loadDevice(
                 get_device_proc_addr,
@@ -2864,6 +3778,22 @@ var test_create_messenger_count: usize = 0;
 var test_queue_submit_count: usize = 0;
 var test_named_object_type: raw.VkObjectType = 0;
 var test_named_object_handle: u64 = 0;
+var test_resource_result: raw.VkResult = raw.VK_SUCCESS;
+var test_resource_null_handle = false;
+var test_wait_result: raw.VkResult = raw.VK_SUCCESS;
+var test_destroy_image_view_count: usize = 0;
+var test_destroy_semaphore_count: usize = 0;
+var test_destroy_fence_count: usize = 0;
+var test_destroy_command_pool_count: usize = 0;
+var test_begin_command_buffer_count: usize = 0;
+var test_end_command_buffer_count: usize = 0;
+var test_reset_command_buffer_count: usize = 0;
+var test_pipeline_barrier_count: usize = 0;
+var test_clear_color_count: usize = 0;
+var test_end_command_label_count: usize = 0;
+var test_acquire_result: raw.VkResult = raw.VK_SUCCESS;
+var test_acquire_image_index: u32 = 0;
+var test_present_result: raw.VkResult = raw.VK_SUCCESS;
 
 fn testHandle(comptime OptionalHandle: type, address: usize) NonNullHandle(OptionalHandle) {
     return @ptrFromInt(address);
@@ -2925,6 +3855,201 @@ fn testDestroyDevice(
     _: [*c]const raw.VkAllocationCallbacks,
 ) callconv(.c) void {
     test_destroy_device_count += 1;
+}
+
+fn testCreateImageView(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkImageViewCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    handle: [*c]raw.VkImageView,
+) callconv(.c) raw.VkResult {
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkImageView, 0x5100);
+    return test_resource_result;
+}
+
+fn testDestroyImageView(
+    _: raw.VkDevice,
+    _: raw.VkImageView,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_destroy_image_view_count += 1;
+}
+
+fn testCreateSemaphore(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkSemaphoreCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    handle: [*c]raw.VkSemaphore,
+) callconv(.c) raw.VkResult {
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkSemaphore, 0x5200);
+    return test_resource_result;
+}
+
+fn testDestroySemaphore(
+    _: raw.VkDevice,
+    _: raw.VkSemaphore,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_destroy_semaphore_count += 1;
+}
+
+fn testCreateFence(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkFenceCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    handle: [*c]raw.VkFence,
+) callconv(.c) raw.VkResult {
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkFence, 0x5300);
+    return test_resource_result;
+}
+
+fn testDestroyFence(
+    _: raw.VkDevice,
+    _: raw.VkFence,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_destroy_fence_count += 1;
+}
+
+fn testResetFences(
+    _: raw.VkDevice,
+    _: u32,
+    _: [*c]const raw.VkFence,
+) callconv(.c) raw.VkResult {
+    return test_resource_result;
+}
+
+fn testWaitForFences(
+    _: raw.VkDevice,
+    _: u32,
+    _: [*c]const raw.VkFence,
+    _: raw.VkBool32,
+    _: u64,
+) callconv(.c) raw.VkResult {
+    return test_wait_result;
+}
+
+fn testCreateCommandPool(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkCommandPoolCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    handle: [*c]raw.VkCommandPool,
+) callconv(.c) raw.VkResult {
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkCommandPool, 0x5400);
+    return test_resource_result;
+}
+
+fn testDestroyCommandPool(
+    _: raw.VkDevice,
+    _: raw.VkCommandPool,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_destroy_command_pool_count += 1;
+}
+
+fn testAllocateCommandBuffers(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkCommandBufferAllocateInfo,
+    handle: [*c]raw.VkCommandBuffer,
+) callconv(.c) raw.VkResult {
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkCommandBuffer, 0x5500);
+    return test_resource_result;
+}
+
+fn testBeginCommandBuffer(
+    _: raw.VkCommandBuffer,
+    _: [*c]const raw.VkCommandBufferBeginInfo,
+) callconv(.c) raw.VkResult {
+    test_begin_command_buffer_count += 1;
+    return test_resource_result;
+}
+
+fn testEndCommandBuffer(_: raw.VkCommandBuffer) callconv(.c) raw.VkResult {
+    test_end_command_buffer_count += 1;
+    return test_resource_result;
+}
+
+fn testResetCommandBuffer(
+    _: raw.VkCommandBuffer,
+    _: raw.VkCommandBufferResetFlags,
+) callconv(.c) raw.VkResult {
+    test_reset_command_buffer_count += 1;
+    return test_resource_result;
+}
+
+fn testCmdPipelineBarrier(
+    _: raw.VkCommandBuffer,
+    _: raw.VkPipelineStageFlags,
+    _: raw.VkPipelineStageFlags,
+    _: raw.VkDependencyFlags,
+    _: u32,
+    _: [*c]const raw.VkMemoryBarrier,
+    _: u32,
+    _: [*c]const raw.VkBufferMemoryBarrier,
+    _: u32,
+    _: [*c]const raw.VkImageMemoryBarrier,
+) callconv(.c) void {
+    test_pipeline_barrier_count += 1;
+}
+
+fn testCmdClearColorImage(
+    _: raw.VkCommandBuffer,
+    _: raw.VkImage,
+    _: raw.VkImageLayout,
+    _: [*c]const raw.VkClearColorValue,
+    _: u32,
+    _: [*c]const raw.VkImageSubresourceRange,
+) callconv(.c) void {
+    test_clear_color_count += 1;
+}
+
+fn testCmdEndLabel(_: raw.VkCommandBuffer) callconv(.c) void {
+    test_end_command_label_count += 1;
+}
+
+fn testDestroySwapchain(
+    _: raw.VkDevice,
+    _: raw.VkSwapchainKHR,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+fn testGetSwapchainImages(
+    _: raw.VkDevice,
+    _: raw.VkSwapchainKHR,
+    count: [*c]u32,
+    images: [*c]raw.VkImage,
+) callconv(.c) raw.VkResult {
+    if (images == null) {
+        count.* = 2;
+        return raw.VK_SUCCESS;
+    }
+    if (count.* < 2) {
+        count.* = 2;
+        return raw.VK_INCOMPLETE;
+    }
+    images[0] = testHandle(raw.VkImage, 0x5000);
+    images[1] = testHandle(raw.VkImage, 0x5001);
+    count.* = 2;
+    return raw.VK_SUCCESS;
+}
+
+fn testAcquireNextImage(
+    _: raw.VkDevice,
+    _: raw.VkSwapchainKHR,
+    _: u64,
+    _: raw.VkSemaphore,
+    _: raw.VkFence,
+    image_index: [*c]u32,
+) callconv(.c) raw.VkResult {
+    image_index.* = test_acquire_image_index;
+    return test_acquire_result;
+}
+
+fn testQueuePresent(
+    _: raw.VkQueue,
+    _: [*c]const raw.VkPresentInfoKHR,
+) callconv(.c) raw.VkResult {
+    return test_present_result;
 }
 
 fn testGetNullQueue(
@@ -3099,6 +4224,22 @@ fn testDevice() Device {
             .queue_submit = testFunction(raw.PFN_vkQueueSubmit),
             .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
             .device_wait_idle = testFunction(raw.PFN_vkDeviceWaitIdle),
+            .create_image_view = testCreateImageView,
+            .destroy_image_view = testDestroyImageView,
+            .create_semaphore = testCreateSemaphore,
+            .destroy_semaphore = testDestroySemaphore,
+            .create_fence = testCreateFence,
+            .destroy_fence = testDestroyFence,
+            .reset_fences = testResetFences,
+            .wait_for_fences = testWaitForFences,
+            .create_command_pool = testCreateCommandPool,
+            .destroy_command_pool = testDestroyCommandPool,
+            .allocate_command_buffers = testAllocateCommandBuffers,
+            .begin_command_buffer = testBeginCommandBuffer,
+            .end_command_buffer = testEndCommandBuffer,
+            .reset_command_buffer = testResetCommandBuffer,
+            .cmd_pipeline_barrier = testCmdPipelineBarrier,
+            .cmd_clear_color_image = testCmdClearColorImage,
             .create_swapchain_khr = null,
             .destroy_swapchain_khr = null,
             .get_swapchain_images_khr = null,
@@ -3133,12 +4274,18 @@ test "owned handles reject inactive use and deinit is idempotent" {
 
     test_destroy_device_count = 0;
     var device = testDevice();
-    try std.testing.expectError(error.InvalidHandle, device.queue(0, 0));
+    try std.testing.expectError(
+        error.InvalidHandle,
+        device.queue(.fromRaw(0), .fromRaw(0)),
+    );
     device.deinit();
     device.deinit();
     try std.testing.expectEqual(@as(usize, 1), test_destroy_device_count);
     try std.testing.expectError(error.InactiveObject, device.rawHandle());
-    try std.testing.expectError(error.InactiveObject, device.queue(0, 0));
+    try std.testing.expectError(
+        error.InactiveObject,
+        device.queue(.fromRaw(0), .fromRaw(0)),
+    );
     try std.testing.expectError(error.InactiveObject, device.waitIdle());
     try std.testing.expectError(
         error.InactiveObject,
@@ -3155,6 +4302,27 @@ test "Vulkan u32 counts reject narrowing overflow" {
         const too_large = @as(usize, std.math.maxInt(u32)) + 1;
         try std.testing.expectError(error.CountOverflow, count32(too_large));
     }
+}
+
+test "surface capability sentinels become optionals" {
+    var raw_capabilities: raw.VkSurfaceCapabilitiesKHR = .{};
+    raw_capabilities.maxImageCount = 0;
+    raw_capabilities.currentExtent = .{
+        .width = std.math.maxInt(u32),
+        .height = std.math.maxInt(u32),
+    };
+    const variable = SurfaceCapabilities.fromRaw(raw_capabilities);
+    try std.testing.expectEqual(@as(?u32, null), variable.image_count_max);
+    try std.testing.expectEqual(@as(?Extent2D, null), variable.extent_current);
+
+    raw_capabilities.maxImageCount = 3;
+    raw_capabilities.currentExtent = .{ .width = 1280, .height = 720 };
+    const fixed = SurfaceCapabilities.fromRaw(raw_capabilities);
+    try std.testing.expectEqual(@as(?u32, 3), fixed.image_count_max);
+    try std.testing.expectEqual(
+        @as(?Extent2D, .{ .width = 1280, .height = 720 }),
+        fixed.extent_current,
+    );
 }
 
 test "surface enumeration supports typed caller storage" {
@@ -3227,18 +4395,254 @@ test "queue submit rejects oversized slices before dispatch" {
     };
     test_queue_submit_count = 0;
 
-    if (@bitSizeOf(usize) > @bitSizeOf(u32)) {
-        const too_many = @as(usize, std.math.maxInt(u32)) + 1;
-        const submit_pointer: [*]const raw.VkSubmitInfo = @ptrFromInt(0x1000);
-        try std.testing.expectError(
-            error.CountOverflow,
-            queue.submit(submit_pointer[0..too_many], null),
-        );
-        try std.testing.expectEqual(@as(usize, 0), test_queue_submit_count);
-    }
+    const wait_pointer: [*]const SemaphoreWait = @ptrFromInt(0x1000);
+    try std.testing.expectError(
+        error.CountOverflow,
+        queue.submit(.{ .waits = wait_pointer[0 .. submission_item_count_max + 1] }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), test_queue_submit_count);
 
-    try queue.submit(&.{}, null);
+    try queue.submit(.{});
     try std.testing.expectEqual(@as(usize, 1), test_queue_submit_count);
+}
+
+test "owned frame resources clean up success and provisional failure exactly once" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_destroy_image_view_count = 0;
+    test_destroy_semaphore_count = 0;
+    test_destroy_fence_count = 0;
+    test_destroy_command_pool_count = 0;
+
+    var device = testDevice();
+    defer device.deinit();
+    const image: SwapchainImage = .{
+        ._handle = testHandle(raw.VkImage, 0x5000),
+        ._device_handle = device._handle.?,
+        ._swapchain_handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        .index = .fromRaw(0),
+    };
+    var image_view = try device.createImageView(.{
+        .image = &image,
+        .view_type = ._2d,
+        .format = .b8g8r8a8_srgb,
+        .subresource_range = .{ .aspect_mask = .init(&.{.color}) },
+    });
+    var semaphore = try device.createSemaphore(.{});
+    var fence = try device.createFence(.{ .signaled = true });
+    var command_pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+
+    image_view.deinit();
+    image_view.deinit();
+    semaphore.deinit();
+    semaphore.deinit();
+    fence.deinit();
+    fence.deinit();
+    command_pool.deinit();
+    command_pool.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_image_view_count);
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_semaphore_count);
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_fence_count);
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_command_pool_count);
+
+    test_resource_result = raw.VK_ERROR_OUT_OF_HOST_MEMORY;
+    try std.testing.expectError(error.OutOfHostMemory, device.createImageView(.{
+        .image = &image,
+        .view_type = ._2d,
+        .format = .b8g8r8a8_srgb,
+        .subresource_range = .{ .aspect_mask = .init(&.{.color}) },
+    }));
+    try std.testing.expectError(error.OutOfHostMemory, device.createSemaphore(.{}));
+    try std.testing.expectError(error.OutOfHostMemory, device.createFence(.{}));
+    try std.testing.expectError(
+        error.OutOfHostMemory,
+        device.createCommandPool(.{ .family_index = .fromRaw(0) }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), test_destroy_image_view_count);
+    try std.testing.expectEqual(@as(usize, 2), test_destroy_semaphore_count);
+    try std.testing.expectEqual(@as(usize, 2), test_destroy_fence_count);
+    try std.testing.expectEqual(@as(usize, 2), test_destroy_command_pool_count);
+    test_resource_result = raw.VK_SUCCESS;
+}
+
+test "typed command recording and fence results avoid raw Vulkan at call sites" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_begin_command_buffer_count = 0;
+    test_end_command_buffer_count = 0;
+    test_reset_command_buffer_count = 0;
+    test_pipeline_barrier_count = 0;
+    test_clear_color_count = 0;
+
+    var device = testDevice();
+    defer device.deinit();
+    var pool = try device.createCommandPool(.{
+        .family_index = .fromRaw(0),
+        .flags = .init(&.{.reset_command_buffer}),
+    });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    const image: SwapchainImage = .{
+        ._handle = testHandle(raw.VkImage, 0x5000),
+        ._device_handle = device._handle.?,
+        ._swapchain_handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        .index = .fromRaw(0),
+    };
+    const color_range: ImageSubresourceRange = .{ .aspect_mask = .init(&.{.color}) };
+
+    try command_buffer.begin(.{ .flags = .init(&.{.one_time_submit}) });
+    try command_buffer.imageBarrier(.{
+        .source_stage = .init(&.{.top_of_pipe}),
+        .destination_stage = .init(&.{.transfer}),
+        .destination_access = .init(&.{.transfer_write}),
+        .old_layout = .undefined_,
+        .new_layout = .transfer_dst_optimal,
+        .image = &image,
+        .subresource_range = color_range,
+    });
+    try command_buffer.clearColorImage(.{
+        .image = &image,
+        .layout = .transfer_dst_optimal,
+        .color = .{ .float = .{ 0.1, 0.2, 0.3, 1.0 } },
+        .subresource_range = color_range,
+    });
+    try command_buffer.imageBarrier(.{
+        .source_stage = .init(&.{.transfer}),
+        .destination_stage = .init(&.{.bottom_of_pipe}),
+        .source_access = .init(&.{.transfer_write}),
+        .old_layout = .transfer_dst_optimal,
+        .new_layout = .present_src_khr,
+        .image = &image,
+        .subresource_range = color_range,
+    });
+    try command_buffer.end();
+    var acquire_semaphore = try device.createSemaphore(.{});
+    defer acquire_semaphore.deinit();
+    var render_semaphore = try device.createSemaphore(.{});
+    defer render_semaphore.deinit();
+    var fence = try device.createFence(.{ .signaled = true });
+    defer fence.deinit();
+    const queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        .queue_submit = testQueueSubmit,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+    test_queue_submit_count = 0;
+    try queue.submit(.{
+        .waits = &.{.{
+            .semaphore = &acquire_semaphore,
+            .stage = .init(&.{.transfer}),
+        }},
+        .command_buffers = &.{&command_buffer},
+        .signals = &.{&render_semaphore},
+        .fence = &fence,
+    });
+    try command_buffer.reset(false);
+    try std.testing.expectEqual(@as(usize, 1), test_begin_command_buffer_count);
+    try std.testing.expectEqual(@as(usize, 1), test_end_command_buffer_count);
+    try std.testing.expectEqual(@as(usize, 1), test_reset_command_buffer_count);
+    try std.testing.expectEqual(@as(usize, 2), test_pipeline_barrier_count);
+    try std.testing.expectEqual(@as(usize, 1), test_clear_color_count);
+    try std.testing.expectEqual(@as(usize, 1), test_queue_submit_count);
+
+    test_wait_result = raw.VK_SUCCESS;
+    try std.testing.expectEqual(FenceWaitStatus.success, try fence.wait(.infinite));
+    test_wait_result = raw.VK_TIMEOUT;
+    try std.testing.expectEqual(
+        FenceWaitStatus.timeout,
+        try fence.wait(.{ .nanoseconds = 1_000_000 }),
+    );
+    test_wait_result = raw.VK_ERROR_DEVICE_LOST;
+    try std.testing.expectError(error.DeviceLost, fence.wait(.infinite));
+    test_wait_result = raw.VK_SUCCESS;
+}
+
+test "debug label scopes end once" {
+    test_end_command_label_count = 0;
+    var scope: CommandBufferLabelScope = .{
+        .command_buffer = testHandle(raw.VkCommandBuffer, 0x5500),
+        .end_label = testCmdEndLabel,
+    };
+    scope.end();
+    scope.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_end_command_label_count);
+}
+
+test "swapchain acquisition and presentation preserve operation statuses" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    var device = testDevice();
+    defer device.deinit();
+    var semaphore = try device.createSemaphore(.{});
+    defer semaphore.deinit();
+    var swapchain: Swapchain = .{
+        ._handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        ._device_handle = device._handle.?,
+        .allocation_callbacks = null,
+        .destroy_swapchain = testDestroySwapchain,
+        .get_swapchain_images = testGetSwapchainImages,
+        .acquire_next_image = testAcquireNextImage,
+    };
+    defer swapchain.deinit();
+
+    var image_storage: [2]SwapchainImage = undefined;
+    const images = try swapchain.imagesInto(&image_storage);
+    try std.testing.expectEqual(@as(usize, 2), images.len);
+    try std.testing.expectEqual(@as(u32, 1), images[1].index.toRaw());
+
+    test_acquire_image_index = 1;
+    test_acquire_result = raw.VK_SUCCESS;
+    const success = try swapchain.acquireNextImage(.{ .semaphore = &semaphore });
+    try std.testing.expectEqual(@as(u32, 1), success.success.toRaw());
+    test_acquire_result = raw.VK_SUBOPTIMAL_KHR;
+    const suboptimal = try swapchain.acquireNextImage(.{ .semaphore = &semaphore });
+    try std.testing.expectEqual(@as(u32, 1), suboptimal.suboptimal.toRaw());
+    test_acquire_result = raw.VK_TIMEOUT;
+    try std.testing.expectEqual(
+        AcquireResult.timeout,
+        try swapchain.acquireNextImage(.{ .semaphore = &semaphore }),
+    );
+    test_acquire_result = raw.VK_ERROR_OUT_OF_DATE_KHR;
+    try std.testing.expectEqual(
+        AcquireResult.out_of_date,
+        try swapchain.acquireNextImage(.{ .semaphore = &semaphore }),
+    );
+    test_acquire_result = raw.VK_ERROR_DEVICE_LOST;
+    try std.testing.expectError(
+        error.DeviceLost,
+        swapchain.acquireNextImage(.{ .semaphore = &semaphore }),
+    );
+
+    const queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        .queue_submit = testQueueSubmit,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = testQueuePresent,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+    const present_options: PresentOptions = .{
+        .swapchain = &swapchain,
+        .image_index = .fromRaw(1),
+        .wait_semaphores = &.{&semaphore},
+    };
+    test_present_result = raw.VK_SUCCESS;
+    try std.testing.expectEqual(PresentStatus.success, try queue.present(present_options));
+    test_present_result = raw.VK_SUBOPTIMAL_KHR;
+    try std.testing.expectEqual(PresentStatus.suboptimal, try queue.present(present_options));
+    test_present_result = raw.VK_ERROR_OUT_OF_DATE_KHR;
+    try std.testing.expectEqual(PresentStatus.out_of_date, try queue.present(present_options));
+    test_present_result = raw.VK_ERROR_DEVICE_LOST;
+    try std.testing.expectError(error.DeviceLost, queue.present(present_options));
+    test_acquire_result = raw.VK_SUCCESS;
+    test_present_result = raw.VK_SUCCESS;
 }
 
 test "debug messenger handles fake dispatch success and failures" {
@@ -3303,19 +4707,19 @@ test "surface and object-name wrappers normalize fake dispatch results" {
     };
     test_surface_result = raw.VK_SUCCESS;
     test_surface_supported = raw.VK_TRUE;
-    try std.testing.expect(try physical_device.surfaceSupport(&surface, 0));
-    test_missing_command = .surface_support;
+    try std.testing.expect(try physical_device.surfaceSupport(&surface, .fromRaw(0)));
+    var missing_surface_support = physical_device;
+    missing_surface_support.dispatch.get_physical_device_surface_support_khr = null;
     try std.testing.expectError(
         error.MissingCommand,
-        physical_device.surfaceSupport(&surface, 0),
+        missing_surface_support.surfaceSupport(&surface, .fromRaw(0)),
     );
-    test_missing_command = .none;
     test_surface_supported = raw.VK_FALSE;
-    try std.testing.expect(!try physical_device.surfaceSupport(&surface, 0));
+    try std.testing.expect(!try physical_device.surfaceSupport(&surface, .fromRaw(0)));
     test_surface_result = raw.VK_ERROR_SURFACE_LOST_KHR;
     try std.testing.expectError(
-        error.UnexpectedVulkanResult,
-        physical_device.surfaceSupport(&surface, 0),
+        error.SurfaceLost,
+        physical_device.surfaceSupport(&surface, .fromRaw(0)),
     );
 
     surface.deinit();
@@ -3353,7 +4757,7 @@ test "surface and object-name wrappers normalize fake dispatch results" {
         error.OutOfHostMemory,
         device.setObjectName(.{ .device = &device }, "test-device"),
     );
-    test_missing_command = .set_object_name;
+    device.dispatch.set_debug_utils_object_name_ext = null;
     try std.testing.expectError(
         error.MissingCommand,
         device.setObjectName(.{ .device = &device }, "test-device"),
