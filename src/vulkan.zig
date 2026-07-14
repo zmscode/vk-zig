@@ -52,6 +52,10 @@ pub const ImageAspectBit = types.ImageAspectBit;
 pub const ImageAspectFlags = types.ImageAspectFlags;
 pub const PipelineStageBit = types.PipelineStageBit;
 pub const PipelineStageFlags = types.PipelineStageFlags;
+pub const PipelineStage2Bit = types.PipelineStage2Bit;
+pub const PipelineStage2Flags = types.PipelineStage2Flags;
+pub const SubmitBit = types.SubmitBit;
+pub const SubmitFlags = types.SubmitFlags;
 pub const CommandPoolCreateBit = types.CommandPoolCreateBit;
 pub const CommandPoolCreateFlags = types.CommandPoolCreateFlags;
 pub const CompositeAlphaBit = types.CompositeAlphaBit;
@@ -317,6 +321,7 @@ const enumeration_item_count_max = 4096;
 const name_count_max = 256;
 const device_queue_count_max = 64;
 const submission_item_count_max = 64;
+const submission_batch_count_max = 16;
 const swapchain_image_count_max = 4096;
 const memory_type_count_max: usize = raw.VK_MAX_MEMORY_TYPES;
 const memory_heap_count_max: usize = raw.VK_MAX_MEMORY_HEAPS;
@@ -2641,6 +2646,7 @@ pub const Device = struct {
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = device_handle,
             .queue_submit = device.dispatch.queue_submit,
+            .queue_submit2 = device.dispatch.queue_submit2,
             .queue_wait_idle = device.dispatch.queue_wait_idle,
             .queue_present_khr = device.dispatch.queue_present_khr,
             .queue_begin_debug_utils_label_ext = device.dispatch.queue_begin_debug_utils_label_ext,
@@ -3085,6 +3091,31 @@ pub const SubmitOptions = struct {
     fence: ?*const Fence = null,
 };
 
+pub const SemaphoreSubmit = struct {
+    semaphore: *const Semaphore,
+    value: u64 = 0,
+    stage: PipelineStage2Flags = .empty,
+    device_index: u32 = 0,
+};
+
+pub const CommandBufferSubmit = struct {
+    command_buffer: *CommandBuffer,
+    device_mask: u32 = 1,
+};
+
+pub const Submit2Options = struct {
+    flags: SubmitFlags = .empty,
+    performance_query_pass: ?u32 = null,
+    waits: []const SemaphoreSubmit = &.{},
+    command_buffers: []const CommandBufferSubmit = &.{},
+    signals: []const SemaphoreSubmit = &.{},
+};
+
+pub const Submit2BatchOptions = struct {
+    submits: []const Submit2Options = &.{},
+    fence: ?*const Fence = null,
+};
+
 pub const QueueLabelScope = struct {
     queue: QueueHandle,
     end_label: CommandFunction(raw.PFN_vkQueueEndDebugUtilsLabelEXT),
@@ -3105,6 +3136,7 @@ pub const Queue = struct {
     _handle: QueueHandle,
     _device_handle: DeviceHandle,
     queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
+    queue_submit2: ?CommandFunction(raw.PFN_vkQueueSubmit2),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
     queue_present_khr: ?CommandFunction(raw.PFN_vkQueuePresentKHR),
     queue_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkQueueBeginDebugUtilsLabelEXT),
@@ -3175,6 +3207,148 @@ pub const Queue = struct {
         for (options.command_buffers) |command_buffer| {
             command_buffer.state = .pending;
             command_buffer.pending_submissions += 1;
+        }
+    }
+
+    pub fn submit2(queue: *const Queue, options: Submit2BatchOptions) Error!void {
+        if (options.submits.len > submission_batch_count_max) return error.CountOverflow;
+        const fence_handle = if (options.fence) |fence| blk: {
+            if (fence._device_handle != queue._device_handle) return error.InvalidHandle;
+            break :blk try fence.rawHandle();
+        } else null;
+        if (options.submits.len == 0 and fence_handle == null) return;
+        const queue_submit2 = queue.queue_submit2 orelse return error.MissingCommand;
+
+        var wait_infos: [submission_batch_count_max][submission_item_count_max]raw.VkSemaphoreSubmitInfo = undefined;
+        var command_infos: [submission_batch_count_max][submission_item_count_max]raw.VkCommandBufferSubmitInfo = undefined;
+        var signal_infos: [submission_batch_count_max][submission_item_count_max]raw.VkSemaphoreSubmitInfo = undefined;
+        var performance_query_infos: [submission_batch_count_max]raw.VkPerformanceQuerySubmitInfoKHR = undefined;
+        var submit_infos: [submission_batch_count_max]raw.VkSubmitInfo2 = undefined;
+
+        for (options.submits, 0..) |submit_options, submit_index| {
+            if (submit_options.waits.len > submission_item_count_max or
+                submit_options.command_buffers.len > submission_item_count_max or
+                submit_options.signals.len > submission_item_count_max)
+            {
+                return error.CountOverflow;
+            }
+            for (submit_options.waits, 0..) |wait, index| {
+                if (wait.semaphore._device_handle != queue._device_handle) {
+                    return error.InvalidHandle;
+                }
+                if (wait.semaphore.kind == .binary and wait.value != 0) {
+                    return error.InvalidOptions;
+                }
+                const wait_handle = try wait.semaphore.rawHandle();
+                for (submit_options.waits[0..index]) |previous| {
+                    if (try previous.semaphore.rawHandle() == wait_handle) {
+                        return error.InvalidOptions;
+                    }
+                }
+                wait_infos[submit_index][index] = .{
+                    .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+                    .semaphore = wait_handle,
+                    .value = wait.value,
+                    .stageMask = wait.stage.toRaw(),
+                    .deviceIndex = wait.device_index,
+                };
+            }
+            for (submit_options.command_buffers, 0..) |command_buffer, index| {
+                const buffer = command_buffer.command_buffer;
+                if (buffer._device_handle != queue._device_handle) return error.InvalidHandle;
+                if (command_buffer.device_mask == 0) return error.InvalidOptions;
+                const handle = try buffer.rawHandle();
+                if (buffer.state != .executable) return error.InvalidOptions;
+                for (options.submits[0..submit_index]) |previous_submit| {
+                    for (previous_submit.command_buffers) |previous| {
+                        if (try previous.command_buffer.rawHandle() == handle) {
+                            return error.InvalidOptions;
+                        }
+                    }
+                }
+                for (submit_options.command_buffers[0..index]) |previous| {
+                    if (try previous.command_buffer.rawHandle() == handle) {
+                        return error.InvalidOptions;
+                    }
+                }
+                command_infos[submit_index][index] = .{
+                    .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                    .commandBuffer = handle,
+                    .deviceMask = command_buffer.device_mask,
+                };
+            }
+            for (submit_options.signals, 0..) |signal, index| {
+                if (signal.semaphore._device_handle != queue._device_handle) {
+                    return error.InvalidHandle;
+                }
+                if (signal.semaphore.kind == .binary and signal.value != 0) {
+                    return error.InvalidOptions;
+                }
+                if (signal.semaphore.kind == .timeline and signal.value == 0) {
+                    return error.InvalidOptions;
+                }
+                const signal_handle = try signal.semaphore.rawHandle();
+                for (submit_options.signals[0..index]) |previous| {
+                    if (try previous.semaphore.rawHandle() == signal_handle) {
+                        return error.InvalidOptions;
+                    }
+                }
+                for (submit_options.waits) |wait| {
+                    if (try wait.semaphore.rawHandle() != signal_handle) continue;
+                    if (signal.semaphore.kind == .binary or signal.value <= wait.value) {
+                        return error.InvalidOptions;
+                    }
+                }
+                signal_infos[submit_index][index] = .{
+                    .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+                    .semaphore = signal_handle,
+                    .value = signal.value,
+                    .stageMask = signal.stage.toRaw(),
+                    .deviceIndex = signal.device_index,
+                };
+            }
+            if (submit_options.performance_query_pass) |counter_pass_index| {
+                performance_query_infos[submit_index] = .{
+                    .sType = raw.VK_STRUCTURE_TYPE_PERFORMANCE_QUERY_SUBMIT_INFO_KHR,
+                    .counterPassIndex = counter_pass_index,
+                };
+            }
+            submit_infos[submit_index] = .{
+                .sType = raw.VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                .pNext = if (submit_options.performance_query_pass != null)
+                    &performance_query_infos[submit_index]
+                else
+                    null,
+                .flags = submit_options.flags.toRaw(),
+                .waitSemaphoreInfoCount = @intCast(submit_options.waits.len),
+                .pWaitSemaphoreInfos = if (submit_options.waits.len == 0)
+                    null
+                else
+                    wait_infos[submit_index][0..submit_options.waits.len].ptr,
+                .commandBufferInfoCount = @intCast(submit_options.command_buffers.len),
+                .pCommandBufferInfos = if (submit_options.command_buffers.len == 0)
+                    null
+                else
+                    command_infos[submit_index][0..submit_options.command_buffers.len].ptr,
+                .signalSemaphoreInfoCount = @intCast(submit_options.signals.len),
+                .pSignalSemaphoreInfos = if (submit_options.signals.len == 0)
+                    null
+                else
+                    signal_infos[submit_index][0..submit_options.signals.len].ptr,
+            };
+        }
+
+        try checkSuccess(queue_submit2(
+            queue._handle,
+            @intCast(options.submits.len),
+            if (options.submits.len == 0) null else submit_infos[0..options.submits.len].ptr,
+            fence_handle,
+        ));
+        for (options.submits) |submit_options| {
+            for (submit_options.command_buffers) |command_buffer| {
+                command_buffer.command_buffer.state = .pending;
+                command_buffer.command_buffer.pending_submissions += 1;
+            }
         }
     }
 
@@ -4005,6 +4179,7 @@ const DeviceDispatch = struct {
     destroy_device: CommandFunction(raw.PFN_vkDestroyDevice),
     get_device_queue: CommandFunction(raw.PFN_vkGetDeviceQueue),
     queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
+    queue_submit2: ?CommandFunction(raw.PFN_vkQueueSubmit2),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
     device_wait_idle: CommandFunction(raw.PFN_vkDeviceWaitIdle),
     create_image_view: CommandFunction(raw.PFN_vkCreateImageView),
@@ -4065,6 +4240,11 @@ const DeviceDispatch = struct {
                 handle,
                 raw.PFN_vkQueueSubmit,
                 "vkQueueSubmit",
+            ),
+            .queue_submit2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.queue_submit2,
             ),
             .queue_wait_idle = try loadDeviceRequired(
                 get_device_proc_addr,
@@ -4744,6 +4924,7 @@ const TestCommand = enum {
     surface_support,
     set_object_name,
     features2_alias_only,
+    submit2_alias_only,
 };
 
 var test_missing_command: TestCommand = .none;
@@ -4758,6 +4939,14 @@ var test_destroy_messenger_count: usize = 0;
 var test_destroy_surface_count: usize = 0;
 var test_create_messenger_count: usize = 0;
 var test_queue_submit_count: usize = 0;
+var test_queue_submit2_call_count: usize = 0;
+var test_queue_submit2_batch_count: u32 = 0;
+var test_queue_submit2_result: raw.VkResult = raw.VK_SUCCESS;
+var test_submit2_wait_value: u64 = 0;
+var test_submit2_command_device_mask: u32 = 0;
+var test_submit2_signal_value: u64 = 0;
+var test_submit2_flags: raw.VkSubmitFlags = 0;
+var test_submit2_performance_pass: ?u32 = null;
 var test_named_object_type: raw.VkObjectType = 0;
 var test_named_object_handle: u64 = 0;
 var test_resource_result: raw.VkResult = raw.VK_SUCCESS;
@@ -4845,6 +5034,11 @@ fn testGetDeviceProcAddr(
     _: raw.VkDevice,
     name: [*c]const u8,
 ) callconv(.c) raw.PFN_vkVoidFunction {
+    if (testNameEquals(name, "vkQueueSubmit2")) {
+        if (test_missing_command == .submit2_alias_only) return null;
+        return @ptrCast(&testQueueSubmit2);
+    }
+    if (testNameEquals(name, "vkQueueSubmit2KHR")) return @ptrCast(&testQueueSubmit2);
     if (!testNameEquals(name, "vkSetDebugUtilsObjectNameEXT")) return null;
     if (test_missing_command == .set_object_name) return null;
     return @ptrCast(&testSetObjectName);
@@ -5180,6 +5374,35 @@ fn testQueueSubmit(
     return raw.VK_SUCCESS;
 }
 
+fn testQueueSubmit2(
+    _: raw.VkQueue,
+    submit_count: u32,
+    submits: [*c]const raw.VkSubmitInfo2,
+    _: raw.VkFence,
+) callconv(.c) raw.VkResult {
+    test_queue_submit2_call_count += 1;
+    test_queue_submit2_batch_count = submit_count;
+    if (submit_count > 0) {
+        const submit = submits[0];
+        test_submit2_flags = submit.flags;
+        test_submit2_performance_pass = if (submit.pNext) |next| blk: {
+            const performance_info: *const raw.VkPerformanceQuerySubmitInfoKHR =
+                @ptrCast(@alignCast(next));
+            break :blk performance_info.counterPassIndex;
+        } else null;
+        if (submit.waitSemaphoreInfoCount > 0) {
+            test_submit2_wait_value = submit.pWaitSemaphoreInfos[0].value;
+        }
+        if (submit.commandBufferInfoCount > 0) {
+            test_submit2_command_device_mask = submit.pCommandBufferInfos[0].deviceMask;
+        }
+        if (submit.signalSemaphoreInfoCount > 0) {
+            test_submit2_signal_value = submit.pSignalSemaphoreInfos[0].value;
+        }
+    }
+    return test_queue_submit2_result;
+}
+
 fn testCreateMessenger(
     _: raw.VkInstance,
     _: [*c]const raw.VkDebugUtilsMessengerCreateInfoEXT,
@@ -5331,6 +5554,7 @@ fn testDevice() Device {
             .destroy_device = testDestroyDevice,
             .get_device_queue = testGetNullQueue,
             .queue_submit = testFunction(raw.PFN_vkQueueSubmit),
+            .queue_submit2 = testQueueSubmit2,
             .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
             .device_wait_idle = testFunction(raw.PFN_vkDeviceWaitIdle),
             .create_image_view = testCreateImageView,
@@ -5518,6 +5742,7 @@ test "queue submit rejects oversized slices before dispatch" {
         ._handle = testHandle(raw.VkQueue, 0x2100),
         ._device_handle = testHandle(raw.VkDevice, 0x2000),
         .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
         .queue_present_khr = null,
         .queue_begin_debug_utils_label_ext = null,
@@ -5657,6 +5882,7 @@ test "typed command recording and fence results avoid raw Vulkan at call sites" 
         ._handle = testHandle(raw.VkQueue, 0x2100),
         ._device_handle = device._handle.?,
         .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
         .queue_present_khr = null,
         .queue_begin_debug_utils_label_ext = null,
@@ -5850,6 +6076,7 @@ test "legacy submission rejects timeline semaphores before dispatch" {
         ._handle = testHandle(raw.VkQueue, 0x2100),
         ._device_handle = device._handle.?,
         .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
         .queue_present_khr = null,
         .queue_begin_debug_utils_label_ext = null,
@@ -5861,6 +6088,173 @@ test "legacy submission rejects timeline semaphores before dispatch" {
         queue.submit(.{ .signals = &.{&timeline} }),
     );
     try std.testing.expectEqual(@as(usize, 0), test_queue_submit_count);
+}
+
+test "submit2 assembles typed timeline and device-group submissions" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_queue_submit2_call_count = 0;
+    test_queue_submit2_batch_count = 0;
+    test_queue_submit2_result = raw.VK_SUCCESS;
+    test_submit2_wait_value = 0;
+    test_submit2_command_device_mask = 0;
+    test_submit2_signal_value = 0;
+    test_submit2_flags = 0;
+    test_submit2_performance_pass = null;
+
+    var device = testDevice();
+    defer device.deinit();
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
+    try command_buffer.begin(.{});
+    try command_buffer.end();
+    var timeline = try device.createSemaphore(.{ .kind = .timeline });
+    defer timeline.deinit();
+    var fence = try device.createFence(.{});
+    defer fence.deinit();
+    var queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+
+    try queue.submit2(.{});
+    try std.testing.expectEqual(@as(usize, 0), test_queue_submit2_call_count);
+    try queue.submit2(.{ .submits = &.{ .{}, .{} } });
+    try std.testing.expectEqual(@as(u32, 2), test_queue_submit2_batch_count);
+
+    try queue.submit2(.{
+        .submits = &.{.{
+            .flags = .init(&.{.protected}),
+            .performance_query_pass = 2,
+            .waits = &.{.{
+                .semaphore = &timeline,
+                .value = 3,
+                .stage = .init(&.{.all_commands}),
+                .device_index = 1,
+            }},
+            .command_buffers = &.{.{
+                .command_buffer = &command_buffer,
+                .device_mask = 3,
+            }},
+            .signals = &.{.{
+                .semaphore = &timeline,
+                .value = 4,
+                .stage = .init(&.{.all_commands}),
+                .device_index = 1,
+            }},
+        }},
+        .fence = &fence,
+    });
+    try std.testing.expectEqual(@as(u64, 3), test_submit2_wait_value);
+    try std.testing.expectEqual(@as(u32, 3), test_submit2_command_device_mask);
+    try std.testing.expectEqual(@as(u64, 4), test_submit2_signal_value);
+    try std.testing.expectEqual(
+        SubmitFlags.init(&.{.protected}).toRaw(),
+        test_submit2_flags,
+    );
+    try std.testing.expectEqual(@as(?u32, 2), test_submit2_performance_pass);
+    try std.testing.expectError(error.InvalidOptions, command_buffer.reset(false));
+    try command_buffer.markComplete();
+
+    queue.queue_submit2 = null;
+    try std.testing.expectError(
+        error.MissingCommand,
+        queue.submit2(.{ .submits = &.{.{}} }),
+    );
+}
+
+test "submit2 rejects invalid handles, values, masks, and duplicates before dispatch" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_queue_submit2_call_count = 0;
+    var device = testDevice();
+    defer device.deinit();
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
+    try command_buffer.begin(.{});
+    try command_buffer.end();
+    var binary = try device.createSemaphore(.{});
+    defer binary.deinit();
+    var timeline = try device.createSemaphore(.{ .kind = .timeline });
+    defer timeline.deinit();
+    const queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+
+    try std.testing.expectError(error.InvalidOptions, queue.submit2(.{
+        .submits = &.{.{ .waits = &.{.{ .semaphore = &binary, .value = 1 }} }},
+    }));
+    try std.testing.expectError(error.InvalidOptions, queue.submit2(.{
+        .submits = &.{.{ .waits = &.{
+            .{ .semaphore = &binary },
+            .{ .semaphore = &binary },
+        } }},
+    }));
+    try std.testing.expectError(error.InvalidOptions, queue.submit2(.{
+        .submits = &.{.{ .signals = &.{.{ .semaphore = &timeline, .value = 0 }} }},
+    }));
+    try std.testing.expectError(error.InvalidOptions, queue.submit2(.{
+        .submits = &.{.{ .command_buffers = &.{.{
+            .command_buffer = &command_buffer,
+            .device_mask = 0,
+        }} }},
+    }));
+    try std.testing.expectError(error.InvalidOptions, queue.submit2(.{
+        .submits = &.{.{ .command_buffers = &.{
+            .{ .command_buffer = &command_buffer },
+            .{ .command_buffer = &command_buffer },
+        } }},
+    }));
+    var foreign = binary;
+    foreign._device_handle = testHandle(raw.VkDevice, 0x9000);
+    try std.testing.expectError(error.InvalidHandle, queue.submit2(.{
+        .submits = &.{.{ .signals = &.{.{ .semaphore = &foreign }} }},
+    }));
+    try std.testing.expectEqual(@as(usize, 0), test_queue_submit2_call_count);
+}
+
+test "submit2 preserves device loss and resolves its KHR alias" {
+    var device = testDevice();
+    defer device.deinit();
+    test_missing_command = .submit2_alias_only;
+    defer test_missing_command = .none;
+    try std.testing.expect((try device.load(command.queue_submit2)) != null);
+
+    var queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+    test_queue_submit2_result = raw.VK_ERROR_DEVICE_LOST;
+    defer test_queue_submit2_result = raw.VK_SUCCESS;
+    try std.testing.expectError(
+        error.DeviceLost,
+        queue.submit2(.{ .submits = &.{.{}} }),
+    );
 }
 
 test "command pools reset generations and command buffers track pending state" {
@@ -5883,6 +6277,7 @@ test "command pools reset generations and command buffers track pending state" {
         ._handle = testHandle(raw.VkQueue, 0x2100),
         ._device_handle = device._handle.?,
         .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
         .queue_present_khr = null,
         .queue_begin_debug_utils_label_ext = null,
@@ -6038,6 +6433,7 @@ test "swapchain acquisition and presentation preserve operation statuses" {
         ._handle = testHandle(raw.VkQueue, 0x2100),
         ._device_handle = device._handle.?,
         .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
         .queue_present_khr = testQueuePresent,
         .queue_begin_debug_utils_label_ext = null,
@@ -6156,6 +6552,7 @@ test "surface and object-name wrappers normalize fake dispatch results" {
         ._handle = testHandle(raw.VkQueue, 0x2100),
         ._device_handle = testHandle(raw.VkDevice, 0x2000),
         .queue_submit = testFunction(raw.PFN_vkQueueSubmit),
+        .queue_submit2 = testQueueSubmit2,
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
         .queue_present_khr = null,
         .queue_begin_debug_utils_label_ext = null,

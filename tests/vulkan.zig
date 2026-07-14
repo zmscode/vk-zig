@@ -961,6 +961,7 @@ test "all public wrapper declarations compile" {
     _ = &vk.ext.debug_utils.MessengerConfig.fromHandler;
     _ = &vk.ext.debug_utils.MessengerConfig.fromHandlerWithContext;
     _ = &vk.Queue.submit;
+    _ = &vk.Queue.submit2;
     _ = &vk.Queue.submitRaw;
     _ = &vk.Queue.waitIdle;
     _ = &vk.Queue.present;

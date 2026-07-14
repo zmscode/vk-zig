@@ -317,6 +317,31 @@ try timeline.signal(1);
 const reached = try timeline.wait(1, .{ .nanoseconds = 1_000_000 });
 ```
 
+Use `Queue.submit2` for synchronization2 stage masks, timeline values, device-group masks, and
+protected submission. Core and `VK_KHR_synchronization2` command names are resolved internally:
+
+```zig
+try queue.submit2(.{
+    .submits = &.{.{
+        .waits = &.{.{
+            .semaphore = &timeline,
+            .value = 1,
+            .stage = .init(&.{.all_commands}),
+        }},
+        .command_buffers = &.{.{
+            .command_buffer = &command_buffer,
+            .device_mask = 1,
+        }},
+        .signals = &.{.{
+            .semaphore = &timeline,
+            .value = 2,
+            .stage = .init(&.{.all_commands}),
+        }},
+    }},
+    .fence = &frame_finished,
+});
+```
+
 See `examples/frame_resources.zig` for the complete undefined → transfer-destination → present
 transition, clear, acquire, submit, and present sequence. `submitRaw` remains available as an
 explicit advanced escape hatch.

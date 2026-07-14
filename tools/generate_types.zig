@@ -184,6 +184,20 @@ const flag_specs = [_]FlagSpec{
         .constant_prefix = "VK_PIPELINE_STAGE_",
     },
     .{
+        .registry_name = "VkPipelineStageFlagBits2",
+        .bit_name = "PipelineStage2Bit",
+        .flags_name = "PipelineStage2Flags",
+        .raw_flags_name = "VkPipelineStageFlags2",
+        .constant_prefix = "VK_PIPELINE_STAGE_2_",
+    },
+    .{
+        .registry_name = "VkSubmitFlagBits",
+        .bit_name = "SubmitBit",
+        .flags_name = "SubmitFlags",
+        .raw_flags_name = "VkSubmitFlags",
+        .constant_prefix = "VK_SUBMIT_",
+    },
+    .{
         .registry_name = "VkCommandPoolCreateFlagBits",
         .bit_name = "CommandPoolCreateBit",
         .flags_name = "CommandPoolCreateFlags",

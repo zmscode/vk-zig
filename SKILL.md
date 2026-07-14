@@ -102,7 +102,9 @@ is complete. Follow `examples/frame_resources.zig` for a complete raw-free clear
 Create timeline semaphores with `device.createSemaphore(.{ .kind = .timeline,
 .initial_value = value })`. Use `counterValue`, `signal`, `wait`, or
 `Device.waitTimelineSemaphores`; do not pass a timeline semaphore to legacy `Queue.submit`, image
-acquisition, or presentation, which require binary semaphores.
+acquisition, or presentation, which require binary semaphores. Use `Queue.submit2` when GPU waits
+or signals need timeline values, synchronization2 stage masks, protected submission, performance
+query pass chaining, or device-group indices and masks.
 
 Prefer `beginLabel` on command buffers and `beginLabelScope` on queues when labels are enabled.
 Call the returned scope's `deinit`; its end operation is idempotent. Use `submitRaw` and the
