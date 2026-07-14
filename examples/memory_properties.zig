@@ -14,22 +14,32 @@ pub fn main(init: std.process.Init) !void {
 
     for (devices) |*device| {
         const device_properties = device.properties();
-        const memory = device.memoryProperties();
+        const memory = try device.memoryProperties();
         std.log.info("{s} memory heaps:", .{vk.physicalDeviceName(&device_properties)});
 
-        for (memory.memoryHeaps[0..memory.memoryHeapCount], 0..) |heap, index| {
-            const size_mib = @divFloor(heap.size, 1024 * 1024);
+        for (memory.heaps()) |heap| {
+            const size_mib = @divFloor(heap.size_bytes, 1024 * 1024);
             std.log.info(
-                "  heap {d}: {d} MiB, flags=0x{x}",
-                .{ index, size_mib, heap.flags },
+                "  heap {d}: {d} MiB, device-local={}",
+                .{ heap.index.toRaw(), size_mib, heap.isDeviceLocal() },
             );
         }
-        for (memory.memoryTypes[0..memory.memoryTypeCount], 0..) |memory_type, index| {
+        for (memory.types()) |memory_type| {
             std.log.info(
-                "  type {d}: heap={d}, flags=0x{x}",
-                .{ index, memory_type.heapIndex, memory_type.propertyFlags },
+                "  type {d}: heap={d}, device-local={}, host-visible={}, host-coherent={}",
+                .{
+                    memory_type.index.toRaw(),
+                    memory_type.heap_index.toRaw(),
+                    memory_type.flags.contains(.device_local),
+                    memory_type.flags.contains(.host_visible),
+                    memory_type.flags.contains(.host_coherent),
+                },
             );
         }
+        std.log.info(
+            "  total device-local memory: {d} MiB",
+            .{@divFloor(try memory.deviceLocalBytes(), 1024 * 1024)},
+        );
         const host_visible = device.findMemoryTypeIndex(.{
             .type_bits = std.math.maxInt(u32),
             .required_flags = .init(&.{.host_visible}),

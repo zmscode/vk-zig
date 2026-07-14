@@ -108,6 +108,32 @@ pub const SwapchainImageIndex = enum(u32) {
     }
 };
 
+/// Index of a physical-device memory type.
+pub const MemoryTypeIndex = enum(u32) {
+    _,
+
+    pub fn fromRaw(value: u32) MemoryTypeIndex {
+        return @enumFromInt(value);
+    }
+
+    pub fn toRaw(index: MemoryTypeIndex) u32 {
+        return @intFromEnum(index);
+    }
+};
+
+/// Index of a physical-device memory heap.
+pub const MemoryHeapIndex = enum(u32) {
+    _,
+
+    pub fn fromRaw(value: u32) MemoryHeapIndex {
+        return @enumFromInt(value);
+    }
+
+    pub fn toRaw(index: MemoryHeapIndex) u32 {
+        return @intFromEnum(index);
+    }
+};
+
 /// Vulkan timeout without exposing the `maxInt(u64)` infinite-time sentinel.
 pub const Timeout = union(enum) {
     infinite,
@@ -164,6 +190,8 @@ const name_count_max = 256;
 const device_queue_count_max = 64;
 const submission_item_count_max = 64;
 const swapchain_image_count_max = 4096;
+const memory_type_count_max: usize = raw.VK_MAX_MEMORY_TYPES;
+const memory_heap_count_max: usize = raw.VK_MAX_MEMORY_HEAPS;
 
 const InstanceHandle = NonNullHandle(raw.VkInstance);
 const PhysicalDeviceHandle = NonNullHandle(raw.VkPhysicalDevice);
@@ -204,7 +232,10 @@ pub const Error = error{
     MemoryTypeNotFound,
     SurfaceLost,
     NativeWindowInUse,
+    FullScreenExclusiveLost,
     BufferTooSmall,
+    InvalidProperties,
+    SizeOverflow,
 };
 
 pub const LoaderError = error{
@@ -1426,10 +1457,27 @@ pub const PhysicalDevice = struct {
         return value;
     }
 
-    pub fn memoryProperties(device: *const PhysicalDevice) raw.VkPhysicalDeviceMemoryProperties {
+    /// Returns the raw fixed-capacity Vulkan structure for diagnostics and interop.
+    pub fn memoryPropertiesRaw(device: *const PhysicalDevice) raw.VkPhysicalDeviceMemoryProperties {
         var value: raw.VkPhysicalDeviceMemoryProperties = .{};
         device.dispatch.get_physical_device_memory_properties(device._handle, &value);
         return value;
+    }
+
+    /// Returns an owned typed snapshot whose slices borrow from the returned value.
+    pub fn memoryProperties(device: *const PhysicalDevice) Error!MemoryProperties {
+        var memory: MemoryProperties = undefined;
+        try device.memoryPropertiesInto(&memory);
+        return memory;
+    }
+
+    /// Initializes caller-owned typed storage without returning a large intermediate value.
+    pub fn memoryPropertiesInto(
+        device: *const PhysicalDevice,
+        memory: *MemoryProperties,
+    ) Error!void {
+        const raw_properties = device.memoryPropertiesRaw();
+        try memory.initFromRaw(&raw_properties);
     }
 
     pub fn queueFamilyProperties(
@@ -1634,8 +1682,9 @@ pub const PhysicalDevice = struct {
     pub fn findMemoryTypeIndex(
         device: *const PhysicalDevice,
         options: MemoryTypeOptions,
-    ) Error!u32 {
-        return selectMemoryTypeIndex(device.memoryProperties(), options);
+    ) Error!MemoryTypeIndex {
+        const memory = try device.memoryProperties();
+        return memory.findType(options);
     }
 
     pub fn createDevice(
@@ -1761,33 +1810,150 @@ pub const MemoryTypeOptions = struct {
     preferred_flags: MemoryPropertyFlags = .empty,
 };
 
-/// Selects a compatible memory type, preferring the candidate with the most
-/// requested preferred flags. Equal candidates preserve Vulkan's order.
-pub fn selectMemoryTypeIndex(
-    memory: raw.VkPhysicalDeviceMemoryProperties,
-    options: MemoryTypeOptions,
-) Error!u32 {
-    if (memory.memoryTypeCount > memory.memoryTypes.len) return error.InvalidOptions;
-    const required_flags = options.required_flags.toRaw();
-    const preferred_flags = options.preferred_flags.toRaw();
-    var best_index: ?u32 = null;
-    var best_score: u32 = 0;
-    for (memory.memoryTypes[0..memory.memoryTypeCount], 0..) |memory_type, index| {
-        const index_u32: u32 = @intCast(index);
-        const type_bit = @as(u32, 1) << @intCast(index_u32);
-        if ((options.type_bits & type_bit) == 0) continue;
-        if ((memory_type.propertyFlags & required_flags) != required_flags) {
-            continue;
+pub const MemoryType = struct {
+    index: MemoryTypeIndex,
+    heap_index: MemoryHeapIndex,
+    flags: MemoryPropertyFlags,
+
+    pub fn supports(memory_type: MemoryType, required_flags: MemoryPropertyFlags) bool {
+        return memory_type.flags.containsAll(required_flags);
+    }
+};
+
+pub const MemoryHeap = struct {
+    index: MemoryHeapIndex,
+    size_bytes: u64,
+    flags: MemoryHeapFlags,
+
+    pub fn isDeviceLocal(heap: MemoryHeap) bool {
+        return heap.flags.contains(.device_local);
+    }
+};
+
+/// An owned typed snapshot of a physical device's bounded memory properties.
+/// Slices returned by `types` and `heaps` borrow from this value.
+pub const MemoryProperties = struct {
+    _memory_types: [memory_type_count_max]MemoryType,
+    _memory_heaps: [memory_heap_count_max]MemoryHeap,
+    _memory_type_count: u32,
+    _memory_heap_count: u32,
+
+    pub fn fromRaw(
+        raw_properties: *const raw.VkPhysicalDeviceMemoryProperties,
+    ) Error!MemoryProperties {
+        var properties: MemoryProperties = undefined;
+        try properties.initFromRaw(raw_properties);
+        return properties;
+    }
+
+    pub fn initFromRaw(
+        properties: *MemoryProperties,
+        raw_properties: *const raw.VkPhysicalDeviceMemoryProperties,
+    ) Error!void {
+        if (raw_properties.memoryTypeCount > memory_type_count_max) {
+            return error.InvalidProperties;
         }
-        const score: u32 = @intCast(@popCount(
-            memory_type.propertyFlags & preferred_flags,
-        ));
-        if (best_index == null or score > best_score) {
-            best_index = index_u32;
-            best_score = score;
+        if (raw_properties.memoryHeapCount > memory_heap_count_max) {
+            return error.InvalidProperties;
+        }
+
+        properties._memory_type_count = raw_properties.memoryTypeCount;
+        properties._memory_heap_count = raw_properties.memoryHeapCount;
+        for (
+            raw_properties.memoryHeaps[0..raw_properties.memoryHeapCount],
+            properties._memory_heaps[0..raw_properties.memoryHeapCount],
+            0..,
+        ) |raw_heap, *memory_heap, index| {
+            memory_heap.* = .{
+                .index = .fromRaw(@intCast(index)),
+                .size_bytes = raw_heap.size,
+                .flags = .fromRaw(raw_heap.flags),
+            };
+        }
+        for (
+            raw_properties.memoryTypes[0..raw_properties.memoryTypeCount],
+            properties._memory_types[0..raw_properties.memoryTypeCount],
+            0..,
+        ) |raw_type, *memory_type, index| {
+            if (raw_type.heapIndex >= raw_properties.memoryHeapCount) {
+                return error.InvalidProperties;
+            }
+            memory_type.* = .{
+                .index = .fromRaw(@intCast(index)),
+                .heap_index = .fromRaw(raw_type.heapIndex),
+                .flags = .fromRaw(raw_type.propertyFlags),
+            };
         }
     }
-    return best_index orelse error.MemoryTypeNotFound;
+
+    pub fn types(properties: *const MemoryProperties) []const MemoryType {
+        return properties._memory_types[0..properties._memory_type_count];
+    }
+
+    pub fn heaps(properties: *const MemoryProperties) []const MemoryHeap {
+        return properties._memory_heaps[0..properties._memory_heap_count];
+    }
+
+    pub fn heap(
+        properties: *const MemoryProperties,
+        index: MemoryHeapIndex,
+    ) ?*const MemoryHeap {
+        const offset: usize = index.toRaw();
+        if (offset >= properties._memory_heap_count) return null;
+        return &properties._memory_heaps[offset];
+    }
+
+    pub fn deviceLocalBytes(properties: *const MemoryProperties) Error!u64 {
+        var size_bytes_total: u64 = 0;
+        for (properties.heaps()) |memory_heap| {
+            if (!memory_heap.isDeviceLocal()) continue;
+            size_bytes_total = std.math.add(u64, size_bytes_total, memory_heap.size_bytes) catch {
+                return error.SizeOverflow;
+            };
+        }
+        return size_bytes_total;
+    }
+
+    /// Selects a compatible type, preferring the candidate with the most preferred flags.
+    pub fn findType(
+        properties: *const MemoryProperties,
+        options: MemoryTypeOptions,
+    ) Error!MemoryTypeIndex {
+        var best_index: ?MemoryTypeIndex = null;
+        var best_score: u32 = 0;
+        for (properties.types()) |memory_type| {
+            const index_u32 = memory_type.index.toRaw();
+            const type_bit = @as(u32, 1) << @intCast(index_u32);
+            if ((options.type_bits & type_bit) == 0) continue;
+            if (!memory_type.supports(options.required_flags)) continue;
+
+            const score: u32 = @intCast(@popCount(
+                memory_type.flags.toRaw() & options.preferred_flags.toRaw(),
+            ));
+            if (best_index == null or score > best_score) {
+                best_index = memory_type.index;
+                best_score = score;
+            }
+        }
+        return best_index orelse error.MemoryTypeNotFound;
+    }
+};
+
+/// Selects a compatible type from typed memory properties.
+pub fn selectMemoryTypeIndex(
+    properties: *const MemoryProperties,
+    options: MemoryTypeOptions,
+) Error!MemoryTypeIndex {
+    return properties.findType(options);
+}
+
+/// Performs typed selection from a raw snapshot for advanced diagnostics and interop.
+pub fn selectMemoryTypeIndexRaw(
+    raw_properties: *const raw.VkPhysicalDeviceMemoryProperties,
+    options: MemoryTypeOptions,
+) Error!MemoryTypeIndex {
+    const properties = try MemoryProperties.fromRaw(raw_properties);
+    return properties.findType(options);
 }
 
 pub const DeviceQueueOptions = struct {
@@ -3597,6 +3763,9 @@ pub fn checkSuccess(result: raw.VkResult) Error!void {
     if (result == raw.VK_ERROR_UNKNOWN) return error.UnknownVulkanError;
     if (result == raw.VK_ERROR_SURFACE_LOST_KHR) return error.SurfaceLost;
     if (result == raw.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) return error.NativeWindowInUse;
+    if (result == raw.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
+        return error.FullScreenExclusiveLost;
+    }
     return error.UnexpectedVulkanResult;
 }
 
@@ -3794,6 +3963,7 @@ var test_end_command_label_count: usize = 0;
 var test_acquire_result: raw.VkResult = raw.VK_SUCCESS;
 var test_acquire_image_index: u32 = 0;
 var test_present_result: raw.VkResult = raw.VK_SUCCESS;
+var test_memory_properties: raw.VkPhysicalDeviceMemoryProperties = .{};
 
 fn testHandle(comptime OptionalHandle: type, address: usize) NonNullHandle(OptionalHandle) {
     return @ptrFromInt(address);
@@ -3855,6 +4025,13 @@ fn testDestroyDevice(
     _: [*c]const raw.VkAllocationCallbacks,
 ) callconv(.c) void {
     test_destroy_device_count += 1;
+}
+
+fn testGetPhysicalDeviceMemoryProperties(
+    _: raw.VkPhysicalDevice,
+    properties: [*c]raw.VkPhysicalDeviceMemoryProperties,
+) callconv(.c) void {
+    properties.* = test_memory_properties;
 }
 
 fn testCreateImageView(
@@ -4188,9 +4365,7 @@ fn testInstance() Instance {
             .get_physical_device_properties = testFunction(raw.PFN_vkGetPhysicalDeviceProperties),
             .get_physical_device_features = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures),
             .get_physical_device_features2 = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
-            .get_physical_device_memory_properties = testFunction(
-                raw.PFN_vkGetPhysicalDeviceMemoryProperties,
-            ),
+            .get_physical_device_memory_properties = testGetPhysicalDeviceMemoryProperties,
             .get_physical_device_queue_family_properties = testFunction(
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
             ),
@@ -4762,4 +4937,47 @@ test "surface and object-name wrappers normalize fake dispatch results" {
         error.MissingCommand,
         device.setObjectName(.{ .device = &device }, "test-device"),
     );
+}
+
+test "physical device memory queries produce validated owned snapshots" {
+    test_memory_properties = .{};
+    test_memory_properties.memoryHeapCount = 2;
+    test_memory_properties.memoryHeaps[0] = .{
+        .size = 512,
+        .flags = @intCast(raw.VK_MEMORY_HEAP_DEVICE_LOCAL_BIT),
+    };
+    test_memory_properties.memoryHeaps[1] = .{
+        .size = 256,
+        .flags = 0,
+    };
+    test_memory_properties.memoryTypeCount = 1;
+    test_memory_properties.memoryTypes[0] = .{
+        .propertyFlags = @intCast(
+            raw.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                raw.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        ),
+        .heapIndex = 0,
+    };
+
+    var instance = testInstance();
+    defer instance.deinit();
+    const physical_device: PhysicalDevice = .{
+        ._handle = testHandle(raw.VkPhysicalDevice, 0x1100),
+        ._instance_handle = testHandle(raw.VkInstance, 0x1000),
+        .dispatch = instance.dispatch,
+    };
+
+    const raw_snapshot = physical_device.memoryPropertiesRaw();
+    try std.testing.expectEqual(@as(u32, 2), raw_snapshot.memoryHeapCount);
+
+    var into: MemoryProperties = undefined;
+    try physical_device.memoryPropertiesInto(&into);
+    try std.testing.expectEqual(@as(usize, 2), into.heaps().len);
+    try std.testing.expectEqual(@as(u64, 512), try into.deviceLocalBytes());
+    try std.testing.expect(into.types()[0].flags.contains(.host_visible));
+
+    const returned = try physical_device.memoryProperties();
+    test_memory_properties = .{};
+    try std.testing.expectEqual(@as(usize, 1), returned.types().len);
+    try std.testing.expectEqual(@as(u64, 512), try returned.deviceLocalBytes());
 }

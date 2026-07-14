@@ -65,6 +65,11 @@ Enumerate queue families with `queueFamilies`, select them with `QueueFamily.sup
 `QueueFamily.presentationSupport` when a surface is involved. Use `findMemoryTypeIndex` with
 required and preferred property flags instead of manually scanning `memoryTypes`.
 
+Query `memoryProperties` for an owned typed snapshot. Iterate `types()` and `heaps()`, use typed
+flags and indices, and call `deviceLocalBytes()` rather than reinterpreting raw heap flags.
+Use `memoryPropertiesInto` for stable caller-owned storage and `memoryPropertiesRaw` only for
+advanced diagnostics or interop.
+
 Keep `QueueFamilyIndex`, `QueueIndex`, and `SwapchainImageIndex` distinct. Use
 `vk.QueueIndex.first` for the common first queue; do not cast one index domain into another.
 

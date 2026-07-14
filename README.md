@@ -139,6 +139,22 @@ const memory_type = try physical_device.findMemoryTypeIndex(.{
 });
 ```
 
+Physical memory properties are owned typed snapshots, so their slices remain valid as long as the
+snapshot does. Counts and heap indices are validated before any slice is exposed:
+
+```zig
+const memory = try physical_device.memoryProperties();
+for (memory.heaps()) |heap| {
+    if (heap.isDeviceLocal()) {
+        std.log.info("heap {d}: {d} bytes", .{ heap.index.toRaw(), heap.size_bytes });
+    }
+}
+const device_local_bytes = try memory.deviceLocalBytes();
+```
+
+Use `memoryPropertiesInto` when initializing stable caller-owned storage. The explicitly named
+`memoryPropertiesRaw` method remains available for diagnostics and interop.
+
 `createInstanceRaw` and `createDeviceRaw` retain direct create-info control. Live wrapper handles
 are private and non-null by construction; use the checked `rawHandle()` methods at FFI boundaries.
 
@@ -335,8 +351,11 @@ try enabled_extensions.append(vk.extension.ext_debug_utils.name);
 
 try device.setObjectName(.{ .device = &device }, "main-device");
 try device.setObjectName(.{ .image = image }, "scene-color");
-try queue.beginLabel(.{ .name = "opaque-pass", .color = .{ 0.2, 0.4, 1.0, 1.0 } });
-defer queue.endLabel() catch {};
+var label = try queue.beginLabelScope(.{
+    .name = "opaque-pass",
+    .color = .{ 0.2, 0.4, 1.0, 1.0 },
+});
+defer label.deinit();
 ```
 
 The logger and whether unavailable diagnostics are fatal remain application policy.

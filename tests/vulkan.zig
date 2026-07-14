@@ -335,6 +335,7 @@ test "typed queue capabilities and memory selection avoid raw bit arithmetic" {
     try std.testing.expectEqual(@as(u32, 2), graphics_transfer.queueCount());
 
     var memory: vk.raw.VkPhysicalDeviceMemoryProperties = .{};
+    memory.memoryHeapCount = 1;
     memory.memoryTypeCount = 3;
     memory.memoryTypes[0].propertyFlags =
         vk.MemoryPropertyFlags.init(&.{.host_visible}).toRaw();
@@ -342,15 +343,108 @@ test "typed queue capabilities and memory selection avoid raw bit arithmetic" {
         vk.MemoryPropertyFlags.init(&.{ .host_visible, .host_coherent }).toRaw();
     memory.memoryTypes[2].propertyFlags =
         vk.MemoryPropertyFlags.init(&.{.device_local}).toRaw();
-    try std.testing.expectEqual(@as(u32, 1), try vk.selectMemoryTypeIndex(memory, .{
+    const typed_memory = try vk.MemoryProperties.fromRaw(&memory);
+    try std.testing.expectEqual(vk.MemoryTypeIndex.fromRaw(1), try vk.selectMemoryTypeIndex(&typed_memory, .{
         .type_bits = 0b111,
         .required_flags = .init(&.{.host_visible}),
         .preferred_flags = .init(&.{.host_coherent}),
     }));
-    try std.testing.expectError(error.MemoryTypeNotFound, vk.selectMemoryTypeIndex(memory, .{
+    try std.testing.expectError(error.MemoryTypeNotFound, vk.selectMemoryTypeIndex(&typed_memory, .{
         .type_bits = 0b011,
         .required_flags = .init(&.{.device_local}),
     }));
+}
+
+test "typed memory properties validate counts and own their slice storage" {
+    var raw_memory: vk.raw.VkPhysicalDeviceMemoryProperties = .{};
+    const empty = try vk.MemoryProperties.fromRaw(&raw_memory);
+    try std.testing.expectEqual(@as(usize, 0), empty.types().len);
+    try std.testing.expectEqual(@as(usize, 0), empty.heaps().len);
+    try std.testing.expectEqual(@as(u64, 0), try empty.deviceLocalBytes());
+
+    raw_memory.memoryHeapCount = @intCast(raw_memory.memoryHeaps.len);
+    raw_memory.memoryTypeCount = @intCast(raw_memory.memoryTypes.len);
+    for (&raw_memory.memoryTypes) |*memory_type| memory_type.heapIndex = 0;
+    const maximum = try vk.MemoryProperties.fromRaw(&raw_memory);
+    try std.testing.expectEqual(raw_memory.memoryTypes.len, maximum.types().len);
+    try std.testing.expectEqual(raw_memory.memoryHeaps.len, maximum.heaps().len);
+
+    raw_memory.memoryTypeCount = @intCast(raw_memory.memoryTypes.len + 1);
+    try std.testing.expectError(
+        error.InvalidProperties,
+        vk.MemoryProperties.fromRaw(&raw_memory),
+    );
+    raw_memory.memoryTypeCount = 0;
+    raw_memory.memoryHeapCount = @intCast(raw_memory.memoryHeaps.len + 1);
+    try std.testing.expectError(
+        error.InvalidProperties,
+        vk.MemoryProperties.fromRaw(&raw_memory),
+    );
+}
+
+test "typed memory properties convert flags and sum every device-local heap" {
+    var raw_memory: vk.raw.VkPhysicalDeviceMemoryProperties = .{};
+    raw_memory.memoryHeapCount = 3;
+    raw_memory.memoryHeaps[0] = .{
+        .size = 256,
+        .flags = vk.MemoryHeapFlags.init(&.{.device_local}).toRaw(),
+    };
+    raw_memory.memoryHeaps[1] = .{ .size = 512 };
+    raw_memory.memoryHeaps[2] = .{
+        .size = 1024,
+        .flags = vk.MemoryHeapFlags.init(&.{.device_local}).toRaw(),
+    };
+    raw_memory.memoryTypeCount = 2;
+    raw_memory.memoryTypes[0] = .{
+        .propertyFlags = vk.MemoryPropertyFlags.init(&.{.host_visible}).toRaw(),
+        .heapIndex = 1,
+    };
+    raw_memory.memoryTypes[1] = .{
+        .propertyFlags = vk.MemoryPropertyFlags.init(&.{ .device_local, .host_visible }).toRaw(),
+        .heapIndex = 2,
+    };
+
+    const memory = try vk.MemoryProperties.fromRaw(&raw_memory);
+    try std.testing.expect(memory.heaps()[0].isDeviceLocal());
+    try std.testing.expect(!memory.heaps()[1].isDeviceLocal());
+    try std.testing.expect(memory.types()[1].supports(.init(&.{.device_local})));
+    try std.testing.expectEqual(@as(u64, 1280), try memory.deviceLocalBytes());
+    try std.testing.expectEqual(
+        vk.MemoryHeapIndex.fromRaw(2),
+        memory.types()[1].heap_index,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1024),
+        memory.heap(memory.types()[1].heap_index).?.size_bytes,
+    );
+
+    const selected = try memory.findType(.{
+        .type_bits = 0b11,
+        .required_flags = .init(&.{.host_visible}),
+        .preferred_flags = .init(&.{.device_local}),
+    });
+    try std.testing.expectEqual(vk.MemoryTypeIndex.fromRaw(1), selected);
+
+    raw_memory.memoryHeapCount = 2;
+    raw_memory.memoryHeaps[0] = .{
+        .size = std.math.maxInt(u64),
+        .flags = vk.MemoryHeapFlags.init(&.{.device_local}).toRaw(),
+    };
+    raw_memory.memoryHeaps[1] = .{
+        .size = 1,
+        .flags = vk.MemoryHeapFlags.init(&.{.device_local}).toRaw(),
+    };
+    raw_memory.memoryTypeCount = 0;
+    const overflowing = try vk.MemoryProperties.fromRaw(&raw_memory);
+    try std.testing.expectError(error.SizeOverflow, overflowing.deviceLocalBytes());
+
+    raw_memory.memoryHeapCount = 3;
+    raw_memory.memoryTypeCount = 2;
+    raw_memory.memoryTypes[1].heapIndex = 3;
+    try std.testing.expectError(
+        error.InvalidProperties,
+        vk.MemoryProperties.fromRaw(&raw_memory),
+    );
 }
 
 test "debug utility options produce reusable callback and label views" {
@@ -593,6 +687,10 @@ test "checkSuccess maps only success-only Vulkan results" {
         .{ vk.raw.VK_ERROR_UNKNOWN, error.UnknownVulkanError },
         .{ vk.raw.VK_ERROR_SURFACE_LOST_KHR, error.SurfaceLost },
         .{ vk.raw.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, error.NativeWindowInUse },
+        .{
+            vk.raw.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT,
+            error.FullScreenExclusiveLost,
+        },
     };
     for (cases) |case| try std.testing.expectError(case[1], vk.checkSuccess(case[0]));
     try std.testing.expectError(error.UnexpectedVulkanResult, vk.checkSuccess(-1234567));
@@ -628,6 +726,8 @@ test "all public wrapper declarations compile" {
     _ = &vk.PhysicalDevice.features;
     _ = &vk.PhysicalDevice.features2;
     _ = &vk.PhysicalDevice.memoryProperties;
+    _ = &vk.PhysicalDevice.memoryPropertiesInto;
+    _ = &vk.PhysicalDevice.memoryPropertiesRaw;
     _ = &vk.PhysicalDevice.queueFamilyProperties;
     _ = &vk.PhysicalDevice.queueFamilies;
     _ = &vk.PhysicalDevice.deviceExtensions;
@@ -636,6 +736,15 @@ test "all public wrapper declarations compile" {
     _ = &vk.PhysicalDevice.surfaceFormats;
     _ = &vk.PhysicalDevice.presentModes;
     _ = &vk.PhysicalDevice.findMemoryTypeIndex;
+    _ = &vk.MemoryProperties.fromRaw;
+    _ = &vk.MemoryProperties.initFromRaw;
+    _ = &vk.MemoryProperties.types;
+    _ = &vk.MemoryProperties.heaps;
+    _ = &vk.MemoryProperties.heap;
+    _ = &vk.MemoryProperties.deviceLocalBytes;
+    _ = &vk.MemoryProperties.findType;
+    _ = &vk.selectMemoryTypeIndex;
+    _ = &vk.selectMemoryTypeIndexRaw;
     _ = &vk.PhysicalDevice.createDevice;
     _ = &vk.PhysicalDevice.createDeviceRaw;
     _ = &vk.Device.deinit;

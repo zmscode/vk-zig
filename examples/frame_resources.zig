@@ -8,8 +8,8 @@ pub const FrameResult = enum {
     acquire_timeout,
 };
 
-/// Records, submits, and presents one clear-only frame. Window-system integration
-/// supplies the already-created device, swapchain, and queues.
+/// Records, submits, and presents one clear-only frame. `image_initialized`
+/// stores one layout bit for every image and must be reset on swapchain recreation.
 pub fn clearAndPresent(
     device: *const vk.Device,
     swapchain: *const vk.Swapchain,
@@ -17,6 +17,7 @@ pub fn clearAndPresent(
     present_queue: *const vk.Queue,
     graphics_family: vk.QueueFamilyIndex,
     format: vk.Format,
+    image_initialized: []bool,
 ) !FrameResult {
     var command_pool = try device.createCommandPool(.{
         .family_index = graphics_family,
@@ -36,12 +37,12 @@ pub fn clearAndPresent(
         .success => {},
         .timeout => unreachable,
     }
-    const acquired_index = switch (try swapchain.acquireNextImage(.{
+    const acquired_index, const acquire_suboptimal = switch (try swapchain.acquireNextImage(.{
         .timeout = .{ .nanoseconds = std.time.ns_per_s },
         .semaphore = &image_available,
     })) {
-        .success => |index| index,
-        .suboptimal => |index| index,
+        .success => |index| .{ index, false },
+        .suboptimal => |index| .{ index, true },
         .timeout, .not_ready => return .acquire_timeout,
         .out_of_date => return .swapchain_out_of_date,
     };
@@ -50,7 +51,12 @@ pub fn clearAndPresent(
     const images = try swapchain.imagesInto(&image_storage);
     const image_offset: usize = @intCast(acquired_index.toRaw());
     if (image_offset >= images.len) return error.InvalidHandle;
+    if (image_offset >= image_initialized.len) return error.BufferTooSmall;
     const image = &images[image_offset];
+    const old_layout: vk.ImageLayout = if (image_initialized[image_offset])
+        .present_src_khr
+    else
+        .undefined_;
 
     const color_range: vk.ImageSubresourceRange = .{
         .aspect_mask = .init(&.{.color}),
@@ -65,13 +71,15 @@ pub fn clearAndPresent(
 
     // From this point onward, any error must wait for submitted device work
     // before the deferred resource destruction runs.
-    errdefer device.waitIdle() catch {};
+    errdefer device.waitIdle() catch |wait_error| {
+        std.log.err("waiting for failed frame cleanup: {s}", .{@errorName(wait_error)});
+    };
     try command_buffer.begin(.{ .flags = .init(&.{.one_time_submit}) });
     try command_buffer.imageBarrier(.{
         .source_stage = .init(&.{.top_of_pipe}),
         .destination_stage = .init(&.{.transfer}),
         .destination_access = .init(&.{.transfer_write}),
-        .old_layout = .undefined_,
+        .old_layout = old_layout,
         .new_layout = .transfer_dst_optimal,
         .image = image,
         .subresource_range = color_range,
@@ -103,6 +111,7 @@ pub fn clearAndPresent(
         .signals = &.{&render_finished},
         .fence = &frame_finished,
     });
+    image_initialized[image_offset] = true;
     const present_status = try present_queue.present(.{
         .swapchain = swapchain,
         .image_index = acquired_index,
@@ -110,7 +119,7 @@ pub fn clearAndPresent(
     });
     try device.waitIdle();
     return switch (present_status) {
-        .success => .presented,
+        .success => if (acquire_suboptimal) .suboptimal else .presented,
         .suboptimal => .suboptimal,
         .out_of_date => .swapchain_out_of_date,
     };
