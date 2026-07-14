@@ -79,7 +79,15 @@ test "typed device options reject invalid input before dispatch" {
         .priorities = &priorities,
     };
     try (vk.DeviceOptions{ .queues = &.{queue} }).validate();
-    try (vk.DeviceOptions{ .queues = &.{ queue, queue } }).validate();
+    const second_queue: vk.DeviceQueueOptions = .{
+        .family_index = 1,
+        .priorities = &priorities,
+    };
+    try (vk.DeviceOptions{ .queues = &.{ queue, second_queue } }).validate();
+    try std.testing.expectError(
+        error.InvalidOptions,
+        (vk.DeviceOptions{ .queues = &.{ queue, queue } }).validate(),
+    );
     try std.testing.expectError(
         error.InvalidOptions,
         (vk.DeviceOptions{ .queues = &.{} }).validate(),
@@ -96,6 +104,29 @@ test "typed device options reject invalid input before dispatch" {
         error.CountOverflow,
         (vk.DeviceOptions{ .queues = &too_many }).validate(),
     );
+
+    const valid_boundary_priorities = [_]f32{ 0.0, 1.0 };
+    try (vk.DeviceOptions{ .queues = &.{.{
+        .family_index = 1,
+        .priorities = &valid_boundary_priorities,
+    }} }).validate();
+
+    const invalid_priorities = [_]f32{
+        -0.01,
+        1.01,
+        std.math.nan(f32),
+        std.math.inf(f32),
+        -std.math.inf(f32),
+    };
+    for (invalid_priorities) |priority| {
+        try std.testing.expectError(
+            error.InvalidOptions,
+            (vk.DeviceOptions{ .queues = &.{.{
+                .family_index = 1,
+                .priorities = &.{priority},
+            }} }).validate(),
+        );
+    }
 }
 
 test "portability helpers match the selected build platform" {

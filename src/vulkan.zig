@@ -725,9 +725,19 @@ pub const DeviceOptions = struct {
         if (options.queues.len == 0) return error.InvalidOptions;
         if (options.queues.len > device_queue_count_max) return error.CountOverflow;
         if (options.extensions.len > name_count_max) return error.CountOverflow;
-        for (options.queues) |queue| {
+        for (options.queues, 0..) |queue, queue_index| {
             if (queue.priorities.len == 0) return error.InvalidOptions;
             if (queue.priorities.len > std.math.maxInt(u32)) return error.CountOverflow;
+            for (queue.priorities) |priority| {
+                if (!std.math.isFinite(priority)) return error.InvalidOptions;
+                if (priority < 0.0) return error.InvalidOptions;
+                if (priority > 1.0) return error.InvalidOptions;
+            }
+            for (options.queues[0..queue_index]) |previous_queue| {
+                if (previous_queue.family_index == queue.family_index) {
+                    return error.InvalidOptions;
+                }
+            }
         }
         if (options.enable_portability_subset and platform != .metal) {
             return error.PortabilityNotSupported;
@@ -831,9 +841,10 @@ pub const Queue = struct {
         submit_infos: []const raw.VkSubmitInfo,
         fence: raw.VkFence,
     ) Error!void {
+        const submit_info_count = try count32(submit_infos.len);
         try checkSuccess(queue.queue_submit(
             queue._handle,
-            @intCast(submit_infos.len),
+            submit_info_count,
             if (submit_infos.len == 0) null else submit_infos.ptr,
             fence,
         ));
@@ -1152,6 +1163,10 @@ pub fn checkSuccess(result: raw.VkResult) Error!void {
     return error.UnexpectedVulkanResult;
 }
 
+fn count32(count: usize) Error!u32 {
+    return std.math.cast(u32, count) orelse error.CountOverflow;
+}
+
 fn validateEnumerationCount(count: u32) Error!void {
     if (count <= enumeration_item_count_max) return;
     return error.TooManyObjects;
@@ -1311,6 +1326,7 @@ var test_destroy_device_count: usize = 0;
 var test_destroy_messenger_count: usize = 0;
 var test_destroy_surface_count: usize = 0;
 var test_create_messenger_count: usize = 0;
+var test_queue_submit_count: usize = 0;
 var test_named_object_type: raw.VkObjectType = 0;
 var test_named_object_handle: u64 = 0;
 
@@ -1383,6 +1399,16 @@ fn testGetNullQueue(
     output: [*c]raw.VkQueue,
 ) callconv(.c) void {
     output[0] = null;
+}
+
+fn testQueueSubmit(
+    _: raw.VkQueue,
+    _: u32,
+    _: [*c]const raw.VkSubmitInfo,
+    _: raw.VkFence,
+) callconv(.c) raw.VkResult {
+    test_queue_submit_count += 1;
+    return raw.VK_SUCCESS;
 }
 
 fn testCreateMessenger(
@@ -1508,6 +1534,39 @@ test "owned handles reject inactive use and deinit is idempotent" {
         error.InactiveObject,
         device.load(command.set_debug_utils_object_name_ext),
     );
+}
+
+test "Vulkan u32 counts reject narrowing overflow" {
+    try std.testing.expectEqual(
+        std.math.maxInt(u32),
+        try count32(std.math.maxInt(u32)),
+    );
+    if (@bitSizeOf(usize) > @bitSizeOf(u32)) {
+        const too_large = @as(usize, std.math.maxInt(u32)) + 1;
+        try std.testing.expectError(error.CountOverflow, count32(too_large));
+    }
+}
+
+test "queue submit rejects oversized slices before dispatch" {
+    const queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        .queue_submit = testQueueSubmit,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+    };
+    test_queue_submit_count = 0;
+
+    if (@bitSizeOf(usize) > @bitSizeOf(u32)) {
+        const too_many = @as(usize, std.math.maxInt(u32)) + 1;
+        const submit_pointer: [*]const raw.VkSubmitInfo = @ptrFromInt(0x1000);
+        try std.testing.expectError(
+            error.CountOverflow,
+            queue.submit(submit_pointer[0..too_many], null),
+        );
+        try std.testing.expectEqual(@as(usize, 0), test_queue_submit_count);
+    }
+
+    try queue.submit(&.{}, null);
+    try std.testing.expectEqual(@as(usize, 1), test_queue_submit_count);
 }
 
 test "debug messenger handles fake dispatch success and failures" {
