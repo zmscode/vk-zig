@@ -720,12 +720,11 @@ pub const Entry = struct {
         entry: *const Entry,
         comptime descriptor: anytype,
     ) ?DescriptorFunction(descriptor, .global) {
-        const Descriptor = @TypeOf(descriptor);
-        return loadInstance(
+        return loadInstanceDescriptor(
             entry.get_instance_proc_addr,
             null,
-            Descriptor.Pfn,
-            Descriptor.name,
+            descriptor,
+            .global,
         );
     }
 
@@ -887,13 +886,12 @@ pub const Instance = struct {
         instance: *const Instance,
         comptime descriptor: anytype,
     ) Error!?DescriptorFunction(descriptor, .instance) {
-        const Descriptor = @TypeOf(descriptor);
         const handle = instance._handle orelse return error.InactiveObject;
-        return loadInstance(
+        return loadInstanceDescriptor(
             instance.dispatch.get_instance_proc_addr,
             handle,
-            Descriptor.Pfn,
-            Descriptor.name,
+            descriptor,
+            .instance,
         );
     }
 
@@ -2655,13 +2653,11 @@ pub const Device = struct {
         device: *const Device,
         comptime descriptor: anytype,
     ) Error!?DescriptorFunction(descriptor, .device) {
-        const Descriptor = @TypeOf(descriptor);
         const handle = device._handle orelse return error.InactiveObject;
-        return loadDevice(
+        return loadDeviceDescriptor(
             device.dispatch.get_device_proc_addr,
             handle,
-            Descriptor.Pfn,
-            Descriptor.name,
+            descriptor,
         );
     }
 
@@ -3946,16 +3942,11 @@ const InstanceDispatch = struct {
                 raw.PFN_vkGetPhysicalDeviceFeatures,
                 "vkGetPhysicalDeviceFeatures",
             ),
-            .get_physical_device_features2 = loadInstance(
+            .get_physical_device_features2 = loadInstanceDescriptor(
                 get_instance_proc_addr,
                 handle,
-                raw.PFN_vkGetPhysicalDeviceFeatures2,
-                "vkGetPhysicalDeviceFeatures2",
-            ) orelse loadInstance(
-                get_instance_proc_addr,
-                handle,
-                raw.PFN_vkGetPhysicalDeviceFeatures2,
-                "vkGetPhysicalDeviceFeatures2KHR",
+                command.get_physical_device_features2,
+                .instance,
             ),
             .get_physical_device_memory_properties = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -4111,38 +4102,20 @@ const DeviceDispatch = struct {
                 raw.PFN_vkDestroySemaphore,
                 "vkDestroySemaphore",
             ),
-            .get_semaphore_counter_value = loadDevice(
+            .get_semaphore_counter_value = loadDeviceDescriptor(
                 get_device_proc_addr,
                 handle,
-                raw.PFN_vkGetSemaphoreCounterValue,
-                "vkGetSemaphoreCounterValue",
-            ) orelse loadDevice(
-                get_device_proc_addr,
-                handle,
-                raw.PFN_vkGetSemaphoreCounterValue,
-                "vkGetSemaphoreCounterValueKHR",
+                command.get_semaphore_counter_value,
             ),
-            .wait_semaphores = loadDevice(
+            .wait_semaphores = loadDeviceDescriptor(
                 get_device_proc_addr,
                 handle,
-                raw.PFN_vkWaitSemaphores,
-                "vkWaitSemaphores",
-            ) orelse loadDevice(
-                get_device_proc_addr,
-                handle,
-                raw.PFN_vkWaitSemaphores,
-                "vkWaitSemaphoresKHR",
+                command.wait_semaphores,
             ),
-            .signal_semaphore = loadDevice(
+            .signal_semaphore = loadDeviceDescriptor(
                 get_device_proc_addr,
                 handle,
-                raw.PFN_vkSignalSemaphore,
-                "vkSignalSemaphore",
-            ) orelse loadDevice(
-                get_device_proc_addr,
-                handle,
-                raw.PFN_vkSignalSemaphore,
-                "vkSignalSemaphoreKHR",
+                command.signal_semaphore,
             ),
             .create_fence = try loadDeviceRequired(
                 get_device_proc_addr,
@@ -4315,7 +4288,8 @@ fn DescriptorFunction(comptime descriptor: anytype, comptime expected_scope: com
     if (!@hasDecl(Descriptor, "Pfn") or
         !@hasDecl(Descriptor, "Function") or
         !@hasDecl(Descriptor, "name") or
-        !@hasDecl(Descriptor, "scope"))
+        !@hasDecl(Descriptor, "scope") or
+        !@hasDecl(Descriptor, "aliases"))
     {
         @compileError("expected a generated Vulkan command descriptor");
     }
@@ -4333,6 +4307,30 @@ fn loadInstance(
 ) ?CommandFunction(OptionalFunction) {
     const procedure = get_instance_proc_addr(instance, name.ptr) orelse return null;
     return @ptrCast(procedure);
+}
+
+fn loadInstanceDescriptor(
+    get_instance_proc_addr: CommandFunction(raw.PFN_vkGetInstanceProcAddr),
+    instance: raw.VkInstance,
+    comptime descriptor: anytype,
+    comptime expected_scope: command.Scope,
+) ?DescriptorFunction(descriptor, expected_scope) {
+    const Descriptor = @TypeOf(descriptor);
+    if (loadInstance(
+        get_instance_proc_addr,
+        instance,
+        Descriptor.Pfn,
+        Descriptor.name,
+    )) |function| return function;
+    inline for (Descriptor.aliases) |alias| {
+        if (loadInstance(
+            get_instance_proc_addr,
+            instance,
+            Descriptor.Pfn,
+            alias,
+        )) |function| return function;
+    }
+    return null;
 }
 
 fn loadInstanceRequired(
@@ -4357,6 +4355,29 @@ fn loadDevice(
 ) ?CommandFunction(OptionalFunction) {
     const procedure = get_device_proc_addr(device, name.ptr) orelse return null;
     return @ptrCast(procedure);
+}
+
+fn loadDeviceDescriptor(
+    get_device_proc_addr: CommandFunction(raw.PFN_vkGetDeviceProcAddr),
+    device: raw.VkDevice,
+    comptime descriptor: anytype,
+) ?DescriptorFunction(descriptor, .device) {
+    const Descriptor = @TypeOf(descriptor);
+    if (loadDevice(
+        get_device_proc_addr,
+        device,
+        Descriptor.Pfn,
+        Descriptor.name,
+    )) |function| return function;
+    inline for (Descriptor.aliases) |alias| {
+        if (loadDevice(
+            get_device_proc_addr,
+            device,
+            Descriptor.Pfn,
+            alias,
+        )) |function| return function;
+    }
+    return null;
 }
 
 fn loadDeviceRequired(
@@ -4722,6 +4743,7 @@ const TestCommand = enum {
     destroy_surface,
     surface_support,
     set_object_name,
+    features2_alias_only,
 };
 
 var test_missing_command: TestCommand = .none;
@@ -4793,6 +4815,13 @@ fn testGetInstanceProcAddr(
     _: raw.VkInstance,
     name: [*c]const u8,
 ) callconv(.c) raw.PFN_vkVoidFunction {
+    if (testNameEquals(name, "vkGetPhysicalDeviceFeatures2")) {
+        if (test_missing_command == .features2_alias_only) return null;
+        return @ptrCast(&testUnused);
+    }
+    if (testNameEquals(name, "vkGetPhysicalDeviceFeatures2KHR")) {
+        return @ptrCast(&testUnused);
+    }
     if (testNameEquals(name, "vkCreateDebugUtilsMessengerEXT")) {
         if (test_missing_command == .create_messenger) return null;
         return @ptrCast(&testCreateMessenger);
@@ -5340,6 +5369,22 @@ fn testDevice() Device {
             .cmd_insert_debug_utils_label_ext = null,
         },
     };
+}
+
+test "generated command descriptors resolve promoted aliases internally" {
+    var instance = testInstance();
+    defer instance.deinit();
+    test_missing_command = .features2_alias_only;
+    defer test_missing_command = .none;
+    try std.testing.expect((try instance.load(command.get_physical_device_features2)) != null);
+    try std.testing.expectEqualStrings(
+        "vkGetPhysicalDeviceFeatures2KHR",
+        @TypeOf(command.get_physical_device_features2).aliases[0],
+    );
+    try std.testing.expectEqual(
+        command.Scope.instance,
+        @TypeOf(command.get_physical_device_features2_khr).scope,
+    );
 }
 
 test "owned handles reject inactive use and deinit is idempotent" {

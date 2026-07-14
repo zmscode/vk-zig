@@ -15,6 +15,11 @@ const Command = struct {
     scope: ?Scope,
 };
 
+const ApiVersion = struct {
+    major: u8,
+    minor: u8,
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -39,6 +44,17 @@ pub fn main(init: std.process.Init) !void {
     var registry_commands: std.StringHashMapUnmanaged(void) = .empty;
     defer registry_commands.deinit(gpa);
     try collectRegistryCommands(gpa, registry, &registry_commands);
+    var registry_aliases: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer registry_aliases.deinit(gpa);
+    try collectRegistryCommandAliases(gpa, registry, &registry_aliases);
+
+    var core_versions: std.StringHashMapUnmanaged(ApiVersion) = .empty;
+    defer core_versions.deinit(gpa);
+    try collectCoreCommandVersions(gpa, registry, &core_versions);
+
+    var command_extensions: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer command_extensions.deinit(gpa);
+    try collectCommandExtensions(gpa, registry, &command_extensions);
 
     var registry_extensions: std.ArrayList([]const u8) = .empty;
     defer {
@@ -49,7 +65,13 @@ pub fn main(init: std.process.Init) !void {
 
     var commands: std.ArrayList(Command) = .empty;
     defer commands.deinit(gpa);
-    try collectBindingCommands(gpa, bindings, &registry_commands, &commands);
+    try collectBindingCommands(
+        gpa,
+        bindings,
+        &registry_commands,
+        &registry_aliases,
+        &commands,
+    );
     defer for (commands.items) |command| {
         gpa.free(command.pfn_name);
         gpa.free(command.command_name);
@@ -71,13 +93,48 @@ pub fn main(init: std.process.Init) !void {
         result.key_ptr.* = try gpa.dupe(u8, generated_name);
 
         try output.writer.print(
-            "pub const {s} = Descriptor(raw.PFN_{s}, \"{s}\", .{s}){{}};\n",
+            "pub const {s} = Descriptor(raw.PFN_{s}, \"{s}\", .{s}, &.{{",
             .{ generated_name, command.pfn_name, command.command_name, @tagName(command.scope.?) },
         );
+        const root_name = try canonicalCommandName(commands.items, command.command_name);
+        for (commands.items) |candidate| {
+            if (std.mem.eql(u8, candidate.command_name, command.command_name)) continue;
+            const candidate_root = try canonicalCommandName(commands.items, candidate.command_name);
+            if (!std.mem.eql(u8, root_name, candidate_root)) continue;
+            try output.writer.print("\"{s}\",", .{candidate.command_name});
+        }
+        try output.writer.writeAll("}, ");
+        if (groupCoreVersion(commands.items, &core_versions, root_name)) |version| {
+            try output.writer.print(".{{ .major = {d}, .minor = {d} }}, ", .{
+                version.major,
+                version.minor,
+            });
+        } else {
+            try output.writer.writeAll("null, ");
+        }
+        try output.writer.writeAll("&.{");
+        for (commands.items) |candidate| {
+            const candidate_root = try canonicalCommandName(commands.items, candidate.command_name);
+            if (!std.mem.eql(u8, root_name, candidate_root)) continue;
+            const extension_name = command_extensions.get(candidate.command_name) orelse continue;
+            var duplicate = false;
+            for (commands.items) |previous| {
+                if (std.mem.eql(u8, previous.command_name, candidate.command_name)) break;
+                const previous_root = try canonicalCommandName(commands.items, previous.command_name);
+                if (!std.mem.eql(u8, root_name, previous_root)) continue;
+                if (command_extensions.get(previous.command_name)) |previous_extension| {
+                    if (std.mem.eql(u8, extension_name, previous_extension)) duplicate = true;
+                }
+            }
+            if (!duplicate) try output.writer.print("\"{s}\",", .{extension_name});
+        }
+        try output.writer.writeAll("}){};\n");
     }
 
     var key_iterator = generated_names.keyIterator();
     while (key_iterator.next()) |key| gpa.free(key.*);
+
+    try writeCoreCoverage(&output.writer, commands.items, &core_versions);
 
     try writeExtensions(&output.writer, registry_extensions.items);
 
@@ -97,7 +154,7 @@ fn collectRegistryExtensions(
     var cursor: usize = 0;
     while (std.mem.indexOfPos(u8, registry, cursor, "<extension ")) |extension_start| {
         const tag_end = std.mem.indexOfPos(u8, registry, extension_start, ">") orelse {
-            return error.InvalidRegistry;
+            return error.InvalidCoreRegistry;
         };
         const opening_tag = registry[extension_start .. tag_end + 1];
         const name = attribute(opening_tag, "name") orelse return error.InvalidRegistry;
@@ -150,6 +207,112 @@ fn collectRegistryCommands(
     }
 }
 
+fn collectRegistryCommandAliases(
+    gpa: std.mem.Allocator,
+    registry: []const u8,
+    aliases: *std.StringHashMapUnmanaged([]const u8),
+) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<command")) |command_start| {
+        const tag_end = std.mem.indexOfPos(u8, registry, command_start, ">") orelse {
+            return error.InvalidRegistry;
+        };
+        const opening_tag = registry[command_start .. tag_end + 1];
+        if (attribute(opening_tag, "name")) |name| {
+            if (attribute(opening_tag, "alias")) |alias_name| {
+                try aliases.put(gpa, name, alias_name);
+            }
+        }
+        cursor = tag_end + 1;
+    }
+}
+
+fn collectCoreCommandVersions(
+    gpa: std.mem.Allocator,
+    registry: []const u8,
+    versions: *std.StringHashMapUnmanaged(ApiVersion),
+) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<feature ")) |feature_start| {
+        const tag_end = std.mem.indexOfPos(u8, registry, feature_start, ">") orelse {
+            return error.InvalidRegistry;
+        };
+        const opening_tag = registry[feature_start .. tag_end + 1];
+        const api = attribute(opening_tag, "api") orelse "vulkan";
+        const number = attribute(opening_tag, "number") orelse {
+            cursor = tag_end + 1;
+            continue;
+        };
+        const feature_end = std.mem.indexOfPos(u8, registry, tag_end, "</feature>") orelse {
+            return error.InvalidCoreRegistry;
+        };
+        cursor = feature_end + "</feature>".len;
+        if (!apiListContains(api, "vulkan")) continue;
+        const separator = std.mem.indexOfScalar(u8, number, '.') orelse return error.InvalidCoreRegistry;
+        const version: ApiVersion = .{
+            .major = try std.fmt.parseInt(u8, number[0..separator], 10),
+            .minor = try std.fmt.parseInt(u8, number[separator + 1 ..], 10),
+        };
+        const block = registry[tag_end + 1 .. feature_end];
+        var command_cursor: usize = 0;
+        while (std.mem.indexOfPos(u8, block, command_cursor, "<command ")) |command_start| {
+            const command_end = std.mem.indexOfPos(u8, block, command_start, ">") orelse {
+                return error.InvalidCoreRegistry;
+            };
+            const command_tag = block[command_start .. command_end + 1];
+            if (attribute(command_tag, "name")) |name| try versions.put(gpa, name, version);
+            command_cursor = command_end + 1;
+        }
+    }
+}
+
+fn collectCommandExtensions(
+    gpa: std.mem.Allocator,
+    registry: []const u8,
+    extensions: *std.StringHashMapUnmanaged([]const u8),
+) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<extension ")) |extension_start| {
+        const tag_end = std.mem.indexOfPos(u8, registry, extension_start, ">") orelse {
+            return error.InvalidExtensionRegistry;
+        };
+        const opening_tag = registry[extension_start .. tag_end + 1];
+        const extension_name = attribute(opening_tag, "name") orelse return error.InvalidExtensionRegistry;
+        if (std.mem.endsWith(u8, opening_tag, "/>")) {
+            cursor = tag_end + 1;
+            continue;
+        }
+        const extension_end = std.mem.indexOfPos(u8, registry, tag_end, "</extension>") orelse {
+            return error.InvalidExtensionRegistry;
+        };
+        cursor = extension_end + "</extension>".len;
+        if (!std.mem.startsWith(u8, extension_name, "VK_")) continue;
+        const supported = attribute(opening_tag, "supported") orelse "vulkan";
+        if (!apiListContains(supported, "vulkan")) continue;
+        const block = registry[tag_end + 1 .. extension_end];
+        var command_cursor: usize = 0;
+        while (std.mem.indexOfPos(u8, block, command_cursor, "<command ")) |command_start| {
+            const command_end = std.mem.indexOfPos(u8, block, command_start, ">") orelse {
+                return error.InvalidExtensionRegistry;
+            };
+            const command_tag = block[command_start .. command_end + 1];
+            if (attribute(command_tag, "name")) |name| {
+                const result = try extensions.getOrPut(gpa, name);
+                if (!result.found_existing) result.value_ptr.* = extension_name;
+            }
+            command_cursor = command_end + 1;
+        }
+    }
+}
+
+fn apiListContains(list: []const u8, expected: []const u8) bool {
+    var values = std.mem.splitScalar(u8, list, ',');
+    while (values.next()) |value| {
+        if (std.mem.eql(u8, std.mem.trim(u8, value, " \t\r\n"), expected)) return true;
+    }
+    return false;
+}
+
 fn attribute(tag: []const u8, name: []const u8) ?[]const u8 {
     var pattern_buffer: [64]u8 = undefined;
     const pattern = std.fmt.bufPrint(&pattern_buffer, "{s}=\"", .{name}) catch return null;
@@ -163,6 +326,7 @@ fn collectBindingCommands(
     gpa: std.mem.Allocator,
     bindings: []const u8,
     registry_commands: *const std.StringHashMapUnmanaged(void),
+    registry_aliases: *const std.StringHashMapUnmanaged([]const u8),
     commands: *std.ArrayList(Command),
 ) !void {
     var lines = std.mem.splitScalar(u8, bindings, '\n');
@@ -175,13 +339,14 @@ fn collectBindingCommands(
         if (!registry_commands.contains(pfn_name)) continue;
 
         const alias_marker = "= PFN_";
-        const alias_name = if (std.mem.indexOf(u8, line, alias_marker)) |alias_start| blk: {
+        const binding_alias_name = if (std.mem.indexOf(u8, line, alias_marker)) |alias_start| blk: {
             const value_start = alias_start + alias_marker.len;
             const value_end = std.mem.indexOfScalarPos(u8, line, value_start, ';') orelse {
                 return error.InvalidBindingAlias;
             };
             break :blk line[value_start..value_end];
         } else null;
+        const alias_name = binding_alias_name orelse registry_aliases.get(pfn_name);
 
         try commands.append(gpa, .{
             .pfn_name = try gpa.dupe(u8, pfn_name),
@@ -224,6 +389,72 @@ fn resolveAliasScopes(commands: []Command) !void {
     for (commands) |command| {
         if (command.scope == null) return error.UnresolvedCommandAlias;
     }
+}
+
+fn canonicalCommandName(commands: []const Command, name: []const u8) ![]const u8 {
+    var current = name;
+    for (0..commands.len) |_| {
+        for (commands) |command| {
+            if (!std.mem.eql(u8, command.command_name, current)) continue;
+            current = command.alias_name orelse return command.command_name;
+            break;
+        } else return error.UnresolvedCommandAlias;
+    }
+    return error.CommandAliasCycle;
+}
+
+fn groupCoreVersion(
+    commands: []const Command,
+    versions: *const std.StringHashMapUnmanaged(ApiVersion),
+    root_name: []const u8,
+) ?ApiVersion {
+    var selected: ?ApiVersion = null;
+    for (commands) |command| {
+        const candidate_root = canonicalCommandName(commands, command.command_name) catch continue;
+        if (!std.mem.eql(u8, root_name, candidate_root)) continue;
+        const version = versions.get(command.command_name) orelse continue;
+        if (selected == null or version.major < selected.?.major or
+            (version.major == selected.?.major and version.minor < selected.?.minor))
+        {
+            selected = version;
+        }
+    }
+    return selected;
+}
+
+fn writeCoreCoverage(
+    writer: *std.Io.Writer,
+    commands: []const Command,
+    versions: *const std.StringHashMapUnmanaged(ApiVersion),
+) !void {
+    try writer.writeAll(
+        \\
+        \\pub const CoreCommandCoverage = struct {
+        \\    name: [:0]const u8,
+        \\    scope: Scope,
+        \\    version: ApiVersion,
+        \\};
+        \\
+        \\pub const core_command_coverage = [_]CoreCommandCoverage{
+        \\
+    );
+    var covered: usize = 0;
+    var iterator = versions.iterator();
+    while (iterator.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const version = entry.value_ptr.*;
+        for (commands) |command| {
+            if (!std.mem.eql(u8, command.command_name, name)) continue;
+            try writer.print(
+                "    .{{ .name = \"{s}\", .scope = .{s}, .version = .{{ .major = {d}, .minor = {d} }} }},\n",
+                .{ name, @tagName(command.scope.?), version.major, version.minor },
+            );
+            covered += 1;
+            break;
+        } else return error.MissingCoreCommandBinding;
+    }
+    if (covered != versions.count()) return error.IncompleteCoreCommandCoverage;
+    try writer.writeAll("};\n");
 }
 
 fn snakeName(command_name: []const u8, buffer: []u8) ![]const u8 {
@@ -287,6 +518,7 @@ fn writeHeader(writer: *std.Io.Writer) !void {
         \\const raw = @import("vulkan_raw");
         \\
         \\pub const Scope = enum { global, instance, device };
+        \\pub const ApiVersion = struct { major: u8, minor: u8 };
         \\
         \\pub fn FunctionType(comptime Pfn: type) type {
         \\    const optional = switch (@typeInfo(Pfn)) {
@@ -311,12 +543,18 @@ fn writeHeader(writer: *std.Io.Writer) !void {
         \\    comptime PfnType: type,
         \\    comptime command_name: [:0]const u8,
         \\    comptime command_scope: Scope,
+        \\    comptime command_aliases: []const [:0]const u8,
+        \\    comptime command_core_version: ?ApiVersion,
+        \\    comptime command_extensions: []const [:0]const u8,
         \\) type {
         \\    return struct {
         \\        pub const Pfn = PfnType;
         \\        pub const Function = FunctionType(PfnType);
         \\        pub const name = command_name;
         \\        pub const scope = command_scope;
+        \\        pub const aliases = command_aliases;
+        \\        pub const core_version = command_core_version;
+        \\        pub const extensions = command_extensions;
         \\    };
         \\}
         \\

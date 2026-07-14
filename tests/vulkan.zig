@@ -192,6 +192,20 @@ test "generated commands bind scope, name, and function type" {
     try std.testing.expectEqualStrings("vkCreateInstance", CreateInstance.name);
     try std.testing.expect(CreateInstance.Function ==
         vk.CommandFunction(vk.raw.PFN_vkCreateInstance));
+
+    const Features2 = @TypeOf(vk.command.get_physical_device_features2);
+    try std.testing.expectEqualStrings("vkGetPhysicalDeviceFeatures2KHR", Features2.aliases[0]);
+    try std.testing.expectEqual(@as(u8, 1), Features2.core_version.?.major);
+    try std.testing.expectEqual(@as(u8, 1), Features2.core_version.?.minor);
+    try std.testing.expectEqualStrings(
+        "VK_KHR_get_physical_device_properties2",
+        Features2.extensions[0],
+    );
+    try std.testing.expectEqual(
+        Features2.scope,
+        @TypeOf(vk.command.get_physical_device_features2_khr).scope,
+    );
+    try std.testing.expect(vk.command.core_command_coverage.len > 200);
 }
 
 test "generated extension names compose without duplicates" {
