@@ -4,9 +4,10 @@ Zig 0.16 bindings for Vulkan, generated from the official Khronos registry and h
 package provides:
 
 - a complete target-specific raw ABI at `vulkan.raw` and through the `vulkan-raw` module;
-- a typed runtime loader with entry, instance, physical-device, device, and queue wrappers;
+- a typed runtime loader with entry, instance, physical-device, device, queue, and surface wrappers;
 - resource-safe `deinit` methods and Zig errors for common `VkResult` failures;
-- generic `load` methods for every core or extension command not wrapped directly;
+- generated command descriptors that prevent PFN/name and dispatch-scope mismatches;
+- small owned wrappers for surfaces and `VK_EXT_debug_utils`;
 - reproducible offline builds from vendored Khronos inputs; and
 - an explicit command to pull, verify, and vendor a new Vulkan registry revision.
 
@@ -75,6 +76,7 @@ pub fn main(init: std.process.Init) !void {
         .application_name = "my-zig-app",
         .engine_name = "my-engine",
         .api_version = .{ .major = 1, .minor = 3, .patch = 0 },
+        .enumerate_portability = vk.platform == .metal,
     });
     defer instance.deinit();
 
@@ -82,10 +84,30 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(physical_devices);
     for (physical_devices) |*physical_device| {
         const properties = physical_device.properties();
-        _ = properties;
+        std.log.info("{s}", .{vk.physicalDeviceName(&properties)});
     }
 }
 ```
+
+Logical-device creation keeps queue priorities and extension names as bounded Zig slices:
+
+```zig
+const priorities = [_]f32{1.0};
+const queues = [_]vk.DeviceQueueOptions{.{
+    .family_index = graphics_family,
+    .priorities = &priorities,
+}};
+var device = try physical_device.createDevice(.{
+    .queues = &queues,
+    .enable_portability_subset = vk.platform == .metal,
+});
+defer device.deinit();
+
+const queue = try device.queue(graphics_family, 0);
+```
+
+`createInstanceRaw` and `createDeviceRaw` retain direct create-info control. Live wrapper handles
+are private and non-null by construction; use the checked `rawHandle()` methods at FFI boundaries.
 
 `Loader.init()` checks normal dynamic-loader names and common Homebrew, `/usr/local`, and MacPorts
 locations on macOS. Applications with a custom SDK layout can select it explicitly:
@@ -96,22 +118,51 @@ defer loader.deinit();
 ```
 
 The wrapper intentionally covers discovery and ownership fundamentals without hiding Vulkan.
-Use the generated raw structs for create-info values. Any command can be loaded with its exact
-generated function-pointer type:
+Use the generated raw structs for create-info values. Generated command descriptors bind each
+command's name, function-pointer type, and dispatch scope:
 
 ```zig
-const create_surface = instance.load(
-    vk.raw.PFN_vkCreateMetalSurfaceEXT,
-    "vkCreateMetalSurfaceEXT",
-) orelse return error.MetalSurfaceUnavailable;
+const create_surface = (try instance.load(
+    vk.command.create_metal_surface_ext,
+)) orelse return error.MetalSurfaceUnavailable;
 ```
 
-This keeps extension access complete even when a command has no convenience method yet.
+For provisional or vendor commands absent from the registry, `loadUnchecked(PFN, name)` remains
+available as an explicitly unchecked escape hatch.
+
+Use `vk.checkSuccess(result)` for raw commands whose only successful result is `VK_SUCCESS`.
+Do not use it for enumeration, wait, acquire, or presentation commands: status values such as
+`VK_INCOMPLETE`, `VK_TIMEOUT`, and `VK_SUBOPTIMAL_KHR` require command-specific handling.
+
+## Surfaces and debug utilities
+
+After a platform-specific command creates a raw `VkSurfaceKHR`, transfer ownership to the wrapper:
+
+```zig
+var surface = try instance.adoptSurface(raw_surface, allocation_callbacks);
+defer surface.deinit();
+const can_present = try physical_device.surfaceSupport(&surface, graphics_family);
+```
+
+The debug-utils wrapper loads its own extension commands, rolls back partial creation, and owns the
+messenger. Enable `VK_EXT_debug_utils` in `InstanceOptions.extensions` first:
+
+```zig
+var messenger = try vk.ext.debug_utils.Messenger.init(&instance, .{
+    .callback = debugCallback,
+});
+defer messenger.deinit();
+
+try device.setObjectName(.{ .device = &device }, "main-device");
+```
+
+Destroy extension objects and surfaces before their parent instance. See
+`examples/debug_utils.zig` for a complete callback signature.
 
 ## Commands
 
 ```sh
-# Generate native bindings in zig-out/bindings/vulkan.zig (also the default build).
+# Generate raw bindings and command descriptors in zig-out/bindings/.
 zig build
 zig build bindings
 

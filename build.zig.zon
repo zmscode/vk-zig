@@ -14,5 +14,6 @@
         "vendor",
         "LICENSE",
         "README.md",
+        "SKILL.md",
     },
 }

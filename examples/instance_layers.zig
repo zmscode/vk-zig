@@ -1,6 +1,5 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const support = @import("support.zig");
 
 pub fn main(init: std.process.Init) !void {
     var loader = try vk.Loader.init();
@@ -16,11 +15,11 @@ pub fn main(init: std.process.Init) !void {
         std.log.info(
             "  {s} (Vulkan {d}.{d}.{d}): {s}",
             .{
-                support.cString(&layer.layerName),
+                vk.layerName(&layer),
                 version.major,
                 version.minor,
                 version.patch,
-                support.cString(&layer.description),
+                vk.layerDescription(&layer),
             },
         );
     }

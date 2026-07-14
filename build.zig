@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
     platform.validate(target.result.os.tag);
 
     const cleaner = addBindingCleaner(b);
+    const command_generator = addCommandGenerator(b);
     const translate_c = addTranslateC(
         b,
         target,
@@ -29,6 +30,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const commands = generateCommands(
+        b,
+        command_generator,
+        bindings,
+        b.path("vendor/registry/vk.xml"),
+        "vulkan_commands.zig",
+    );
+    const vulkan_commands = b.addModule("vulkan-commands", .{
+        .root_source_file = commands,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "vulkan_raw", .module = vulkan_raw }},
+    });
 
     const build_options = b.addOptions();
     build_options.addOption(Platform, "platform", platform);
@@ -41,15 +55,16 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "vulkan_raw", .module = vulkan_raw },
+            .{ .name = "vulkan_commands", .module = vulkan_commands },
             .{ .name = "vulkan_build_options", .module = build_options.createModule() },
         },
     });
     configureLoaderLibraries(vulkan, target.result.os.tag);
 
-    addBindingsStep(b, bindings);
+    addBindingsStep(b, bindings, commands);
     addTestStep(b, target, optimize, vulkan);
     addExampleSteps(b, target, optimize, vulkan);
-    addUpdateStep(b, cleaner, target, optimize, platform);
+    addUpdateStep(b, cleaner, command_generator, target, optimize, platform);
 }
 
 const Platform = enum {
@@ -126,6 +141,17 @@ fn addBindingCleaner(b: *std.Build) *std.Build.Step.Compile {
     });
 }
 
+fn addCommandGenerator(b: *std.Build) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = "generate-vulkan-commands",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/generate_commands.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+}
+
 fn cleanBindings(
     b: *std.Build,
     cleaner: *std.Build.Step.Compile,
@@ -135,6 +161,19 @@ fn cleanBindings(
     const run_cleaner = b.addRunArtifact(cleaner);
     run_cleaner.addFileArg(input);
     return run_cleaner.addOutputFileArg(output_name);
+}
+
+fn generateCommands(
+    b: *std.Build,
+    generator: *std.Build.Step.Compile,
+    bindings: std.Build.LazyPath,
+    registry: std.Build.LazyPath,
+    output_name: []const u8,
+) std.Build.LazyPath {
+    const run_generator = b.addRunArtifact(generator);
+    run_generator.addFileArg(bindings);
+    run_generator.addFileArg(registry);
+    return run_generator.addOutputFileArg(output_name);
 }
 
 fn configureLoaderLibraries(module: *std.Build.Module, os_tag: std.Target.Os.Tag) void {
@@ -147,14 +186,21 @@ fn configureLoaderLibraries(module: *std.Build.Module, os_tag: std.Target.Os.Tag
     }
 }
 
-fn addBindingsStep(b: *std.Build, bindings: std.Build.LazyPath) void {
+fn addBindingsStep(
+    b: *std.Build,
+    bindings: std.Build.LazyPath,
+    commands: std.Build.LazyPath,
+) void {
     const install_bindings = b.addInstallFile(bindings, "bindings/vulkan.zig");
+    const install_commands = b.addInstallFile(commands, "bindings/commands.zig");
     const bindings_step = b.step(
         "bindings",
         "Generate target-specific Vulkan bindings in zig-out/bindings",
     );
     bindings_step.dependOn(&install_bindings.step);
+    bindings_step.dependOn(&install_commands.step);
     b.getInstallStep().dependOn(&install_bindings.step);
+    b.getInstallStep().dependOn(&install_commands.step);
 }
 
 fn addTestStep(
@@ -174,6 +220,46 @@ fn addTestStep(
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Build and run the Vulkan binding tests");
     test_step.dependOn(&run_tests.step);
+
+    const invalid_function = addCompileFailureTest(
+        b,
+        target,
+        optimize,
+        vulkan,
+        "tests/compile_fail/invalid_command_function.zig",
+        "expected an optional Vulkan PFN function-pointer type",
+    );
+    test_step.dependOn(&invalid_function.step);
+
+    const wrong_scope = addCompileFailureTest(
+        b,
+        target,
+        optimize,
+        vulkan,
+        "tests/compile_fail/wrong_command_scope.zig",
+        "Vulkan command descriptor has the wrong dispatch scope",
+    );
+    test_step.dependOn(&wrong_scope.step);
+}
+
+fn addCompileFailureTest(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    vulkan: *std.Build.Module,
+    source: []const u8,
+    expected_error: []const u8,
+) *std.Build.Step.Compile {
+    const compile = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(source),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vulkan", .module = vulkan }},
+        }),
+    });
+    compile.expect_errors = .{ .contains = expected_error };
+    return compile;
 }
 
 fn addExampleSteps(
@@ -231,11 +317,14 @@ const examples = [_]Example{
     .{ .name = "logical-device", .path = "examples/logical_device.zig" },
     .{ .name = "raw-create-info", .path = "examples/raw_create_info.zig" },
     .{ .name = "platform", .path = "examples/platform.zig" },
+    .{ .name = "capabilities", .path = "examples/capabilities.zig" },
+    .{ .name = "debug-utils", .path = "examples/debug_utils.zig" },
 };
 
 fn addUpdateStep(
     b: *std.Build,
     cleaner: *std.Build.Step.Compile,
+    command_generator: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     platform: Platform,
@@ -283,6 +372,20 @@ fn addUpdateStep(
             "pub const VK_API_VERSION_1_0 =",
         },
     });
+    const verified_commands = generateCommands(
+        b,
+        command_generator,
+        verified_bindings,
+        checkout.path(b, "registry/vk.xml"),
+        "updated_vulkan_commands.zig",
+    );
+    const verify_commands = b.addCheckFile(verified_commands, .{
+        .expected_matches = &.{
+            "pub const create_instance =",
+            "pub const get_physical_device_surface_support_khr =",
+            "pub const queue_submit =",
+        },
+    });
 
     const update_files = b.addUpdateSourceFiles();
     for (vendored_files) |file_path| {
@@ -305,6 +408,7 @@ fn addUpdateStep(
     );
     update_files.addCopyFileToSource(revision_file, "vendor/VULKAN_HEADERS_COMMIT");
     update_files.step.dependOn(&verify.step);
+    update_files.step.dependOn(&verify_commands.step);
 
     const update_step = b.step(
         "update",

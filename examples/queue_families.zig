@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
         const families = try device.queueFamilyProperties(init.gpa);
         defer init.gpa.free(families);
 
-        std.log.info("{s} queue families:", .{support.cString(&device_properties.deviceName)});
+        std.log.info("{s} queue families:", .{vk.physicalDeviceName(&device_properties)});
         for (families, 0..) |family, index| {
             std.log.info(
                 "  {d}: queues={d}, flags=0x{x}, timestamp bits={d}",

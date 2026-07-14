@@ -13,7 +13,7 @@ Each example also has a named run step:
 | --- | --- | --- |
 | `info.zig` | `zig build run-info` | Runtime loader and Vulkan API version |
 | `instance_extensions.zig` | `zig build run-instance-extensions` | Allocator-aware extension enumeration |
-| `instance_layers.zig` | `zig build run-instance-layers` | Layer enumeration and generated C strings |
+| `instance_layers.zig` | `zig build run-instance-layers` | Layer enumeration and bounded names |
 | `physical_devices.zig` | `zig build run-physical-devices` | Instance ownership and physical-device discovery |
 | `queue_families.zig` | `zig build run-queue-families` | Queue-family property enumeration |
 | `memory_properties.zig` | `zig build run-memory-properties` | Memory heaps and memory types |
@@ -21,6 +21,8 @@ Each example also has a named run step:
 | `logical_device.zig` | `zig build run-logical-device` | Logical-device and queue creation/teardown |
 | `raw_create_info.zig` | `zig build run-raw-create-info` | Raw generated structs with wrapped ownership |
 | `platform.zig` | `zig build run-platform` | Target-specific declaration generation |
+| `capabilities.zig` | `zig build run-capabilities` | Allocation-free extension/layer support checks |
+| `debug_utils.zig` | `zig build run-debug-utils` | Owned `VK_EXT_debug_utils` messenger |
 
 Except for `platform.zig`, running these programs requires a discoverable Vulkan loader and, for
 device examples, a working Vulkan implementation. On macOS, install MoltenVK or the Vulkan SDK.

@@ -1,26 +1,12 @@
-const std = @import("std");
 const vk = @import("vulkan");
 
-const portability_extensions = [_][*:0]const u8{
-    "VK_KHR_portability_enumeration",
-};
-
 pub fn createInstance(entry: *const vk.Entry) !vk.Instance {
-    const use_portability = vk.platform == .metal;
     return entry.createInstance(.{
         .application_name = "vk-zig-example",
         .engine_name = "vk-zig",
         .api_version = .{ .major = 1, .minor = 1, .patch = 0 },
-        .extensions = if (use_portability) &portability_extensions else &.{},
-        .flags = if (use_portability)
-            @intCast(vk.raw.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR)
-        else
-            0,
+        .enumerate_portability = vk.platform == .metal,
     });
-}
-
-pub fn cString(bytes: []const u8) []const u8 {
-    return std.mem.sliceTo(bytes, 0);
 }
 
 pub fn deviceTypeName(device_type: vk.raw.VkPhysicalDeviceType) []const u8 {

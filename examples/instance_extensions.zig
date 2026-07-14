@@ -1,6 +1,5 @@
 const std = @import("std");
 const vk = @import("vulkan");
-const support = @import("support.zig");
 
 pub fn main(init: std.process.Init) !void {
     var loader = try vk.Loader.init();
@@ -14,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     for (extensions) |extension| {
         std.log.info(
             "  {s} (revision {d})",
-            .{ support.cString(&extension.extensionName), extension.specVersion },
+            .{ vk.extensionName(&extension), extension.specVersion },
         );
     }
 }

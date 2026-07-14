@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
         std.log.info(
             "  {s}: {s}, Vulkan {d}.{d}.{d}, vendor=0x{x}, device=0x{x}",
             .{
-                support.cString(&properties.deviceName),
+                vk.physicalDeviceName(&properties),
                 support.deviceTypeName(properties.deviceType),
                 version.major,
                 version.minor,
