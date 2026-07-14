@@ -46,6 +46,12 @@ pub const FenceCreateBit = types.FenceCreateBit;
 pub const FenceCreateFlags = types.FenceCreateFlags;
 pub const FormatFeatureBit = types.FormatFeatureBit;
 pub const FormatFeatureFlags = types.FormatFeatureFlags;
+pub const FormatFeature2Bit = types.FormatFeature2Bit;
+pub const FormatFeature2Flags = types.FormatFeature2Flags;
+pub const ExternalMemoryHandleTypeBit = types.ExternalMemoryHandleTypeBit;
+pub const ExternalMemoryHandleTypeFlags = types.ExternalMemoryHandleTypeFlags;
+pub const ExternalMemoryFeatureBit = types.ExternalMemoryFeatureBit;
+pub const ExternalMemoryFeatureFlags = types.ExternalMemoryFeatureFlags;
 pub const CommandBufferUsageBit = types.CommandBufferUsageBit;
 pub const CommandBufferUsageFlags = types.CommandBufferUsageFlags;
 pub const ImageAspectBit = types.ImageAspectBit;
@@ -64,6 +70,8 @@ pub const SurfaceTransformBit = types.SurfaceTransformBit;
 pub const SurfaceTransformFlags = types.SurfaceTransformFlags;
 pub const SwapchainCreateBit = types.SwapchainCreateBit;
 pub const SwapchainCreateFlags = types.SwapchainCreateFlags;
+pub const SparseImageFormatBit = types.SparseImageFormatBit;
+pub const SparseImageFormatFlags = types.SparseImageFormatFlags;
 pub const Extent2D = types.Extent2D;
 pub const Extent3D = types.Extent3D;
 pub const SurfaceFormat = types.SurfaceFormat;
@@ -1916,6 +1924,21 @@ pub const ImageFormatOptions = struct {
     flags: ImageCreateFlags = .empty,
 };
 
+pub const DrmFormatModifierQuery = struct {
+    modifier: u64,
+    queue_family_indices: []const QueueFamilyIndex = &.{},
+};
+
+pub const ImageFormatQueryOptions = struct {
+    format: Format,
+    image_type: ImageType,
+    tiling: ImageTiling,
+    usage: ImageUsageFlags,
+    flags: ImageCreateFlags = .empty,
+    external_memory_handle_type: ?ExternalMemoryHandleTypeBit = null,
+    drm_format_modifier: ?DrmFormatModifierQuery = null,
+};
+
 pub const ImageFormatProperties = struct {
     extent_max: Extent3D,
     mip_level_count_max: u32,
@@ -1933,6 +1956,75 @@ pub const ImageFormatProperties = struct {
         };
     }
 };
+
+pub const ExternalMemoryProperties = struct {
+    features: ExternalMemoryFeatureFlags,
+    export_from_imported_handle_types: ExternalMemoryHandleTypeFlags,
+    compatible_handle_types: ExternalMemoryHandleTypeFlags,
+
+    pub fn fromRaw(value: raw.VkExternalMemoryProperties) ExternalMemoryProperties {
+        return .{
+            .features = .fromRaw(value.externalMemoryFeatures),
+            .export_from_imported_handle_types = .fromRaw(value.exportFromImportedHandleTypes),
+            .compatible_handle_types = .fromRaw(value.compatibleHandleTypes),
+        };
+    }
+};
+
+pub const ImageFormatQueryResult = struct {
+    properties: ImageFormatProperties,
+    external_memory: ?ExternalMemoryProperties,
+};
+
+pub const DrmFormatModifierProperties = struct {
+    modifier: u64,
+    plane_count: u32,
+    tiling_features: FormatFeatureFlags,
+
+    pub fn fromRaw(value: raw.VkDrmFormatModifierPropertiesEXT) DrmFormatModifierProperties {
+        return .{
+            .modifier = value.drmFormatModifier,
+            .plane_count = value.drmFormatModifierPlaneCount,
+            .tiling_features = .fromRaw(value.drmFormatModifierTilingFeatures),
+        };
+    }
+};
+
+pub const SparseImageFormatOptions = struct {
+    format: Format,
+    image_type: ImageType,
+    sample_count: SampleCountBit,
+    usage: ImageUsageFlags,
+    tiling: ImageTiling,
+
+    fn toRaw(options: SparseImageFormatOptions) raw.VkPhysicalDeviceSparseImageFormatInfo2 {
+        return .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SPARSE_IMAGE_FORMAT_INFO_2,
+            .format = options.format.toRaw(),
+            .type = options.image_type.toRaw(),
+            .samples = options.sample_count.toRaw(),
+            .usage = options.usage.toRaw(),
+            .tiling = options.tiling.toRaw(),
+        };
+    }
+};
+
+pub const SparseImageFormatProperties = struct {
+    aspect_mask: ImageAspectFlags,
+    image_granularity: Extent3D,
+    flags: SparseImageFormatFlags,
+
+    pub fn fromRaw(value: raw.VkSparseImageFormatProperties) SparseImageFormatProperties {
+        return .{
+            .aspect_mask = .fromRaw(value.aspectMask),
+            .image_granularity = .fromRaw(value.imageGranularity),
+            .flags = .fromRaw(value.flags),
+        };
+    }
+};
+
+pub const sparse_image_format_property_count_max = 256;
+pub const drm_format_modifier_property_count_max = 256;
 
 pub const PhysicalDevice = struct {
     _handle: PhysicalDeviceHandle,
@@ -1985,6 +2077,206 @@ pub const PhysicalDevice = struct {
         if (result == raw.VK_ERROR_FORMAT_NOT_SUPPORTED) return null;
         try checkSuccess(result);
         return .fromRaw(value);
+    }
+
+    /// Uses the Vulkan 1.1/KHR promoted query and resolves either command name.
+    pub fn formatProperties2(
+        device: *const PhysicalDevice,
+        format: Format,
+    ) Error!FormatProperties {
+        const get_properties = device.dispatch.get_physical_device_format_properties2 orelse {
+            return error.MissingCommand;
+        };
+        var value: raw.VkFormatProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+        };
+        get_properties(device._handle, format.toRaw(), &value);
+        return .fromRaw(value.formatProperties);
+    }
+
+    /// Uses the Vulkan 1.1/KHR promoted query. Unsupported combinations return null.
+    pub fn imageFormatProperties2(
+        device: *const PhysicalDevice,
+        options: ImageFormatQueryOptions,
+    ) Error!?ImageFormatQueryResult {
+        const get_properties = device.dispatch.get_physical_device_image_format_properties2 orelse {
+            return error.MissingCommand;
+        };
+        var queue_family_indices_raw: [device_queue_count_max]u32 = undefined;
+        var external_info: raw.VkPhysicalDeviceExternalImageFormatInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+        };
+        var drm_info: raw.VkPhysicalDeviceImageDrmFormatModifierInfoEXT = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT,
+        };
+        var input_next: ?*const anyopaque = null;
+        if (options.drm_format_modifier) |drm| {
+            if (options.tiling != .drm_format_modifier_ext) return error.InvalidOptions;
+            if (drm.queue_family_indices.len > device_queue_count_max) return error.CountOverflow;
+            if (drm.queue_family_indices.len == 1) return error.InvalidOptions;
+            for (drm.queue_family_indices, 0..) |family_index, index| {
+                for (drm.queue_family_indices[0..index]) |previous_index| {
+                    if (family_index == previous_index) return error.InvalidOptions;
+                }
+                queue_family_indices_raw[index] = family_index.toRaw();
+            }
+            drm_info.drmFormatModifier = drm.modifier;
+            drm_info.sharingMode = if (drm.queue_family_indices.len > 1)
+                SharingMode.concurrent.toRaw()
+            else
+                SharingMode.exclusive.toRaw();
+            drm_info.queueFamilyIndexCount = @intCast(drm.queue_family_indices.len);
+            drm_info.pQueueFamilyIndices = if (drm.queue_family_indices.len == 0)
+                null
+            else
+                queue_family_indices_raw[0..drm.queue_family_indices.len].ptr;
+            input_next = &drm_info;
+        }
+        if (options.external_memory_handle_type) |handle_type| {
+            external_info.handleType = handle_type.toRaw();
+            external_info.pNext = input_next;
+            input_next = &external_info;
+        }
+        var info: raw.VkPhysicalDeviceImageFormatInfo2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+            .pNext = input_next,
+            .format = options.format.toRaw(),
+            .type = options.image_type.toRaw(),
+            .tiling = options.tiling.toRaw(),
+            .usage = options.usage.toRaw(),
+            .flags = options.flags.toRaw(),
+        };
+        var value: raw.VkImageFormatProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+        };
+        var external_properties: raw.VkExternalImageFormatProperties = .{
+            .sType = raw.VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+        };
+        if (options.external_memory_handle_type != null) value.pNext = &external_properties;
+        const result = get_properties(device._handle, &info, &value);
+        if (result == raw.VK_ERROR_FORMAT_NOT_SUPPORTED) return null;
+        try checkSuccess(result);
+        return .{
+            .properties = .fromRaw(value.imageFormatProperties),
+            .external_memory = if (options.external_memory_handle_type != null)
+                .fromRaw(external_properties.externalMemoryProperties)
+            else
+                null,
+        };
+    }
+
+    pub fn drmFormatModifierPropertyCount(
+        device: *const PhysicalDevice,
+        format: Format,
+    ) Error!u32 {
+        const get_properties = device.dispatch.get_physical_device_format_properties2 orelse {
+            return error.MissingCommand;
+        };
+        var list: raw.VkDrmFormatModifierPropertiesListEXT = .{
+            .sType = raw.VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+        };
+        var value: raw.VkFormatProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+            .pNext = &list,
+        };
+        get_properties(device._handle, format.toRaw(), &value);
+        try validateEnumerationCount(list.drmFormatModifierCount);
+        if (list.drmFormatModifierCount > drm_format_modifier_property_count_max) {
+            return error.CountOverflow;
+        }
+        return list.drmFormatModifierCount;
+    }
+
+    pub fn drmFormatModifierPropertiesInto(
+        device: *const PhysicalDevice,
+        format: Format,
+        storage: []DrmFormatModifierProperties,
+    ) Error![]DrmFormatModifierProperties {
+        if (storage.len > drm_format_modifier_property_count_max) return error.CountOverflow;
+        const get_properties = device.dispatch.get_physical_device_format_properties2 orelse {
+            return error.MissingCommand;
+        };
+        var raw_properties: [drm_format_modifier_property_count_max]raw.VkDrmFormatModifierPropertiesEXT = undefined;
+        var list: raw.VkDrmFormatModifierPropertiesListEXT = .{
+            .sType = raw.VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+            .drmFormatModifierCount = @intCast(storage.len),
+            .pDrmFormatModifierProperties = if (storage.len == 0)
+                null
+            else
+                raw_properties[0..storage.len].ptr,
+        };
+        var value: raw.VkFormatProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+            .pNext = &list,
+        };
+        get_properties(device._handle, format.toRaw(), &value);
+        if (list.drmFormatModifierCount > storage.len) return error.BufferTooSmall;
+        for (storage[0..list.drmFormatModifierCount], raw_properties[0..list.drmFormatModifierCount]) |*property, raw_property| {
+            property.* = .fromRaw(raw_property);
+        }
+        return storage[0..list.drmFormatModifierCount];
+    }
+
+    pub fn drmFormatModifierProperties(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+        format: Format,
+    ) (Error || std.mem.Allocator.Error)![]DrmFormatModifierProperties {
+        const count = try device.drmFormatModifierPropertyCount(format);
+        const output = try gpa.alloc(DrmFormatModifierProperties, count);
+        errdefer gpa.free(output);
+        const written = try device.drmFormatModifierPropertiesInto(format, output);
+        return gpa.realloc(output, written.len);
+    }
+
+    pub fn sparseImageFormatPropertyCount(
+        device: *const PhysicalDevice,
+        options: SparseImageFormatOptions,
+    ) Error!u32 {
+        const get_properties = device.dispatch.get_physical_device_sparse_image_format_properties2 orelse {
+            return error.MissingCommand;
+        };
+        var info = options.toRaw();
+        var count: u32 = 0;
+        get_properties(device._handle, &info, &count, null);
+        try validateEnumerationCount(count);
+        if (count > sparse_image_format_property_count_max) return error.CountOverflow;
+        return count;
+    }
+
+    pub fn sparseImageFormatPropertiesInto(
+        device: *const PhysicalDevice,
+        options: SparseImageFormatOptions,
+        storage: []SparseImageFormatProperties,
+    ) Error![]SparseImageFormatProperties {
+        if (storage.len > sparse_image_format_property_count_max) return error.CountOverflow;
+        const get_properties = device.dispatch.get_physical_device_sparse_image_format_properties2 orelse {
+            return error.MissingCommand;
+        };
+        var info = options.toRaw();
+        var raw_properties: [sparse_image_format_property_count_max]raw.VkSparseImageFormatProperties2 = undefined;
+        for (raw_properties[0..storage.len]) |*property| {
+            property.* = .{ .sType = raw.VK_STRUCTURE_TYPE_SPARSE_IMAGE_FORMAT_PROPERTIES_2 };
+        }
+        var count: u32 = @intCast(storage.len);
+        get_properties(device._handle, &info, &count, raw_properties[0..storage.len].ptr);
+        if (count > storage.len) return error.BufferTooSmall;
+        for (storage[0..count], raw_properties[0..count]) |*property, raw_property| {
+            property.* = .fromRaw(raw_property.properties);
+        }
+        return storage[0..count];
+    }
+
+    pub fn sparseImageFormatProperties(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+        options: SparseImageFormatOptions,
+    ) (Error || std.mem.Allocator.Error)![]SparseImageFormatProperties {
+        const count = try device.sparseImageFormatPropertyCount(options);
+        const output = try gpa.alloc(SparseImageFormatProperties, count);
+        errdefer gpa.free(output);
+        const written = try device.sparseImageFormatPropertiesInto(options, output);
+        return gpa.realloc(output, written.len);
     }
 
     pub fn features(device: *const PhysicalDevice) raw.VkPhysicalDeviceFeatures {
@@ -4043,6 +4335,15 @@ const InstanceDispatch = struct {
     get_physical_device_image_format_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceImageFormatProperties,
     ),
+    get_physical_device_format_properties2: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceFormatProperties2,
+    ),
+    get_physical_device_image_format_properties2: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceImageFormatProperties2,
+    ),
+    get_physical_device_sparse_image_format_properties2: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceSparseImageFormatProperties2,
+    ),
     get_physical_device_features: CommandFunction(raw.PFN_vkGetPhysicalDeviceFeatures),
     get_physical_device_features2: ?CommandFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
     get_physical_device_memory_properties: CommandFunction(
@@ -4109,6 +4410,24 @@ const InstanceDispatch = struct {
                 handle,
                 raw.PFN_vkGetPhysicalDeviceImageFormatProperties,
                 "vkGetPhysicalDeviceImageFormatProperties",
+            ),
+            .get_physical_device_format_properties2 = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_format_properties2,
+                .instance,
+            ),
+            .get_physical_device_image_format_properties2 = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_image_format_properties2,
+                .instance,
+            ),
+            .get_physical_device_sparse_image_format_properties2 = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_sparse_image_format_properties2,
+                .instance,
             ),
             .get_physical_device_features = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -4924,6 +5243,7 @@ const TestCommand = enum {
     surface_support,
     set_object_name,
     features2_alias_only,
+    format_properties2_alias_only,
     submit2_alias_only,
 };
 
@@ -4983,6 +5303,15 @@ var test_memory_properties: raw.VkPhysicalDeviceMemoryProperties = .{};
 var test_format_properties: raw.VkFormatProperties = .{};
 var test_image_format_properties: raw.VkImageFormatProperties = .{};
 var test_image_format_result: raw.VkResult = raw.VK_SUCCESS;
+var test_sparse_image_format_properties: [2]raw.VkSparseImageFormatProperties = .{ .{}, .{} };
+var test_sparse_image_format_property_count: u32 = 0;
+var test_drm_format_modifier_properties: [2]raw.VkDrmFormatModifierPropertiesEXT = .{ .{}, .{} };
+var test_drm_format_modifier_property_count: u32 = 0;
+var test_external_memory_properties: raw.VkExternalMemoryProperties = .{};
+var test_external_memory_handle_type: raw.VkExternalMemoryHandleTypeFlagBits = 0;
+var test_drm_format_modifier: u64 = 0;
+var test_drm_sharing_mode: raw.VkSharingMode = raw.VK_SHARING_MODE_EXCLUSIVE;
+var test_drm_queue_family_count: u32 = 0;
 
 fn testHandle(comptime OptionalHandle: type, address: usize) NonNullHandle(OptionalHandle) {
     return @ptrFromInt(address);
@@ -5010,6 +5339,13 @@ fn testGetInstanceProcAddr(
     }
     if (testNameEquals(name, "vkGetPhysicalDeviceFeatures2KHR")) {
         return @ptrCast(&testUnused);
+    }
+    if (testNameEquals(name, "vkGetPhysicalDeviceFormatProperties2")) {
+        if (test_missing_command == .format_properties2_alias_only) return null;
+        return @ptrCast(&testGetPhysicalDeviceFormatProperties2);
+    }
+    if (testNameEquals(name, "vkGetPhysicalDeviceFormatProperties2KHR")) {
+        return @ptrCast(&testGetPhysicalDeviceFormatProperties2);
     }
     if (testNameEquals(name, "vkCreateDebugUtilsMessengerEXT")) {
         if (test_missing_command == .create_messenger) return null;
@@ -5084,6 +5420,71 @@ fn testGetPhysicalDeviceImageFormatProperties(
 ) callconv(.c) raw.VkResult {
     properties.* = test_image_format_properties;
     return test_image_format_result;
+}
+
+fn testGetPhysicalDeviceFormatProperties2(
+    _: raw.VkPhysicalDevice,
+    _: raw.VkFormat,
+    properties: [*c]raw.VkFormatProperties2,
+) callconv(.c) void {
+    properties.*.formatProperties = test_format_properties;
+    if (properties.*.pNext) |next| {
+        const base: *raw.VkBaseOutStructure = @ptrCast(@alignCast(next));
+        if (base.sType == raw.VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT) {
+            const list: *raw.VkDrmFormatModifierPropertiesListEXT = @ptrCast(@alignCast(next));
+            const capacity = list.drmFormatModifierCount;
+            const written = @min(capacity, test_drm_format_modifier_property_count);
+            for (0..written) |index| {
+                list.pDrmFormatModifierProperties[index] = test_drm_format_modifier_properties[index];
+            }
+            list.drmFormatModifierCount = test_drm_format_modifier_property_count;
+        }
+    }
+}
+
+fn testGetPhysicalDeviceImageFormatProperties2(
+    _: raw.VkPhysicalDevice,
+    info: [*c]const raw.VkPhysicalDeviceImageFormatInfo2,
+    properties: [*c]raw.VkImageFormatProperties2,
+) callconv(.c) raw.VkResult {
+    var next: [*c]const raw.VkBaseInStructure = @ptrCast(@alignCast(info.*.pNext));
+    while (next != null) : (next = next.*.pNext) {
+        if (next.*.sType == raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO) {
+            const external: *const raw.VkPhysicalDeviceExternalImageFormatInfo =
+                @ptrCast(@alignCast(next));
+            test_external_memory_handle_type = external.handleType;
+        } else if (next.*.sType == raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT) {
+            const drm: *const raw.VkPhysicalDeviceImageDrmFormatModifierInfoEXT =
+                @ptrCast(@alignCast(next));
+            test_drm_format_modifier = drm.drmFormatModifier;
+            test_drm_sharing_mode = drm.sharingMode;
+            test_drm_queue_family_count = drm.queueFamilyIndexCount;
+        }
+    }
+    properties.*.imageFormatProperties = test_image_format_properties;
+    if (properties.*.pNext) |next_output| {
+        const external: *raw.VkExternalImageFormatProperties = @ptrCast(@alignCast(next_output));
+        external.externalMemoryProperties = test_external_memory_properties;
+    }
+    return test_image_format_result;
+}
+
+fn testGetPhysicalDeviceSparseImageFormatProperties2(
+    _: raw.VkPhysicalDevice,
+    _: [*c]const raw.VkPhysicalDeviceSparseImageFormatInfo2,
+    count: [*c]u32,
+    properties: [*c]raw.VkSparseImageFormatProperties2,
+) callconv(.c) void {
+    if (properties == null) {
+        count.* = test_sparse_image_format_property_count;
+        return;
+    }
+    const capacity = count.*;
+    const written = @min(capacity, test_sparse_image_format_property_count);
+    for (0..written) |index| {
+        properties[index].properties = test_sparse_image_format_properties[index];
+    }
+    count.* = test_sparse_image_format_property_count;
 }
 
 fn testCreateImageView(
@@ -5520,6 +5921,9 @@ fn testInstance() Instance {
             .get_physical_device_properties = testFunction(raw.PFN_vkGetPhysicalDeviceProperties),
             .get_physical_device_format_properties = testGetPhysicalDeviceFormatProperties,
             .get_physical_device_image_format_properties = testGetPhysicalDeviceImageFormatProperties,
+            .get_physical_device_format_properties2 = testGetPhysicalDeviceFormatProperties2,
+            .get_physical_device_image_format_properties2 = testGetPhysicalDeviceImageFormatProperties2,
+            .get_physical_device_sparse_image_format_properties2 = testGetPhysicalDeviceSparseImageFormatProperties2,
             .get_physical_device_features = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures),
             .get_physical_device_features2 = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
             .get_physical_device_memory_properties = testGetPhysicalDeviceMemoryProperties,
@@ -5608,6 +6012,15 @@ test "generated command descriptors resolve promoted aliases internally" {
     try std.testing.expectEqual(
         command.Scope.instance,
         @TypeOf(command.get_physical_device_features2_khr).scope,
+    );
+
+    test_missing_command = .format_properties2_alias_only;
+    try std.testing.expect(
+        (try instance.load(command.get_physical_device_format_properties2)) != null,
+    );
+    try std.testing.expectEqualStrings(
+        "vkGetPhysicalDeviceFormatProperties2KHR",
+        @TypeOf(command.get_physical_device_format_properties2).aliases[0],
     );
 }
 
@@ -6654,6 +7067,15 @@ test "physical device format queries preserve support and typed capabilities" {
     try std.testing.expect(format.optimal_tiling_features.contains(.color_attachment));
     try std.testing.expect(format.buffer_features.contains(.vertex_buffer));
 
+    const unknown_feature: raw.VkFormatFeatureFlags = @as(raw.VkFormatFeatureFlags, 1) << 31;
+    test_format_properties.bufferFeatures |= unknown_feature;
+    const format2 = try physical_device.formatProperties2(.b8g8r8a8_srgb);
+    try std.testing.expect(format2.buffer_features.contains(.vertex_buffer));
+    try std.testing.expectEqual(
+        test_format_properties.bufferFeatures,
+        format2.buffer_features.toRaw(),
+    );
+
     const image = (try physical_device.imageFormatProperties(.{
         .format = .b8g8r8a8_srgb,
         .image_type = ._2d,
@@ -6664,8 +7086,182 @@ test "physical device format queries preserve support and typed capabilities" {
     try std.testing.expectEqual(@as(u32, 13), image.mip_level_count_max);
     try std.testing.expect(image.sample_counts.contains(._4));
 
+    const image2 = (try physical_device.imageFormatProperties2(.{
+        .format = .b8g8r8a8_srgb,
+        .image_type = ._2d,
+        .tiling = .optimal,
+        .usage = .init(&.{ .sampled, .color_attachment }),
+    })).?;
+    try std.testing.expectEqual(@as(u32, 256), image2.properties.array_layer_count_max);
+    try std.testing.expect(image2.external_memory == null);
+
+    test_external_memory_properties = .{
+        .externalMemoryFeatures = @intCast(
+            raw.VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+                raw.VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
+        ),
+        .exportFromImportedHandleTypes = @intCast(
+            raw.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+        ),
+        .compatibleHandleTypes = @intCast(
+            raw.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+                raw.VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+        ),
+    };
+    test_external_memory_handle_type = 0;
+    test_drm_format_modifier = 0;
+    test_drm_queue_family_count = 0;
+    const chained = (try physical_device.imageFormatProperties2(.{
+        .format = .b8g8r8a8_srgb,
+        .image_type = ._2d,
+        .tiling = .drm_format_modifier_ext,
+        .usage = .init(&.{.sampled}),
+        .external_memory_handle_type = .opaque_fd,
+        .drm_format_modifier = .{
+            .modifier = 0xabcd,
+            .queue_family_indices = &.{ .fromRaw(2), .fromRaw(5) },
+        },
+    })).?;
+    try std.testing.expectEqual(
+        ExternalMemoryHandleTypeBit.opaque_fd.toRaw(),
+        test_external_memory_handle_type,
+    );
+    try std.testing.expectEqual(@as(u64, 0xabcd), test_drm_format_modifier);
+    try std.testing.expectEqual(
+        @as(raw.VkSharingMode, @intCast(raw.VK_SHARING_MODE_CONCURRENT)),
+        test_drm_sharing_mode,
+    );
+    try std.testing.expectEqual(@as(u32, 2), test_drm_queue_family_count);
+    try std.testing.expect(chained.external_memory.?.features.contains(.exportable));
+    try std.testing.expect(chained.external_memory.?.features.contains(.importable));
+    try std.testing.expect(
+        chained.external_memory.?.compatible_handle_types.contains(.dma_buf_ext),
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        physical_device.imageFormatProperties2(.{
+            .format = .b8g8r8a8_srgb,
+            .image_type = ._2d,
+            .tiling = .optimal,
+            .usage = .init(&.{.sampled}),
+            .drm_format_modifier = .{ .modifier = 1 },
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        physical_device.imageFormatProperties2(.{
+            .format = .b8g8r8a8_srgb,
+            .image_type = ._2d,
+            .tiling = .drm_format_modifier_ext,
+            .usage = .init(&.{.sampled}),
+            .drm_format_modifier = .{
+                .modifier = 1,
+                .queue_family_indices = &.{.fromRaw(2)},
+            },
+        }),
+    );
+
+    test_drm_format_modifier_properties = .{
+        .{
+            .drmFormatModifier = 0xabcd,
+            .drmFormatModifierPlaneCount = 2,
+            .drmFormatModifierTilingFeatures = @intCast(
+                raw.VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT,
+            ),
+        },
+        .{
+            .drmFormatModifier = 0xef01,
+            .drmFormatModifierPlaneCount = 1,
+            .drmFormatModifierTilingFeatures = @intCast(
+                raw.VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+            ),
+        },
+    };
+    test_drm_format_modifier_property_count = 2;
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        try physical_device.drmFormatModifierPropertyCount(.b8g8r8a8_srgb),
+    );
+    var drm_storage: [2]DrmFormatModifierProperties = undefined;
+    const drm_properties = try physical_device.drmFormatModifierPropertiesInto(
+        .b8g8r8a8_srgb,
+        &drm_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 2), drm_properties.len);
+    try std.testing.expectEqual(@as(u64, 0xabcd), drm_properties[0].modifier);
+    try std.testing.expectEqual(@as(u32, 2), drm_properties[0].plane_count);
+    try std.testing.expect(drm_properties[1].tiling_features.contains(.color_attachment));
+    var short_drm_storage: [1]DrmFormatModifierProperties = undefined;
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        physical_device.drmFormatModifierPropertiesInto(
+            .b8g8r8a8_srgb,
+            &short_drm_storage,
+        ),
+    );
+    const allocated_drm = try physical_device.drmFormatModifierProperties(
+        std.testing.allocator,
+        .b8g8r8a8_srgb,
+    );
+    defer std.testing.allocator.free(allocated_drm);
+    try std.testing.expectEqual(@as(usize, 2), allocated_drm.len);
+
+    test_sparse_image_format_properties = .{
+        .{
+            .aspectMask = @intCast(raw.VK_IMAGE_ASPECT_COLOR_BIT),
+            .imageGranularity = .{ .width = 64, .height = 64, .depth = 1 },
+            .flags = @intCast(raw.VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT),
+        },
+        .{
+            .aspectMask = @intCast(raw.VK_IMAGE_ASPECT_METADATA_BIT),
+            .imageGranularity = .{ .width = 128, .height = 64, .depth = 1 },
+            .flags = 0,
+        },
+    };
+    test_sparse_image_format_property_count = 2;
+    const sparse_options: SparseImageFormatOptions = .{
+        .format = .b8g8r8a8_srgb,
+        .image_type = ._2d,
+        .sample_count = ._1,
+        .usage = .init(&.{.sampled}),
+        .tiling = .optimal,
+    };
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        try physical_device.sparseImageFormatPropertyCount(sparse_options),
+    );
+    var sparse_storage: [2]SparseImageFormatProperties = undefined;
+    const sparse = try physical_device.sparseImageFormatPropertiesInto(
+        sparse_options,
+        &sparse_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 2), sparse.len);
+    try std.testing.expect(sparse[0].aspect_mask.contains(.color));
+    try std.testing.expect(sparse[0].flags.contains(.single_miptail));
+    try std.testing.expectEqual(@as(u32, 128), sparse[1].image_granularity.width);
+    var short_sparse_storage: [1]SparseImageFormatProperties = undefined;
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        physical_device.sparseImageFormatPropertiesInto(
+            sparse_options,
+            &short_sparse_storage,
+        ),
+    );
+    const allocated_sparse = try physical_device.sparseImageFormatProperties(
+        std.testing.allocator,
+        sparse_options,
+    );
+    defer std.testing.allocator.free(allocated_sparse);
+    try std.testing.expectEqual(@as(usize, 2), allocated_sparse.len);
+
     test_image_format_result = raw.VK_ERROR_FORMAT_NOT_SUPPORTED;
     try std.testing.expect((try physical_device.imageFormatProperties(.{
+        .format = .b8g8r8a8_srgb,
+        .image_type = ._2d,
+        .tiling = .optimal,
+        .usage = .init(&.{.sampled}),
+    })) == null);
+    try std.testing.expect((try physical_device.imageFormatProperties2(.{
         .format = .b8g8r8a8_srgb,
         .image_type = ._2d,
         .tiling = .optimal,
@@ -6681,5 +7277,36 @@ test "physical device format queries preserve support and typed capabilities" {
             .usage = .init(&.{.sampled}),
         }),
     );
+    try std.testing.expectError(
+        error.OutOfDeviceMemory,
+        physical_device.imageFormatProperties2(.{
+            .format = .b8g8r8a8_srgb,
+            .image_type = ._2d,
+            .tiling = .optimal,
+            .usage = .init(&.{.sampled}),
+        }),
+    );
     test_image_format_result = raw.VK_SUCCESS;
+
+    var missing = physical_device;
+    missing.dispatch.get_physical_device_format_properties2 = null;
+    missing.dispatch.get_physical_device_image_format_properties2 = null;
+    missing.dispatch.get_physical_device_sparse_image_format_properties2 = null;
+    try std.testing.expectError(
+        error.MissingCommand,
+        missing.formatProperties2(.b8g8r8a8_srgb),
+    );
+    try std.testing.expectError(
+        error.MissingCommand,
+        missing.imageFormatProperties2(.{
+            .format = .b8g8r8a8_srgb,
+            .image_type = ._2d,
+            .tiling = .optimal,
+            .usage = .init(&.{.sampled}),
+        }),
+    );
+    try std.testing.expectError(
+        error.MissingCommand,
+        missing.sparseImageFormatPropertyCount(sparse_options),
+    );
 }

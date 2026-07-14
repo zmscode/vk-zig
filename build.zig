@@ -375,6 +375,7 @@ const examples = [_]Example{
     .{ .name = "raw-create-info", .path = "examples/raw_create_info.zig" },
     .{ .name = "platform", .path = "examples/platform.zig" },
     .{ .name = "capabilities", .path = "examples/capabilities.zig" },
+    .{ .name = "format-queries", .path = "examples/format_queries.zig" },
     .{ .name = "debug-utils", .path = "examples/debug_utils.zig" },
     .{ .name = "frame-resources", .path = "examples/frame_resources.zig" },
     .{ .name = "timeline-submit", .path = "examples/timeline_submit.zig" },

@@ -163,6 +163,27 @@ const flag_specs = [_]FlagSpec{
         .constant_prefix = "VK_FORMAT_FEATURE_",
     },
     .{
+        .registry_name = "VkFormatFeatureFlagBits2",
+        .bit_name = "FormatFeature2Bit",
+        .flags_name = "FormatFeature2Flags",
+        .raw_flags_name = "VkFormatFeatureFlags2",
+        .constant_prefix = "VK_FORMAT_FEATURE_2_",
+    },
+    .{
+        .registry_name = "VkExternalMemoryHandleTypeFlagBits",
+        .bit_name = "ExternalMemoryHandleTypeBit",
+        .flags_name = "ExternalMemoryHandleTypeFlags",
+        .raw_flags_name = "VkExternalMemoryHandleTypeFlags",
+        .constant_prefix = "VK_EXTERNAL_MEMORY_HANDLE_TYPE_",
+    },
+    .{
+        .registry_name = "VkExternalMemoryFeatureFlagBits",
+        .bit_name = "ExternalMemoryFeatureBit",
+        .flags_name = "ExternalMemoryFeatureFlags",
+        .raw_flags_name = "VkExternalMemoryFeatureFlags",
+        .constant_prefix = "VK_EXTERNAL_MEMORY_FEATURE_",
+    },
+    .{
         .registry_name = "VkCommandBufferUsageFlagBits",
         .bit_name = "CommandBufferUsageBit",
         .flags_name = "CommandBufferUsageFlags",
@@ -227,6 +248,13 @@ const flag_specs = [_]FlagSpec{
         .raw_flags_name = "VkSwapchainCreateFlagsKHR",
         .constant_prefix = "VK_SWAPCHAIN_CREATE_",
         .terminal_token = "KHR",
+    },
+    .{
+        .registry_name = "VkSparseImageFormatFlagBits",
+        .bit_name = "SparseImageFormatBit",
+        .flags_name = "SparseImageFormatFlags",
+        .raw_flags_name = "VkSparseImageFormatFlags",
+        .constant_prefix = "VK_SPARSE_IMAGE_FORMAT_",
     },
 };
 

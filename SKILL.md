@@ -81,6 +81,15 @@ with `surfaceFormatsInto`/`presentModesInto` when the consumer owns fixed storag
 `error.BufferTooSmall` as a bounded retry or an application capacity error; vk-zig will not hide a
 fallback allocation in an `Into` call.
 
+Select texture and depth formats with `PhysicalDevice.formatProperties2` and
+`imageFormatProperties2`. Check `FormatFeatureFlags` with `contains`; an unsupported image
+combination is `null`, not a raw Vulkan result. Use `sparseImageFormatPropertyCount` plus
+`sparseImageFormatPropertiesInto`, or its allocating convenience, for sparse capabilities.
+External-memory and DRM-modifier image queries belong in `ImageFormatQueryOptions` through
+`.external_memory_handle_type` and `.drm_format_modifier`; do not construct input or output
+`pNext` chains in application code. Enumerate DRM modifiers with the typed count/`Into`/allocating
+methods and preserve unknown feature bits by retaining the returned flag sets.
+
 Deinitialize children before parents: swapchains, then devices, surfaces, instances, and finally
 the loader. An instance configured with a typed debug messenger owns and destroys that messenger
 before destroying itself. Queues and swapchain images are non-owning and need no deinit.

@@ -877,6 +877,14 @@ test "all public wrapper declarations compile" {
     _ = &vk.PhysicalDevice.propertiesRaw;
     _ = &vk.PhysicalDevice.formatProperties;
     _ = &vk.PhysicalDevice.imageFormatProperties;
+    _ = &vk.PhysicalDevice.formatProperties2;
+    _ = &vk.PhysicalDevice.imageFormatProperties2;
+    _ = &vk.PhysicalDevice.drmFormatModifierPropertyCount;
+    _ = &vk.PhysicalDevice.drmFormatModifierPropertiesInto;
+    _ = &vk.PhysicalDevice.drmFormatModifierProperties;
+    _ = &vk.PhysicalDevice.sparseImageFormatPropertyCount;
+    _ = &vk.PhysicalDevice.sparseImageFormatPropertiesInto;
+    _ = &vk.PhysicalDevice.sparseImageFormatProperties;
     _ = &vk.PhysicalDevice.features;
     _ = &vk.PhysicalDevice.features2;
     _ = &vk.PhysicalDevice.memoryProperties;

@@ -235,6 +235,31 @@ if (format_count > format_storage.len) return error.TooManySurfaceFormats;
 const formats = try physical_device.surfaceFormatsInto(&surface, &format_storage);
 ```
 
+Core format selection is also raw-free. The promoted query resolves its Vulkan 1.1/KHR command
+alias internally and preserves unknown driver feature bits:
+
+```zig
+const format = try physical_device.formatProperties2(.d32_sfloat);
+if (!format.optimal_tiling_features.contains(.depth_stencil_attachment)) {
+    return error.DepthFormatUnsupported;
+}
+const limits = (try physical_device.imageFormatProperties2(.{
+    .format = .d32_sfloat,
+    .image_type = ._2d,
+    .tiling = .optimal,
+    .usage = .init(&.{.depth_stencil_attachment}),
+})) orelse return error.DepthFormatUnsupported;
+const maximum_extent = limits.properties.extent_max;
+```
+
+`imageFormatProperties2` returns `null` for `VK_ERROR_FORMAT_NOT_SUPPORTED`. Add
+`.external_memory_handle_type` to receive typed external-memory compatibility, or add a
+`DrmFormatModifierQuery` with `.tiling = .drm_format_modifier_ext`; vk-zig owns both input and
+output chains. Use `drmFormatModifierPropertyCount`/`drmFormatModifierPropertiesInto` or the
+allocating `drmFormatModifierProperties` convenience to enumerate modifiers. Sparse image-format
+properties follow the same count/`Into`/allocating pattern. See `examples/format_queries.zig` for
+a depth-format selection example without `vk.raw`.
+
 `deviceExtensions` enumerates per-device support. Once `VK_KHR_swapchain` is enabled on the
 logical device, create and own a swapchain without manually loading its commands:
 
