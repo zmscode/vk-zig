@@ -320,6 +320,10 @@ Use `vk.checkSuccess(result)` for raw commands whose only successful result is `
 Do not use it for enumeration, wait, acquire, or presentation commands: status values such as
 `VK_INCOMPLETE`, `VK_TIMEOUT`, and `VK_SUBOPTIMAL_KHR` require command-specific handling.
 
+The library takes no hidden Vulkan locks. See the complete
+[host synchronization and GPU lifetime contract](docs/SYNCHRONIZATION.md) before sharing queues,
+pools, command buffers, memory, descriptors, or presentation objects across threads.
+
 ## Surfaces and debug utilities
 
 The configured platform constructor owns the native create-info and uses the instance's allocation

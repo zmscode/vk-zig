@@ -296,7 +296,7 @@ pub const Reference = union(enum) {
     pub fn handle(reference: Reference) core.Error!ImageHandle {
         return switch (reference) {
             .owned => |image| image._handle orelse error.InactiveObject,
-            .swapchain => |image| image._handle,
+            .swapchain => |image| try image.rawHandle(),
         };
     }
 
@@ -338,14 +338,16 @@ pub const SwapchainImage = struct {
     _handle: ImageHandle,
     _device_handle: DeviceHandle,
     _swapchain_handle: SwapchainHandle,
+    _swapchain_borrow: ?core.Generation.Borrow = null,
     index: core.SwapchainImageIndex,
 
-    pub fn rawHandle(image: SwapchainImage) raw.VkImage {
+    pub fn rawHandle(image: SwapchainImage) core.Error!ImageHandle {
+        if (image._swapchain_borrow) |borrow| try borrow.validate();
         return image._handle;
     }
 
     pub fn debugObject(image: SwapchainImage) core.Error!debug_utils.Object {
-        return .forDevice(.image, image._handle, image._device_handle);
+        return .forDevice(.image, try image.rawHandle(), image._device_handle);
     }
 };
 

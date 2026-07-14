@@ -27,6 +27,26 @@ pub const Error = error{
     SurfaceLost,
     NativeWindowInUse,
     FullScreenExclusiveLost,
+    OutOfPoolMemory,
+    InvalidExternalHandle,
+    Fragmentation,
+    InvalidOpaqueCaptureAddress,
+    InvalidPipelineCacheData,
+    NoPipelineMatch,
+    ValidationFailed,
+    NotPermitted,
+    InvalidShader,
+    ImageUsageNotSupported,
+    VideoPictureLayoutNotSupported,
+    VideoProfileOperationNotSupported,
+    VideoProfileFormatNotSupported,
+    VideoProfileCodecNotSupported,
+    VideoStdVersionNotSupported,
+    InvalidDrmFormatModifierPlaneLayout,
+    PresentTimingQueueFull,
+    InvalidVideoStdParameters,
+    CompressionExhausted,
+    NotEnoughSpace,
     BufferTooSmall,
     InvalidProperties,
     SizeOverflow,
@@ -361,6 +381,8 @@ pub const ResultStatus = enum {
     thread_idle,
     operation_deferred,
     operation_not_deferred,
+    incompatible_shader_binary,
+    pipeline_binary_missing,
 };
 
 /// Classifies every common Vulkan status and maps fatal results to the shared error set.
@@ -376,6 +398,8 @@ pub fn classifyResult(result: raw.VkResult) Error!ResultStatus {
     if (result == raw.VK_THREAD_IDLE_KHR) return .thread_idle;
     if (result == raw.VK_OPERATION_DEFERRED_KHR) return .operation_deferred;
     if (result == raw.VK_OPERATION_NOT_DEFERRED_KHR) return .operation_not_deferred;
+    if (result == raw.VK_INCOMPATIBLE_SHADER_BINARY_EXT) return .incompatible_shader_binary;
+    if (result == raw.VK_PIPELINE_BINARY_MISSING_KHR) return .pipeline_binary_missing;
     return mapFatalResult(result);
 }
 
@@ -425,6 +449,46 @@ fn mapFatalResult(result: raw.VkResult) Error {
     if (result == raw.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
         return error.FullScreenExclusiveLost;
     }
+    if (result == raw.VK_ERROR_OUT_OF_POOL_MEMORY) return error.OutOfPoolMemory;
+    if (result == raw.VK_ERROR_INVALID_EXTERNAL_HANDLE) return error.InvalidExternalHandle;
+    if (result == raw.VK_ERROR_FRAGMENTATION) return error.Fragmentation;
+    if (result == raw.VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS) return error.InvalidOpaqueCaptureAddress;
+    if (comptime @hasDecl(raw, "VK_ERROR_INVALID_PIPELINE_CACHE_DATA")) {
+        if (result == @field(raw, "VK_ERROR_INVALID_PIPELINE_CACHE_DATA")) {
+            return error.InvalidPipelineCacheData;
+        }
+    }
+    if (comptime @hasDecl(raw, "VK_ERROR_NO_PIPELINE_MATCH")) {
+        if (result == @field(raw, "VK_ERROR_NO_PIPELINE_MATCH")) return error.NoPipelineMatch;
+    }
+    if (result == raw.VK_ERROR_VALIDATION_FAILED) return error.ValidationFailed;
+    if (result == raw.VK_ERROR_NOT_PERMITTED) return error.NotPermitted;
+    if (result == raw.VK_ERROR_INVALID_SHADER_NV) return error.InvalidShader;
+    if (result == raw.VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR) return error.ImageUsageNotSupported;
+    if (result == raw.VK_ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR) {
+        return error.VideoPictureLayoutNotSupported;
+    }
+    if (result == raw.VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR) {
+        return error.VideoProfileOperationNotSupported;
+    }
+    if (result == raw.VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR) {
+        return error.VideoProfileFormatNotSupported;
+    }
+    if (result == raw.VK_ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR) {
+        return error.VideoProfileCodecNotSupported;
+    }
+    if (result == raw.VK_ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR) {
+        return error.VideoStdVersionNotSupported;
+    }
+    if (result == raw.VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT) {
+        return error.InvalidDrmFormatModifierPlaneLayout;
+    }
+    if (result == raw.VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT) return error.PresentTimingQueueFull;
+    if (result == raw.VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR) {
+        return error.InvalidVideoStdParameters;
+    }
+    if (result == raw.VK_ERROR_COMPRESSION_EXHAUSTED_EXT) return error.CompressionExhausted;
+    if (result == raw.VK_ERROR_NOT_ENOUGH_SPACE_KHR) return error.NotEnoughSpace;
     return error.UnexpectedVulkanResult;
 }
 

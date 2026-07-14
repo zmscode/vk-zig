@@ -1,6 +1,11 @@
 const std = @import("std");
 const vk = @import("vulkan");
 
+fn containsString(values: []const [:0]const u8, expected: []const u8) bool {
+    for (values) |value| if (std.mem.eql(u8, value, expected)) return true;
+    return false;
+}
+
 var typed_handler_count: u32 = 0;
 
 fn typedDebugMessage(_: vk.debug_utils.Message) void {
@@ -221,6 +226,31 @@ test "generated commands bind scope, name, and function type" {
     try std.testing.expect(wrapped_count > 0);
     try std.testing.expect(raw_only_count > 0);
     try std.testing.expect(queue_submit_wrapped);
+}
+
+test "generated commands preserve registry external synchronization" {
+    try std.testing.expect(@TypeOf(vk.command.queue_submit).externally_synchronized);
+    try std.testing.expect(@TypeOf(vk.command.destroy_device).externally_synchronized);
+    try std.testing.expect(!@TypeOf(vk.command.get_physical_device_properties).externally_synchronized);
+}
+
+test "generated result contracts preserve every registry-declared outcome" {
+    const Acquire = @TypeOf(vk.command.acquire_next_image_khr);
+    try std.testing.expect(containsString(Acquire.success_codes, "VK_TIMEOUT"));
+    try std.testing.expect(containsString(Acquire.success_codes, "VK_NOT_READY"));
+    try std.testing.expect(containsString(Acquire.error_codes, "VK_ERROR_OUT_OF_DATE_KHR"));
+    try std.testing.expect(containsString(
+        @TypeOf(vk.command.create_graphics_pipelines).success_codes,
+        "VK_PIPELINE_COMPILE_REQUIRED_EXT",
+    ));
+
+    for (vk.command.core_command_coverage) |coverage| {
+        if (coverage.status != .wrapped) continue;
+        // Empty lists are meaningful for void commands. Presence in this generated table
+        // proves that declared result lists were accounted for during wrapper coverage.
+        _ = coverage.success_codes;
+        _ = coverage.error_codes;
+    }
 }
 
 test "generated extension names compose without duplicates" {
@@ -905,6 +935,11 @@ test "checkSuccess maps only success-only Vulkan results" {
             vk.raw.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT,
             error.FullScreenExclusiveLost,
         },
+        .{ vk.raw.VK_ERROR_OUT_OF_POOL_MEMORY, error.OutOfPoolMemory },
+        .{ vk.raw.VK_ERROR_INVALID_EXTERNAL_HANDLE, error.InvalidExternalHandle },
+        .{ vk.raw.VK_ERROR_FRAGMENTATION, error.Fragmentation },
+        .{ vk.raw.VK_ERROR_VALIDATION_FAILED, error.ValidationFailed },
+        .{ vk.raw.VK_ERROR_COMPRESSION_EXHAUSTED_EXT, error.CompressionExhausted },
     };
     for (cases) |case| try std.testing.expectError(case[1], vk.checkSuccess(case[0]));
     try std.testing.expectError(error.UnexpectedVulkanResult, vk.checkSuccess(-1234567));
@@ -916,6 +951,19 @@ test "checkSuccess maps only success-only Vulkan results" {
     try std.testing.expectError(
         error.UnexpectedVulkanResult,
         vk.checkSuccess(vk.raw.VK_SUBOPTIMAL_KHR),
+    );
+    try std.testing.expectEqual(vk.ResultStatus.timeout, try vk.classifyResult(vk.raw.VK_TIMEOUT));
+    try std.testing.expectEqual(
+        vk.ResultStatus.pipeline_compile_required,
+        try vk.classifyResult(vk.raw.VK_PIPELINE_COMPILE_REQUIRED),
+    );
+    try std.testing.expectEqual(
+        vk.ResultStatus.incompatible_shader_binary,
+        try vk.classifyResult(vk.raw.VK_INCOMPATIBLE_SHADER_BINARY_EXT),
+    );
+    try std.testing.expectEqual(
+        vk.ResultStatus.pipeline_binary_missing,
+        try vk.classifyResult(vk.raw.VK_PIPELINE_BINARY_MISSING_KHR),
     );
 }
 

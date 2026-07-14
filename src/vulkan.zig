@@ -163,6 +163,8 @@ pub const DeviceRange = core.DeviceRange;
 pub const Timeout = core.Timeout;
 pub const QueueFamilyOwnership = core.QueueFamilyOwnership;
 pub const checkSuccess = core.checkSuccess;
+pub const ResultStatus = core.ResultStatus;
+pub const classifyResult = core.classifyResult;
 
 const NonNullHandle = core.NonNullHandle;
 const count32 = core.count32;
@@ -750,6 +752,7 @@ pub const Instance = struct {
     _enabled_extensions: [name_count_max][:0]const u8 = undefined,
     _enabled_extension_count: usize = 0,
     _api_version: Version = .v1_0,
+    _child_generation: core.Generation = .{},
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: InstanceDispatch,
 
@@ -759,6 +762,7 @@ pub const Instance = struct {
         instance._debug_messenger = null;
         instance.dispatch.destroy_instance(handle, instance.allocation_callbacks);
         instance._handle = null;
+        instance._child_generation.invalidate();
     }
 
     pub fn debugMessengerActive(instance: *const Instance) bool {
@@ -925,6 +929,7 @@ pub const Instance = struct {
         return .{
             ._handle = live_handle,
             ._instance_handle = instance_handle,
+            ._instance_borrow = instance._child_generation.borrow(),
             .allocation_callbacks = allocation_callbacks,
             .destroy_surface = destroy_surface,
         };
@@ -946,6 +951,7 @@ pub const Instance = struct {
         return .{
             ._handle = created orelse return error.InvalidHandle,
             ._instance_handle = instance_handle,
+            ._instance_borrow = instance._child_generation.borrow(),
             .allocation_callbacks = allocation_callbacks,
             .destroy_surface = destroy_surface,
         };
@@ -1056,6 +1062,7 @@ pub const Instance = struct {
         var surface = try adapter.create(adapter.context, instance);
         errdefer surface.deinit();
         if (surface._instance_handle != instance._handle.?) return error.InvalidHandle;
+        surface._instance_borrow = instance._child_generation.borrow();
         return surface;
     }
 };
@@ -2358,6 +2365,11 @@ pub const Device = struct {
         return device._handle orelse error.InactiveObject;
     }
 
+    fn recordError(device: *const Device, err: Error) Error {
+        if (err == error.DeviceLost) @constCast(&device._state).markLost();
+        return err;
+    }
+
     pub fn waitIdle(device: *const Device) Error!void {
         const handle = try device.dispatchHandle();
         try core.checkSuccessTracked(@constCast(&device._state), device.dispatch.device_wait_idle(handle));
@@ -2441,7 +2453,7 @@ pub const Device = struct {
         object: anytype,
         name: [:0]const u8,
     ) Error!void {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         const set_name = device.dispatch.set_debug_utils_object_name_ext orelse {
             return error.MissingCommand;
         };
@@ -2453,14 +2465,14 @@ pub const Device = struct {
             .objectHandle = object_info.handle,
             .pObjectName = name.ptr,
         };
-        try checkSuccess(set_name(device_handle, &name_info));
+        try core.checkSuccessTracked(@constCast(&device._state), set_name(device_handle, &name_info));
     }
 
     pub fn createBuffer(
         device: *const Device,
         options: buffers.Options,
     ) Error!buffers.Buffer {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         return buffers.create(
             device_handle,
             device.allocation_callbacks,
@@ -2477,7 +2489,7 @@ pub const Device = struct {
                 .bind_buffer_memory2 = device.dispatch.bind_buffer_memory2,
             },
             options,
-        );
+        ) catch |err| return device.recordError(err);
     }
 
     pub fn createBufferView(
@@ -2485,7 +2497,7 @@ pub const Device = struct {
         buffer: *const buffers.Buffer,
         options: buffers.ViewOptions,
     ) Error!buffers.View {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         if (buffer._device_handle != device_handle) return error.InvalidHandle;
         return buffers.createView(buffer, options);
     }
@@ -2494,7 +2506,7 @@ pub const Device = struct {
         device: *const Device,
         options: memory.AllocationOptions,
     ) Error!memory.Allocation {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         if (options.priority != null and !device.supportsExtension(extension.ext_memory_priority)) return error.ExtensionNotPresent;
         return memory.allocate(
             device_handle,
@@ -2512,7 +2524,7 @@ pub const Device = struct {
                 .get_opaque_capture_address = device.dispatch.get_device_memory_opaque_capture_address,
             },
             options,
-        );
+        ) catch |err| return device.recordError(err);
     }
 
     pub fn createSampler(device: *const Device, options: samplers.Options) Error!samplers.Sampler {
@@ -2798,7 +2810,7 @@ pub const Device = struct {
         device: *const Device,
         options: ImageViewOptions,
     ) Error!ImageView {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         return images.createView(
             device_handle,
             device.allocation_callbacks,
@@ -2824,14 +2836,14 @@ pub const Device = struct {
             .copy_image_to_memory = device.dispatch.copy_image_to_memory,
             .copy_image_to_image = device.dispatch.copy_image_to_image,
             .transition_layout = device.dispatch.transition_image_layout,
-        }, options);
+        }, options) catch |err| return device.recordError(err);
     }
 
     pub fn createSemaphore(
         device: *const Device,
         options: SemaphoreOptions,
     ) Error!Semaphore {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         if (options.kind == .binary and options.initial_value != 0) {
             return error.InvalidOptions;
         }
@@ -2862,7 +2874,7 @@ pub const Device = struct {
                     device.allocation_callbacks,
                 );
             }
-            try checkSuccess(result);
+            try core.checkSuccessTracked(@constCast(&device._state), result);
             unreachable;
         }
         return .{
@@ -2878,7 +2890,7 @@ pub const Device = struct {
     }
 
     pub fn createFence(device: *const Device, options: FenceOptions) Error!Fence {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         const flags = if (options.signaled)
             FenceCreateFlags.init(&.{.signaled})
         else
@@ -2902,7 +2914,7 @@ pub const Device = struct {
                     device.allocation_callbacks,
                 );
             }
-            try checkSuccess(result);
+            try core.checkSuccessTracked(@constCast(&device._state), result);
             unreachable;
         }
         return .{
@@ -2928,7 +2940,7 @@ pub const Device = struct {
     }
 
     pub fn resetFences(device: *const Device, fences: []const *const Fence) Error!void {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         if (fences.len == 0) return;
         if (fences.len > submission_item_count_max) return error.CountOverflow;
         var handles: [submission_item_count_max]raw.VkFence = undefined;
@@ -2936,7 +2948,7 @@ pub const Device = struct {
             if (fence._device_handle != device_handle) return error.InvalidHandle;
             handle.* = try fence.rawHandle();
         }
-        try checkSuccess(device.dispatch.reset_fences(
+        try core.checkSuccessTracked(@constCast(&device._state), device.dispatch.reset_fences(
             device_handle,
             @intCast(fences.len),
             handles[0..fences.len].ptr,
@@ -2949,7 +2961,7 @@ pub const Device = struct {
         mode: WaitMode,
         timeout: Timeout,
     ) Error!FenceWaitStatus {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         if (fences.len == 0) return .success;
         if (fences.len > submission_item_count_max) return error.CountOverflow;
         var handles: [submission_item_count_max]raw.VkFence = undefined;
@@ -2966,7 +2978,7 @@ pub const Device = struct {
         );
         if (result == raw.VK_SUCCESS) return .success;
         if (result == raw.VK_TIMEOUT) return .timeout;
-        try checkSuccess(result);
+        _ = try core.classifyResultTracked(@constCast(&device._state), result);
         unreachable;
     }
 
@@ -2976,7 +2988,7 @@ pub const Device = struct {
         mode: WaitMode,
         timeout: Timeout,
     ) Error!TimelineWaitStatus {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         if (waits.len == 0) return .success;
         if (waits.len > submission_item_count_max) return error.CountOverflow;
         const wait_semaphores = device.dispatch.wait_semaphores orelse {
@@ -3000,7 +3012,7 @@ pub const Device = struct {
         const result = wait_semaphores(device_handle, &wait_info, timeout.toRaw());
         if (result == raw.VK_SUCCESS) return .success;
         if (result == raw.VK_TIMEOUT) return .timeout;
-        try checkSuccess(result);
+        _ = try core.classifyResultTracked(@constCast(&device._state), result);
         unreachable;
     }
 
@@ -3008,7 +3020,7 @@ pub const Device = struct {
         device: *const Device,
         options: CommandPoolOptions,
     ) Error!CommandPool {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         const create_info: raw.VkCommandPoolCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .flags = options.flags.toRaw(),
@@ -3029,7 +3041,7 @@ pub const Device = struct {
                     device.allocation_callbacks,
                 );
             }
-            try checkSuccess(result);
+            try core.checkSuccessTracked(@constCast(&device._state), result);
             unreachable;
         }
         return .{
@@ -3113,7 +3125,7 @@ pub const Device = struct {
         device: *const Device,
         options: SwapchainOptions,
     ) Error!Swapchain {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         try options.validate(device_handle, device._instance_handle);
         const create_swapchain = device.dispatch.create_swapchain_khr orelse {
             return error.MissingCommand;
@@ -3177,7 +3189,7 @@ pub const Device = struct {
             if (handle) |provisional_handle| {
                 destroy_swapchain(device_handle, provisional_handle, options.allocation_callbacks);
             }
-            try checkSuccess(result);
+            try core.checkSuccessTracked(@constCast(&device._state), result);
             unreachable;
         }
         return .{
@@ -6296,6 +6308,25 @@ test "owned handles reject inactive use and deinit is idempotent" {
     );
 }
 
+test "device loss is monotonic and short-circuits later dispatch" {
+    test_resource_result = raw.VK_ERROR_DEVICE_LOST;
+    var device = testDevice();
+    try std.testing.expectError(error.DeviceLost, device.createBuffer(.{
+        .size = .fromBytes(16),
+        .usage = .init(&.{.transfer_src}),
+    }));
+    try std.testing.expectEqual(core.DeviceState.Status.lost, device.status());
+
+    test_resource_result = raw.VK_SUCCESS;
+    try std.testing.expectError(error.DeviceLost, device.createBuffer(.{
+        .size = .fromBytes(16),
+        .usage = .init(&.{.transfer_src}),
+    }));
+    device.deinit();
+    device.deinit();
+    try std.testing.expectEqual(core.DeviceState.Status.destroyed, device.status());
+}
+
 test "Vulkan u32 counts reject narrowing overflow" {
     try std.testing.expectEqual(
         std.math.maxInt(u32),
@@ -7538,6 +7569,22 @@ test "swapchain acquisition and presentation preserve operation statuses" {
     test_present_result = raw.VK_SUCCESS;
 }
 
+test "swapchain destruction invalidates borrowed images" {
+    var swapchain: Swapchain = .{
+        ._handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        ._device_handle = testHandle(raw.VkDevice, 0x2000),
+        .allocation_callbacks = null,
+        .destroy_swapchain = testDestroySwapchain,
+        .get_swapchain_images = testGetSwapchainImages,
+        .acquire_next_image = testAcquireNextImage,
+    };
+    var storage: [2]SwapchainImage = undefined;
+    const images_for_swapchain = try swapchain.imagesInto(&storage);
+    _ = try images_for_swapchain[0].rawHandle();
+    swapchain.deinit();
+    try std.testing.expectError(error.StaleBorrow, images_for_swapchain[0].rawHandle());
+}
+
 test "debug messenger handles fake dispatch success and failures" {
     test_missing_command = .none;
     test_create_result = raw.VK_SUCCESS;
@@ -7679,6 +7726,21 @@ test "typed headless surface creation handles commands and rollback" {
     var surface = try instance.createHeadlessSurface(.{});
     surface.deinit();
     try std.testing.expectEqual(@as(usize, 2), test_destroy_surface_count);
+}
+
+test "instance destruction invalidates child surface borrows" {
+    test_missing_command = .none;
+    test_destroy_surface_count = 0;
+    var instance = testInstance();
+    var surface = try instance.adoptSurface(
+        testHandle(raw.VkSurfaceKHR, 0x3000),
+        null,
+    );
+    _ = try surface.rawHandle();
+    instance.deinit();
+    try std.testing.expectError(error.StaleBorrow, surface.rawHandle());
+    surface.deinit();
+    try std.testing.expectEqual(@as(usize, 0), test_destroy_surface_count);
 }
 
 test "surface adapters validate parent ownership and roll back mismatches" {

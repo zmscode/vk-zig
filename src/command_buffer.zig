@@ -439,7 +439,7 @@ pub const Buffer = struct {
             .newLayout = options.new_layout.toRaw(),
             .srcQueueFamilyIndex = options.ownership.sourceRaw(),
             .dstQueueFamilyIndex = options.ownership.destinationRaw(),
-            .image = options.image._handle,
+            .image = try options.image.rawHandle(),
             .subresourceRange = options.subresource_range.toRaw(),
         };
         buffer.cmd_pipeline_barrier(

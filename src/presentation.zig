@@ -49,11 +49,18 @@ pub const HeadlessSurfaceOptions = struct {};
 pub const Surface = struct {
     _handle: ?SurfaceHandle,
     _instance_handle: InstanceHandle,
+    _instance_borrow: ?core.Generation.Borrow = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_surface: CommandFunction(raw.PFN_vkDestroySurfaceKHR),
 
     pub fn deinit(surface: *Surface) void {
         const handle = surface._handle orelse return;
+        if (surface._instance_borrow) |borrow| {
+            borrow.validate() catch {
+                surface._handle = null;
+                return;
+            };
+        }
         surface.destroy_surface(
             surface._instance_handle,
             handle,
@@ -63,6 +70,7 @@ pub const Surface = struct {
     }
 
     pub fn rawHandle(surface: *const Surface) core.Error!raw.VkSurfaceKHR {
+        if (surface._instance_borrow) |borrow| try borrow.validate();
         return surface._handle orelse error.InactiveObject;
     }
 
@@ -150,6 +158,7 @@ pub const Swapchain = struct {
     destroy_swapchain: CommandFunction(raw.PFN_vkDestroySwapchainKHR),
     get_swapchain_images: CommandFunction(raw.PFN_vkGetSwapchainImagesKHR),
     acquire_next_image: CommandFunction(raw.PFN_vkAcquireNextImageKHR),
+    _image_generation: core.Generation = .{},
 
     pub fn deinit(swapchain: *Swapchain) void {
         const handle = swapchain._handle orelse return;
@@ -159,6 +168,7 @@ pub const Swapchain = struct {
             swapchain.allocation_callbacks,
         );
         swapchain._handle = null;
+        swapchain._image_generation.invalidate();
     }
 
     pub fn rawHandle(swapchain: *const Swapchain) core.Error!raw.VkSwapchainKHR {
@@ -230,6 +240,7 @@ pub const Swapchain = struct {
                 ._handle = raw_image orelse return error.InvalidHandle,
                 ._device_handle = swapchain._device_handle,
                 ._swapchain_handle = live_handle,
+                ._swapchain_borrow = swapchain._image_generation.borrow(),
                 .index = .fromRaw(@intCast(index)),
             };
         }

@@ -20,6 +20,11 @@ const ApiVersion = struct {
     minor: u8,
 };
 
+const CommandResults = struct {
+    success_codes: ?[]const u8,
+    error_codes: ?[]const u8,
+};
+
 const RegistryExtension = struct {
     name: []const u8,
     scope: Scope,
@@ -62,6 +67,12 @@ pub fn main(init: std.process.Init) !void {
     var registry_commands: std.StringHashMapUnmanaged(void) = .empty;
     defer registry_commands.deinit(gpa);
     try collectRegistryCommands(gpa, registry, &registry_commands);
+    var command_external_sync: std.StringHashMapUnmanaged(bool) = .empty;
+    defer command_external_sync.deinit(gpa);
+    try collectCommandExternalSync(gpa, registry, &command_external_sync);
+    var command_results: std.StringHashMapUnmanaged(CommandResults) = .empty;
+    defer command_results.deinit(gpa);
+    try collectCommandResults(gpa, registry, &command_results);
     var registry_aliases: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer registry_aliases.deinit(gpa);
     try collectRegistryCommandAliases(gpa, registry, &registry_aliases);
@@ -153,13 +164,27 @@ pub fn main(init: std.process.Init) !void {
             }
             if (!duplicate) try output.writer.print("\"{s}\",", .{extension_name});
         }
-        try output.writer.writeAll("}){};\n");
+        const results: CommandResults = command_results.get(root_name) orelse .{
+            .success_codes = null,
+            .error_codes = null,
+        };
+        try output.writer.print("}}, {}, ", .{command_external_sync.get(root_name) orelse false});
+        try writeCodeList(&output.writer, results.success_codes);
+        try output.writer.writeAll(", ");
+        try writeCodeList(&output.writer, results.error_codes);
+        try output.writer.writeAll("){};\n");
     }
 
     var key_iterator = generated_names.keyIterator();
     while (key_iterator.next()) |key| gpa.free(key.*);
 
-    try writeCoreCoverage(&output.writer, commands.items, &core_versions, wrapper_source);
+    try writeCoreCoverage(
+        &output.writer,
+        commands.items,
+        &core_versions,
+        &command_results,
+        wrapper_source,
+    );
 
     try writeExtensions(&output.writer, registry_extensions.items);
 
@@ -169,6 +194,92 @@ pub fn main(init: std.process.Init) !void {
         .sub_path = args[4],
         .data = output.written(),
     });
+}
+
+fn collectCommandResults(
+    gpa: std.mem.Allocator,
+    registry: []const u8,
+    metadata: *std.StringHashMapUnmanaged(CommandResults),
+) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<command")) |command_start| {
+        const tag_end = std.mem.indexOfScalarPos(u8, registry, command_start, '>') orelse {
+            return error.InvalidRegistry;
+        };
+        const opening = registry[command_start .. tag_end + 1];
+        if (attribute(opening, "name") != null) {
+            cursor = tag_end + 1;
+            continue;
+        }
+        const block_end = std.mem.indexOfPos(u8, registry, tag_end, "</command>") orelse {
+            return error.InvalidRegistry;
+        };
+        const block = registry[tag_end + 1 .. block_end];
+        cursor = block_end + "</command>".len;
+        const proto_start = std.mem.indexOf(u8, block, "<proto>") orelse continue;
+        const proto_end = std.mem.indexOfPos(u8, block, proto_start, "</proto>") orelse {
+            return error.InvalidRegistry;
+        };
+        const proto = block[proto_start..proto_end];
+        const name_start = std.mem.indexOf(u8, proto, "<name>") orelse continue;
+        const value_start = name_start + "<name>".len;
+        const value_end = std.mem.indexOfPos(u8, proto, value_start, "</name>") orelse {
+            return error.InvalidRegistry;
+        };
+        try metadata.put(gpa, proto[value_start..value_end], .{
+            .success_codes = attribute(opening, "successcodes"),
+            .error_codes = attribute(opening, "errorcodes"),
+        });
+    }
+}
+
+fn writeCodeList(writer: *std.Io.Writer, maybe_codes: ?[]const u8) !void {
+    try writer.writeAll("&.{");
+    const codes = maybe_codes orelse {
+        try writer.writeAll("}");
+        return;
+    };
+    var iterator = std.mem.splitScalar(u8, codes, ',');
+    while (iterator.next()) |code| try writer.print("\"{s}\",", .{code});
+    try writer.writeAll("}");
+}
+
+fn collectCommandExternalSync(
+    gpa: std.mem.Allocator,
+    registry: []const u8,
+    metadata: *std.StringHashMapUnmanaged(bool),
+) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, registry, cursor, "<command")) |command_start| {
+        const tag_end = std.mem.indexOfScalarPos(u8, registry, command_start, '>') orelse {
+            return error.InvalidRegistry;
+        };
+        const opening = registry[command_start .. tag_end + 1];
+        if (attribute(opening, "name") != null) {
+            cursor = tag_end + 1;
+            continue;
+        }
+        const block_end = std.mem.indexOfPos(u8, registry, tag_end, "</command>") orelse {
+            return error.InvalidRegistry;
+        };
+        const block = registry[tag_end + 1 .. block_end];
+        cursor = block_end + "</command>".len;
+        const proto_start = std.mem.indexOf(u8, block, "<proto>") orelse continue;
+        const proto_end = std.mem.indexOfPos(u8, block, proto_start, "</proto>") orelse {
+            return error.InvalidRegistry;
+        };
+        const proto = block[proto_start..proto_end];
+        const name_start = std.mem.indexOf(u8, proto, "<name>") orelse continue;
+        const value_start = name_start + "<name>".len;
+        const value_end = std.mem.indexOfPos(u8, proto, value_start, "</name>") orelse {
+            return error.InvalidRegistry;
+        };
+        const name = proto[value_start..value_end];
+        const externally_synchronized = std.mem.indexOf(u8, block, "externsync=\"true\"") != null or
+            std.mem.indexOf(u8, block, "externsync=\"maybe\"") != null or
+            std.mem.indexOf(u8, block, "<implicitexternsyncparams>") != null;
+        try metadata.put(gpa, name, externally_synchronized);
+    }
 }
 
 fn collectRegistryExtensions(
@@ -488,6 +599,7 @@ fn writeCoreCoverage(
     writer: *std.Io.Writer,
     commands: []const Command,
     versions: *const std.StringHashMapUnmanaged(ApiVersion),
+    results: *const std.StringHashMapUnmanaged(CommandResults),
     wrapper_source: []const u8,
 ) !void {
     try writer.writeAll(
@@ -499,6 +611,8 @@ fn writeCoreCoverage(
         \\    scope: Scope,
         \\    version: ApiVersion,
         \\    status: WrapperStatus,
+        \\    success_codes: []const [:0]const u8,
+        \\    error_codes: []const [:0]const u8,
         \\};
         \\
         \\pub const core_command_coverage = [_]CoreCommandCoverage{
@@ -518,9 +632,18 @@ fn writeCoreCoverage(
         for (commands) |command| {
             if (!std.mem.eql(u8, command.command_name, name)) continue;
             try writer.print(
-                "    .{{ .name = \"{s}\", .scope = .{s}, .version = .{{ .major = {d}, .minor = {d} }}, .status = .{s} }},\n",
+                "    .{{ .name = \"{s}\", .scope = .{s}, .version = .{{ .major = {d}, .minor = {d} }}, .status = .{s}, .success_codes = ",
                 .{ name, @tagName(command.scope.?), version.major, version.minor, status },
             );
+            const root_name = try canonicalCommandName(commands, name);
+            const metadata: CommandResults = results.get(root_name) orelse .{
+                .success_codes = null,
+                .error_codes = null,
+            };
+            try writeCodeList(writer, metadata.success_codes);
+            try writer.writeAll(", .error_codes = ");
+            try writeCodeList(writer, metadata.error_codes);
+            try writer.writeAll(" },\n");
             covered += 1;
             break;
         } else return error.MissingCoreCommandBinding;
@@ -707,6 +830,9 @@ fn writeHeader(writer: *std.Io.Writer) !void {
         \\    comptime command_aliases: []const [:0]const u8,
         \\    comptime command_core_version: ?ApiVersion,
         \\    comptime command_extensions: []const [:0]const u8,
+        \\    comptime command_externally_synchronized: bool,
+        \\    comptime command_success_codes: []const [:0]const u8,
+        \\    comptime command_error_codes: []const [:0]const u8,
         \\) type {
         \\    return struct {
         \\        pub const Pfn = PfnType;
@@ -716,6 +842,9 @@ fn writeHeader(writer: *std.Io.Writer) !void {
         \\        pub const aliases = command_aliases;
         \\        pub const core_version = command_core_version;
         \\        pub const extensions = command_extensions;
+        \\        pub const externally_synchronized = command_externally_synchronized;
+        \\        pub const success_codes = command_success_codes;
+        \\        pub const error_codes = command_error_codes;
         \\    };
         \\}
         \\
