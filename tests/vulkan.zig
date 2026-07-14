@@ -916,10 +916,14 @@ test "all public wrapper declarations compile" {
     _ = &vk.Fence.reset;
     _ = &vk.Fence.wait;
     _ = &vk.CommandPool.deinit;
+    _ = &vk.CommandPool.reset;
     _ = &vk.CommandPool.allocateCommandBuffer;
+    _ = &vk.CommandPool.freeCommandBuffer;
+    _ = &vk.CommandBuffer.deinit;
     _ = &vk.CommandBuffer.begin;
     _ = &vk.CommandBuffer.end;
     _ = &vk.CommandBuffer.reset;
+    _ = &vk.CommandBuffer.markComplete;
     _ = &vk.CommandBuffer.imageBarrier;
     _ = &vk.CommandBuffer.clearColorImage;
     _ = &vk.CommandBuffer.beginLabel;

@@ -1236,8 +1236,15 @@ pub const CommandBufferOptions = struct {
     level: CommandBufferLevel = .primary,
 };
 
+/// Inheritance for a secondary command buffer recorded outside a render pass.
+/// Render-pass and dynamic-rendering inheritance are added by their typed APIs.
+pub const SecondaryCommandBufferInheritance = struct {
+    occlusion_query_enable: bool = false,
+};
+
 pub const CommandBufferBeginOptions = struct {
     flags: CommandBufferUsageFlags = .empty,
+    inheritance: ?SecondaryCommandBufferInheritance = null,
 };
 
 pub const ImageBarrierOptions = struct {
@@ -1263,15 +1270,20 @@ const CommandBufferState = enum {
     initial,
     recording,
     executable,
+    pending,
 };
 
 /// A command buffer allocated from and owned by a command pool.
 pub const CommandBuffer = struct {
-    _handle: CommandBufferHandle,
+    _handle: ?CommandBufferHandle,
     _device_handle: DeviceHandle,
-    _pool_handle: CommandPoolHandle,
+    _pool: *CommandPool,
+    _pool_generation: u64,
+    level: CommandBufferLevel,
     can_reset: bool,
     state: CommandBufferState = .initial,
+    simultaneous_use: bool = false,
+    pending_submissions: usize = 0,
     begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
     end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
@@ -1281,34 +1293,97 @@ pub const CommandBuffer = struct {
     cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
     cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
 
+    fn liveHandle(buffer: *CommandBuffer) Error!CommandBufferHandle {
+        const handle = buffer._handle orelse return error.InactiveObject;
+        _ = buffer._pool._handle orelse return error.InactiveObject;
+        if (buffer._pool_generation != buffer._pool.generation) {
+            buffer._pool_generation = buffer._pool.generation;
+            buffer.state = .initial;
+            buffer.simultaneous_use = false;
+            buffer.pending_submissions = 0;
+        }
+        return handle;
+    }
+
+    pub fn deinit(buffer: *CommandBuffer) void {
+        const handle = buffer._handle orelse return;
+        const pool_handle = buffer._pool._handle orelse {
+            buffer._handle = null;
+            return;
+        };
+        if (buffer._pool_generation != buffer._pool.generation) {
+            buffer._pool_generation = buffer._pool.generation;
+            buffer.state = .initial;
+            buffer.pending_submissions = 0;
+        }
+        // Pending buffers cannot be freed; synchronize and call `markComplete` first.
+        if (buffer.state == .pending) return;
+        buffer._pool.free_command_buffers(
+            buffer._device_handle,
+            pool_handle,
+            1,
+            @ptrCast(&handle),
+        );
+        buffer._handle = null;
+    }
+
     pub fn begin(buffer: *CommandBuffer, options: CommandBufferBeginOptions) Error!void {
+        const handle = try buffer.liveHandle();
         if (buffer.state != .initial) return error.InvalidOptions;
+        if ((buffer.level == .secondary) != (options.inheritance != null)) {
+            return error.InvalidOptions;
+        }
+        var inheritance_info: raw.VkCommandBufferInheritanceInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO,
+            .occlusionQueryEnable = if (options.inheritance) |inheritance|
+                if (inheritance.occlusion_query_enable) raw.VK_TRUE else raw.VK_FALSE
+            else
+                raw.VK_FALSE,
+        };
         const begin_info: raw.VkCommandBufferBeginInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = options.flags.toRaw(),
+            .pInheritanceInfo = if (options.inheritance != null) &inheritance_info else null,
         };
-        try checkSuccess(buffer.begin_command_buffer(buffer._handle, &begin_info));
+        try checkSuccess(buffer.begin_command_buffer(handle, &begin_info));
         buffer.state = .recording;
+        buffer.simultaneous_use = options.flags.contains(.simultaneous_use);
     }
 
     pub fn end(buffer: *CommandBuffer) Error!void {
+        const handle = try buffer.liveHandle();
         if (buffer.state != .recording) return error.InvalidOptions;
-        try checkSuccess(buffer.end_command_buffer(buffer._handle));
+        try checkSuccess(buffer.end_command_buffer(handle));
         buffer.state = .executable;
     }
 
     pub fn reset(buffer: *CommandBuffer, release_resources: bool) Error!void {
-        if (buffer.state == .recording) return error.InvalidOptions;
+        const handle = try buffer.liveHandle();
+        if (buffer.state == .recording or buffer.state == .pending) {
+            return error.InvalidOptions;
+        }
         if (!buffer.can_reset) return error.InvalidOptions;
         const flags: raw.VkCommandBufferResetFlags = if (release_resources)
             @intCast(raw.VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT)
         else
             0;
-        try checkSuccess(buffer.reset_command_buffer(buffer._handle, flags));
+        try checkSuccess(buffer.reset_command_buffer(handle, flags));
         buffer.state = .initial;
+        buffer.simultaneous_use = false;
+        buffer.pending_submissions = 0;
     }
 
-    pub fn imageBarrier(buffer: *const CommandBuffer, options: ImageBarrierOptions) Error!void {
+    /// Marks a submitted buffer executable again after its completion is synchronized.
+    pub fn markComplete(buffer: *CommandBuffer) Error!void {
+        _ = try buffer.liveHandle();
+        if (buffer.state != .pending) return error.InvalidOptions;
+        std.debug.assert(buffer.pending_submissions > 0);
+        buffer.pending_submissions -= 1;
+        if (buffer.pending_submissions == 0) buffer.state = .executable;
+    }
+
+    pub fn imageBarrier(buffer: *CommandBuffer, options: ImageBarrierOptions) Error!void {
+        const handle = try buffer.liveHandle();
         if (buffer.state != .recording) return error.InvalidOptions;
         if (options.image._device_handle != buffer._device_handle) return error.InvalidHandle;
         const barrier: raw.VkImageMemoryBarrier = .{
@@ -1323,7 +1398,7 @@ pub const CommandBuffer = struct {
             .subresourceRange = options.subresource_range.toRaw(),
         };
         buffer.cmd_pipeline_barrier(
-            buffer._handle,
+            handle,
             options.source_stage.toRaw(),
             options.destination_stage.toRaw(),
             0,
@@ -1337,15 +1412,16 @@ pub const CommandBuffer = struct {
     }
 
     pub fn clearColorImage(
-        buffer: *const CommandBuffer,
+        buffer: *CommandBuffer,
         options: ClearColorImageOptions,
     ) Error!void {
+        const handle = try buffer.liveHandle();
         if (buffer.state != .recording) return error.InvalidOptions;
         if (options.image._device_handle != buffer._device_handle) return error.InvalidHandle;
         const color = options.color.toRaw();
         const subresource_range = options.subresource_range.toRaw();
         buffer.cmd_clear_color_image(
-            buffer._handle,
+            handle,
             options.image._handle,
             options.layout.toRaw(),
             &color,
@@ -1355,9 +1431,10 @@ pub const CommandBuffer = struct {
     }
 
     pub fn beginLabel(
-        buffer: *const CommandBuffer,
+        buffer: *CommandBuffer,
         options: ext.debug_utils.LabelOptions,
     ) Error!CommandBufferLabelScope {
+        const handle = try buffer.liveHandle();
         if (buffer.state != .recording) return error.InvalidOptions;
         const begin_label = buffer.cmd_begin_debug_utils_label_ext orelse {
             return error.MissingCommand;
@@ -1366,25 +1443,26 @@ pub const CommandBuffer = struct {
             return error.MissingCommand;
         };
         const label = options.createInfo();
-        begin_label(buffer._handle, &label);
-        return .{ .command_buffer = buffer._handle, .end_label = end_label };
+        begin_label(handle, &label);
+        return .{ .command_buffer = handle, .end_label = end_label };
     }
 
     pub fn insertLabel(
-        buffer: *const CommandBuffer,
+        buffer: *CommandBuffer,
         options: ext.debug_utils.LabelOptions,
     ) Error!void {
+        const handle = try buffer.liveHandle();
         if (buffer.state != .recording) return error.InvalidOptions;
         const insert_label = buffer.cmd_insert_debug_utils_label_ext orelse {
             return error.MissingCommand;
         };
         const label = options.createInfo();
-        insert_label(buffer._handle, &label);
+        insert_label(handle, &label);
     }
 
     /// Returns the valid raw handle for explicit FFI integration.
-    pub fn rawHandle(buffer: *const CommandBuffer) raw.VkCommandBuffer {
-        return buffer._handle;
+    pub fn rawHandle(buffer: *CommandBuffer) Error!raw.VkCommandBuffer {
+        return buffer.liveHandle();
     }
 };
 
@@ -1405,14 +1483,18 @@ pub const CommandBufferLabelScope = struct {
     }
 };
 
-/// An owned command pool. Allocated command buffers are invalid after `deinit`.
+/// An externally synchronized command pool. Do not move it while child buffers live.
+/// Allocated command buffers are invalid after `deinit`.
 pub const CommandPool = struct {
     _handle: ?CommandPoolHandle,
     _device_handle: DeviceHandle,
     buffers_can_reset: bool,
+    generation: u64 = 0,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_command_pool: CommandFunction(raw.PFN_vkDestroyCommandPool),
     allocate_command_buffers: CommandFunction(raw.PFN_vkAllocateCommandBuffers),
+    free_command_buffers: CommandFunction(raw.PFN_vkFreeCommandBuffers),
+    reset_command_pool: CommandFunction(raw.PFN_vkResetCommandPool),
     begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
     end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
@@ -1426,10 +1508,22 @@ pub const CommandPool = struct {
         const handle = pool._handle orelse return;
         pool.destroy_command_pool(pool._device_handle, handle, pool.allocation_callbacks);
         pool._handle = null;
+        pool.generation +%= 1;
+    }
+
+    /// Resets every buffer allocated from this externally synchronized pool.
+    pub fn reset(pool: *CommandPool, release_resources: bool) Error!void {
+        const handle = pool._handle orelse return error.InactiveObject;
+        const flags: raw.VkCommandPoolResetFlags = if (release_resources)
+            @intCast(raw.VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT)
+        else
+            0;
+        try checkSuccess(pool.reset_command_pool(pool._device_handle, handle, flags));
+        pool.generation +%= 1;
     }
 
     pub fn allocateCommandBuffer(
-        pool: *const CommandPool,
+        pool: *CommandPool,
         options: CommandBufferOptions,
     ) Error!CommandBuffer {
         const pool_handle = pool._handle orelse return error.InactiveObject;
@@ -1448,7 +1542,9 @@ pub const CommandPool = struct {
         return .{
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = pool._device_handle,
-            ._pool_handle = pool_handle,
+            ._pool = pool,
+            ._pool_generation = pool.generation,
+            .level = options.level,
             .can_reset = pool.buffers_can_reset,
             .begin_command_buffer = pool.begin_command_buffer,
             .end_command_buffer = pool.end_command_buffer,
@@ -1459,6 +1555,22 @@ pub const CommandPool = struct {
             .cmd_end_debug_utils_label_ext = pool.cmd_end_debug_utils_label_ext,
             .cmd_insert_debug_utils_label_ext = pool.cmd_insert_debug_utils_label_ext,
         };
+    }
+
+    pub fn freeCommandBuffer(pool: *CommandPool, buffer: *CommandBuffer) Error!void {
+        const pool_handle = pool._handle orelse return error.InactiveObject;
+        const handle = buffer._handle orelse return;
+        if (buffer._pool != pool or buffer._device_handle != pool._device_handle) {
+            return error.InvalidHandle;
+        }
+        if (buffer.state == .pending) return error.InvalidOptions;
+        pool.free_command_buffers(
+            pool._device_handle,
+            pool_handle,
+            1,
+            @ptrCast(&handle),
+        );
+        buffer._handle = null;
     }
 
     /// Returns the live raw handle for explicit FFI integration.
@@ -2831,6 +2943,8 @@ pub const Device = struct {
             .allocation_callbacks = device.allocation_callbacks,
             .destroy_command_pool = device.dispatch.destroy_command_pool,
             .allocate_command_buffers = device.dispatch.allocate_command_buffers,
+            .free_command_buffers = device.dispatch.free_command_buffers,
+            .reset_command_pool = device.dispatch.reset_command_pool,
             .begin_command_buffer = device.dispatch.begin_command_buffer,
             .end_command_buffer = device.dispatch.end_command_buffer,
             .reset_command_buffer = device.dispatch.reset_command_buffer,
@@ -2970,7 +3084,7 @@ pub const SemaphoreWait = struct {
 
 pub const SubmitOptions = struct {
     waits: []const SemaphoreWait = &.{},
-    command_buffers: []const *const CommandBuffer = &.{},
+    command_buffers: []const *CommandBuffer = &.{},
     signals: []const *const Semaphore = &.{},
     fence: ?*const Fence = null,
 };
@@ -3029,8 +3143,15 @@ pub const Queue = struct {
         var command_handles: [submission_item_count_max]raw.VkCommandBuffer = undefined;
         for (options.command_buffers, command_handles[0..options.command_buffers.len]) |command_buffer, *handle| {
             if (command_buffer._device_handle != queue._device_handle) return error.InvalidHandle;
-            if (command_buffer.state != .executable) return error.InvalidOptions;
-            handle.* = command_buffer.rawHandle();
+            handle.* = try command_buffer.rawHandle();
+            if (command_buffer.state != .executable and
+                !(command_buffer.state == .pending and command_buffer.simultaneous_use))
+            {
+                return error.InvalidOptions;
+            }
+            if (command_buffer.pending_submissions == std.math.maxInt(usize)) {
+                return error.CountOverflow;
+            }
         }
 
         var signal_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
@@ -3055,6 +3176,10 @@ pub const Queue = struct {
             .pSignalSemaphores = if (options.signals.len == 0) null else signal_handles[0..options.signals.len].ptr,
         };
         try checkSuccess(queue.queue_submit(queue._handle, 1, &submit_info, fence_handle));
+        for (options.command_buffers) |command_buffer| {
+            command_buffer.state = .pending;
+            command_buffer.pending_submissions += 1;
+        }
     }
 
     /// Submits raw Vulkan structures for advanced extension or interop use.
@@ -3566,7 +3691,7 @@ pub const ext = struct {
             surface: *const Surface,
             swapchain: *const Swapchain,
             semaphore: *const Semaphore,
-            command_buffer: *const CommandBuffer,
+            command_buffer: *CommandBuffer,
             fence: *const Fence,
             image: *const SwapchainImage,
             image_view: *const ImageView,
@@ -3624,7 +3749,7 @@ pub const ext = struct {
                     },
                     .command_buffer => |command_buffer| .{
                         .object_type = @intCast(raw.VK_OBJECT_TYPE_COMMAND_BUFFER),
-                        .handle = try handleValue(command_buffer.rawHandle()),
+                        .handle = try handleValue(try command_buffer.rawHandle()),
                     },
                     .fence => |fence| .{
                         .object_type = @intCast(raw.VK_OBJECT_TYPE_FENCE),
@@ -3906,6 +4031,8 @@ const DeviceDispatch = struct {
     create_command_pool: CommandFunction(raw.PFN_vkCreateCommandPool),
     destroy_command_pool: CommandFunction(raw.PFN_vkDestroyCommandPool),
     allocate_command_buffers: CommandFunction(raw.PFN_vkAllocateCommandBuffers),
+    free_command_buffers: CommandFunction(raw.PFN_vkFreeCommandBuffers),
+    reset_command_pool: CommandFunction(raw.PFN_vkResetCommandPool),
     begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
     end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
@@ -4064,6 +4191,18 @@ const DeviceDispatch = struct {
                 handle,
                 raw.PFN_vkAllocateCommandBuffers,
                 "vkAllocateCommandBuffers",
+            ),
+            .free_command_buffers = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkFreeCommandBuffers,
+                "vkFreeCommandBuffers",
+            ),
+            .reset_command_pool = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkResetCommandPool,
+                "vkResetCommandPool",
             ),
             .begin_command_buffer = try loadDeviceRequired(
                 get_device_proc_addr,
@@ -4615,6 +4754,11 @@ var test_destroy_image_view_count: usize = 0;
 var test_destroy_semaphore_count: usize = 0;
 var test_destroy_fence_count: usize = 0;
 var test_destroy_command_pool_count: usize = 0;
+var test_free_command_buffer_count: usize = 0;
+var test_reset_command_pool_count: usize = 0;
+var test_allocated_command_buffer_level: raw.VkCommandBufferLevel = raw.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+var test_begin_has_inheritance = false;
+var test_begin_occlusion_query = raw.VK_FALSE;
 var test_begin_command_buffer_count: usize = 0;
 var test_end_command_buffer_count: usize = 0;
 var test_reset_command_buffer_count: usize = 0;
@@ -4861,18 +5005,42 @@ fn testDestroyCommandPool(
 
 fn testAllocateCommandBuffers(
     _: raw.VkDevice,
-    _: [*c]const raw.VkCommandBufferAllocateInfo,
+    allocate_info: [*c]const raw.VkCommandBufferAllocateInfo,
     handle: [*c]raw.VkCommandBuffer,
 ) callconv(.c) raw.VkResult {
+    test_allocated_command_buffer_level = allocate_info.*.level;
     handle.* = if (test_resource_null_handle) null else testHandle(raw.VkCommandBuffer, 0x5500);
+    return test_resource_result;
+}
+
+fn testFreeCommandBuffers(
+    _: raw.VkDevice,
+    _: raw.VkCommandPool,
+    count: u32,
+    _: [*c]const raw.VkCommandBuffer,
+) callconv(.c) void {
+    test_free_command_buffer_count += count;
+}
+
+fn testResetCommandPool(
+    _: raw.VkDevice,
+    _: raw.VkCommandPool,
+    _: raw.VkCommandPoolResetFlags,
+) callconv(.c) raw.VkResult {
+    test_reset_command_pool_count += 1;
     return test_resource_result;
 }
 
 fn testBeginCommandBuffer(
     _: raw.VkCommandBuffer,
-    _: [*c]const raw.VkCommandBufferBeginInfo,
+    begin_info: [*c]const raw.VkCommandBufferBeginInfo,
 ) callconv(.c) raw.VkResult {
     test_begin_command_buffer_count += 1;
+    test_begin_has_inheritance = begin_info.*.pInheritanceInfo != null;
+    test_begin_occlusion_query = if (begin_info.*.pInheritanceInfo) |inheritance|
+        inheritance.*.occlusionQueryEnable
+    else
+        raw.VK_FALSE;
     return test_resource_result;
 }
 
@@ -5151,6 +5319,8 @@ fn testDevice() Device {
             .create_command_pool = testCreateCommandPool,
             .destroy_command_pool = testDestroyCommandPool,
             .allocate_command_buffers = testAllocateCommandBuffers,
+            .free_command_buffers = testFreeCommandBuffers,
+            .reset_command_pool = testResetCommandPool,
             .begin_command_buffer = testBeginCommandBuffer,
             .end_command_buffer = testEndCommandBuffer,
             .reset_command_buffer = testResetCommandBuffer,
@@ -5458,6 +5628,7 @@ test "typed command recording and fence results avoid raw Vulkan at call sites" 
         .signals = &.{&render_semaphore},
         .fence = &fence,
     });
+    try command_buffer.markComplete();
     try command_buffer.reset(false);
     try std.testing.expectEqual(@as(usize, 1), test_begin_command_buffer_count);
     try std.testing.expectEqual(@as(usize, 1), test_end_command_buffer_count);
@@ -5645,6 +5816,121 @@ test "legacy submission rejects timeline semaphores before dispatch" {
         queue.submit(.{ .signals = &.{&timeline} }),
     );
     try std.testing.expectEqual(@as(usize, 0), test_queue_submit_count);
+}
+
+test "command pools reset generations and command buffers track pending state" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_reset_command_pool_count = 0;
+    test_free_command_buffer_count = 0;
+    test_queue_submit_count = 0;
+
+    var device = testDevice();
+    defer device.deinit();
+    var pool = try device.createCommandPool(.{
+        .family_index = .fromRaw(0),
+        .flags = .init(&.{.reset_command_buffer}),
+    });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
+    const queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        .queue_submit = testQueueSubmit,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+
+    var wrong_device_buffer = command_buffer;
+    wrong_device_buffer._device_handle = testHandle(raw.VkDevice, 0x9000);
+    try std.testing.expectError(
+        error.InvalidHandle,
+        queue.submit(.{ .command_buffers = &.{&wrong_device_buffer} }),
+    );
+
+    try command_buffer.begin(.{});
+    try command_buffer.end();
+    try queue.submit(.{ .command_buffers = &.{&command_buffer} });
+    try std.testing.expectError(error.InvalidOptions, command_buffer.reset(false));
+    try std.testing.expectError(
+        error.InvalidOptions,
+        queue.submit(.{ .command_buffers = &.{&command_buffer} }),
+    );
+    try command_buffer.markComplete();
+    try command_buffer.reset(false);
+
+    try command_buffer.begin(.{ .flags = .init(&.{.simultaneous_use}) });
+    try command_buffer.end();
+    try queue.submit(.{ .command_buffers = &.{&command_buffer} });
+    try queue.submit(.{ .command_buffers = &.{&command_buffer} });
+    try command_buffer.markComplete();
+    try std.testing.expectError(error.InvalidOptions, command_buffer.reset(false));
+    try command_buffer.markComplete();
+
+    const old_generation = pool.generation;
+    try pool.reset(true);
+    try std.testing.expectEqual(old_generation +% 1, pool.generation);
+    try std.testing.expectEqual(@as(usize, 1), test_reset_command_pool_count);
+    try command_buffer.begin(.{});
+    try command_buffer.end();
+    try std.testing.expectEqual(pool.generation, command_buffer._pool_generation);
+}
+
+test "secondary command buffers use typed inheritance and free idempotently" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_free_command_buffer_count = 0;
+    test_begin_has_inheritance = false;
+    test_begin_occlusion_query = raw.VK_FALSE;
+
+    var device = testDevice();
+    defer device.deinit();
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var secondary = try pool.allocateCommandBuffer(.{ .level = .secondary });
+    try std.testing.expectEqual(
+        @as(raw.VkCommandBufferLevel, raw.VK_COMMAND_BUFFER_LEVEL_SECONDARY),
+        test_allocated_command_buffer_level,
+    );
+    try std.testing.expectError(error.InvalidOptions, secondary.begin(.{}));
+    try secondary.begin(.{ .inheritance = .{ .occlusion_query_enable = true } });
+    try std.testing.expect(test_begin_has_inheritance);
+    try std.testing.expectEqual(raw.VK_TRUE, test_begin_occlusion_query);
+    try secondary.end();
+
+    var other_pool = try device.createCommandPool(.{ .family_index = .fromRaw(1) });
+    defer other_pool.deinit();
+    try std.testing.expectError(
+        error.InvalidHandle,
+        other_pool.freeCommandBuffer(&secondary),
+    );
+    try pool.freeCommandBuffer(&secondary);
+    try pool.freeCommandBuffer(&secondary);
+    secondary.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_free_command_buffer_count);
+
+    var primary = try pool.allocateCommandBuffer(.{});
+    defer primary.deinit();
+    try std.testing.expectError(
+        error.InvalidOptions,
+        primary.begin(.{ .inheritance = .{} }),
+    );
+}
+
+test "destroyed command pools invalidate their borrowed command buffers" {
+    test_resource_result = raw.VK_SUCCESS;
+    var device = testDevice();
+    defer device.deinit();
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    pool.deinit();
+    try std.testing.expectError(error.InactiveObject, command_buffer.begin(.{}));
+    command_buffer.deinit();
+    command_buffer.deinit();
 }
 
 test "debug label scopes end once" {

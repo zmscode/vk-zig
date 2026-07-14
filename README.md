@@ -280,6 +280,7 @@ var command_pool = try device.createCommandPool(.{
 });
 defer command_pool.deinit();
 var command_buffer = try command_pool.allocateCommandBuffer(.{});
+defer command_buffer.deinit();
 var frame_finished = try device.createFence(.{ .signaled = true });
 defer frame_finished.deinit();
 
@@ -292,6 +293,28 @@ try queue.submit(.{
     .signals = &.{&render_finished},
     .fence = &frame_finished,
 });
+if (try frame_finished.wait(.infinite) == .success) {
+    try command_buffer.markComplete();
+}
+```
+
+Submitted command buffers remain `.pending` until `markComplete` is called after the associated
+fence, semaphore, or queue synchronization completes. Buffers recorded with `.simultaneous_use`
+count each outstanding submission separately. Command pools are externally synchronized and must
+not be moved while their command buffers are alive. `CommandPool.reset` advances its generation;
+child buffers observe the reset and return to their initial state on their next operation.
+
+Timeline semaphores use the same owned type without exposing a `pNext` chain:
+
+```zig
+var timeline = try device.createSemaphore(.{
+    .kind = .timeline,
+    .initial_value = 0,
+});
+defer timeline.deinit();
+
+try timeline.signal(1);
+const reached = try timeline.wait(1, .{ .nanoseconds = 1_000_000 });
 ```
 
 See `examples/frame_resources.zig` for the complete undefined → transfer-destination → present

@@ -25,6 +25,7 @@ pub fn clearAndPresent(
     });
     defer command_pool.deinit();
     var command_buffer = try command_pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
 
     var image_available = try device.createSemaphore(.{});
     defer image_available.deinit();
@@ -118,6 +119,7 @@ pub fn clearAndPresent(
         .wait_semaphores = &.{&render_finished},
     });
     try device.waitIdle();
+    try command_buffer.markComplete();
     return switch (present_status) {
         .success => if (acquire_suboptimal) .suboptimal else .presented,
         .suboptimal => .suboptimal,

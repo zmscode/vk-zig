@@ -91,8 +91,18 @@ For a frame, create `ImageView`, `CommandPool`, `Semaphore`, and `Fence` through
 Allocate a borrowed `CommandBuffer` from its pool, enumerate borrowed images with
 `swapchain.images` or `imagesInto`, and record transitions with `imageBarrier` and
 `clearColorImage`. Use `Fence.wait(Timeout)` and handle `.success`/`.timeout`, then call
-`Queue.submit(SubmitOptions)` and `Queue.present(PresentOptions)`. Keep resources alive until GPU
-work is complete. Follow `examples/frame_resources.zig` for a complete raw-free clear frame.
+`Queue.submit(SubmitOptions)` and `Queue.present(PresentOptions)`. After the associated fence,
+timeline semaphore, or queue wait completes, call `CommandBuffer.markComplete`; one call is
+required for each outstanding `.simultaneous_use` submission. Command pools are externally
+synchronized and must not move while children live. Use `CommandPool.reset` for a whole-pool
+reset, `CommandBuffer.reset` for individually resettable pools, and `CommandBuffer.deinit` or
+`CommandPool.freeCommandBuffer` before destroying the pool. Keep resources alive until GPU work
+is complete. Follow `examples/frame_resources.zig` for a complete raw-free clear frame.
+
+Create timeline semaphores with `device.createSemaphore(.{ .kind = .timeline,
+.initial_value = value })`. Use `counterValue`, `signal`, `wait`, or
+`Device.waitTimelineSemaphores`; do not pass a timeline semaphore to legacy `Queue.submit`, image
+acquisition, or presentation, which require binary semaphores.
 
 Prefer `beginLabel` on command buffers and `beginLabelScope` on queues when labels are enabled.
 Call the returned scope's `deinit`; its end operation is idempotent. Use `submitRaw` and the
