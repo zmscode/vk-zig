@@ -12,7 +12,7 @@ const InstanceHandle = core.NonNullHandle(raw.VkInstance);
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
 const SurfaceHandle = core.NonNullHandle(raw.VkSurfaceKHR);
 const SwapchainHandle = core.NonNullHandle(raw.VkSwapchainKHR);
-const image_count_max = 4096;
+pub const image_count_max = 4096;
 const enumeration_attempt_count_max = 4;
 const queue_family_count_max = 64;
 
@@ -124,6 +124,26 @@ pub const Options = struct {
     }
 };
 
+/// Immutable properties retained from successful swapchain creation.
+pub const Metadata = struct {
+    extent: types.Extent2D,
+    format: types.Format,
+    color_space: types.ColorSpace,
+    min_image_count: u32,
+    image_count: u32,
+    image_array_layers: u32,
+    usage: types.ImageUsageFlags,
+    sharing_mode: types.SharingMode,
+    queue_family_count: u32,
+    present_mode: types.PresentMode,
+};
+
+/// Common options for creating one 2D color view per swapchain image.
+pub const ImageViewOptions = struct {
+    components: types.ComponentMapping = .{},
+    aspect: types.ImageAspectFlags = .init(&.{.color}),
+};
+
 pub const AcquireOptions = struct {
     timeout: core.Timeout = .infinite,
     semaphore: ?*const sync.Semaphore = null,
@@ -154,10 +174,14 @@ pub const PresentStatus = enum {
 pub const Swapchain = struct {
     _handle: ?SwapchainHandle,
     _device_handle: DeviceHandle,
+    _device_state: ?*core.DeviceState = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_swapchain: CommandFunction(raw.PFN_vkDestroySwapchainKHR),
     get_swapchain_images: CommandFunction(raw.PFN_vkGetSwapchainImagesKHR),
     acquire_next_image: CommandFunction(raw.PFN_vkAcquireNextImageKHR),
+    create_image_view: CommandFunction(raw.PFN_vkCreateImageView),
+    destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
+    metadata_value: Metadata,
     _image_generation: core.Generation = .{},
 
     pub fn deinit(swapchain: *Swapchain) void {
@@ -179,10 +203,16 @@ pub const Swapchain = struct {
         return .forDevice(.swapchain, try swapchain.rawHandle(), swapchain._device_handle);
     }
 
+    pub fn metadata(swapchain: *const Swapchain) core.Error!Metadata {
+        _ = try swapchain.rawHandle();
+        return swapchain.metadata_value;
+    }
+
     pub fn imageCount(swapchain: *const Swapchain) core.Error!u32 {
+        try swapchain.ensureDispatchAllowed();
         const handle = try swapchain.rawHandle();
         var count: u32 = 0;
-        try core.checkSuccess(swapchain.get_swapchain_images(
+        try swapchain.checkResult(swapchain.get_swapchain_images(
             swapchain._device_handle,
             handle,
             &count,
@@ -221,6 +251,7 @@ pub const Swapchain = struct {
         swapchain: *const Swapchain,
         storage: []image.SwapchainImage,
     ) core.Error![]image.SwapchainImage {
+        try swapchain.ensureDispatchAllowed();
         if (storage.len > image_count_max) return error.CountOverflow;
         const live_handle = (try swapchain.rawHandle()) orelse return error.InvalidHandle;
         var raw_images: [image_count_max]raw.VkImage = undefined;
@@ -233,7 +264,7 @@ pub const Swapchain = struct {
             output,
         );
         if (result == raw.VK_INCOMPLETE) return error.BufferTooSmall;
-        try core.checkSuccess(result);
+        try swapchain.checkResult(result);
         if (written > storage.len) return error.BufferTooSmall;
         for (storage[0..written], raw_images[0..written], 0..) |*swapchain_image, raw_image, index| {
             swapchain_image.* = .{
@@ -247,10 +278,53 @@ pub const Swapchain = struct {
         return storage[0..written];
     }
 
+    /// Creates one view for every current swapchain image. On failure all views created by this
+    /// call are destroyed before returning.
+    pub fn createImageViews(
+        swapchain: *const Swapchain,
+        gpa: std.mem.Allocator,
+        options: ImageViewOptions,
+    ) (core.Error || std.mem.Allocator.Error)![]image.View {
+        const swapchain_images = try swapchain.images(gpa);
+        defer gpa.free(swapchain_images);
+
+        const views = try gpa.alloc(image.View, swapchain_images.len);
+        errdefer gpa.free(views);
+        var initialized: usize = 0;
+        errdefer for (views[0..initialized]) |*view| view.deinit();
+
+        for (swapchain_images, views) |*swapchain_image, *view| {
+            view.* = image.createView(
+                swapchain._device_handle,
+                swapchain.allocation_callbacks,
+                swapchain.create_image_view,
+                swapchain.destroy_image_view,
+                .{
+                    .image = .{ .swapchain = swapchain_image },
+                    .format = swapchain.metadata_value.format,
+                    .components = options.components,
+                    .subresource_range = .{
+                        .aspect_mask = options.aspect,
+                        .base_mip_level = 0,
+                        .level_count = .{ .count = 1 },
+                        .base_array_layer = 0,
+                        .layer_count = .{ .count = swapchain.metadata_value.image_array_layers },
+                    },
+                },
+            ) catch |err| {
+                if (err == error.DeviceLost) swapchain.markLost();
+                return err;
+            };
+            initialized += 1;
+        }
+        return views;
+    }
+
     pub fn acquireNextImage(
         swapchain: *const Swapchain,
         options: AcquireOptions,
     ) core.Error!AcquireResult {
+        try swapchain.ensureDispatchAllowed();
         if (options.semaphore == null and options.fence == null) return error.InvalidOptions;
         const semaphore = if (options.semaphore) |semaphore| blk: {
             if (semaphore._device_handle != swapchain._device_handle) return error.InvalidHandle;
@@ -275,7 +349,20 @@ pub const Swapchain = struct {
         if (result == raw.VK_TIMEOUT) return .timeout;
         if (result == raw.VK_NOT_READY) return .not_ready;
         if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
-        try core.checkSuccess(result);
+        try swapchain.checkResult(result);
         unreachable;
+    }
+
+    fn ensureDispatchAllowed(swapchain: *const Swapchain) core.Error!void {
+        if (swapchain._device_state) |state| try state.ensureDispatchAllowed();
+    }
+
+    fn checkResult(swapchain: *const Swapchain, result: raw.VkResult) core.Error!void {
+        if (swapchain._device_state) |state| return core.checkSuccessTracked(state, result);
+        return core.checkSuccess(result);
+    }
+
+    fn markLost(swapchain: *const Swapchain) void {
+        if (swapchain._device_state) |state| state.markLost();
     }
 };

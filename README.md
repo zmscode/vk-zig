@@ -9,7 +9,7 @@ package provides:
 - resource-safe `deinit` methods and Zig errors for common `VkResult` failures;
 - generated command descriptors that prevent PFN/name and dispatch-scope mismatches;
 - generated extension-name descriptors and a bounded, allocation-free extension set;
-- domain modules for buffers, images, memory, synchronization, commands, queues, presentation,
+- domain modules for buffers, images, memory, synchronization, commands, queues, queries, presentation,
   formats, capabilities, and debug utilities;
 - reproducible offline builds from vendored Khronos inputs; and
 - an explicit command to pull, verify, and vendor a new Vulkan registry revision.
@@ -425,6 +425,13 @@ var swapchain = try device.createSwapchain(.{
 });
 defer swapchain.deinit();
 
+const swapchain_metadata = try swapchain.metadata();
+var swapchain_views = try swapchain.createImageViews(gpa, .{});
+defer {
+    for (swapchain_views) |*view| view.deinit();
+    gpa.free(swapchain_views);
+}
+
 var image_available = try device.createSemaphore(.{});
 defer image_available.deinit();
 var render_finished = try device.createSemaphore(.{});
@@ -447,6 +454,34 @@ if (status != .success) try recreateSwapchain();
 The frame-resource layer also owns image views, command pools, semaphores, and fences. Command
 buffers are borrowed from their pool, and swapchain images are borrowed from their swapchain.
 Normal clear/submit/present code does not need `vk.raw`:
+
+Timestamp, occlusion, pipeline-statistics, and performance queries use an owned, kind-tagged pool.
+The library derives result stride and allocation size, and keeps delayed availability explicit:
+
+```zig
+var timestamps = try device.createQueryPool(.{
+    .kind = .timestamp,
+    .count = 2,
+});
+defer timestamps.deinit();
+
+try timestamps.resetRecorded(&command_buffer, 0, 2);
+try timestamps.writeTimestamp2(&command_buffer, 0, .init(&.{.top_of_pipe}));
+// Record work...
+try timestamps.writeTimestamp2(&command_buffer, 1, .init(&.{.bottom_of_pipe}));
+
+var readback = try timestamps.getResults(gpa, .{ .count = 2 });
+defer readback.deinit(gpa);
+switch (readback) {
+    .ready => |results| useTimestamps(results.values),
+    .partial => |results| useAvailableTimestamps(results.values, results.availability.?),
+    .not_ready => {},
+}
+```
+
+`PhysicalDevice.performanceCounters`, `performanceQueryPasses`,
+`Device.acquireProfilingLock`, and `Device.calibratedTimestamps` cover the profiling extensions
+without exposing extension structs or result flags.
 
 Descriptor layouts, pools, borrowed sets, variable counts, updates, copies, update templates, and
 push descriptors are typed as well. The wrapper validates layout metadata and assembles all
@@ -637,8 +672,9 @@ defer label.deinit();
 ```
 
 The logger and whether unavailable diagnostics are fatal remain application policy. The wrapper
-owns the raw callback ABI; `Message.fromRawCallback` and raw command loading are explicit advanced
-escape hatches for unusual integrations.
+owns the raw callback ABI. `debug_utils.advanced.messageFromRawCallback`,
+`debug_utils.advanced.callbackData`, and raw command loading are explicit advanced escape hatches
+for unusual integrations.
 
 Destroy swapchains before their device and surface, and extension objects/surfaces before their
 parent instance. See `examples/debug_utils.zig` for a complete typed handler.

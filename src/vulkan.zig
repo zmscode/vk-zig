@@ -19,6 +19,7 @@ pub const rendering = @import("rendering.zig");
 pub const render_passes = @import("render_pass.zig");
 pub const transfers = @import("transfer.zig");
 pub const synchronization = @import("synchronization.zig");
+pub const queries = @import("query.zig");
 pub const commands = @import("command_buffer.zig");
 pub const presentation = @import("presentation.zig");
 pub const queues = @import("queue.zig");
@@ -165,6 +166,18 @@ pub const QueueFamilyOwnership = core.QueueFamilyOwnership;
 pub const checkSuccess = core.checkSuccess;
 pub const ResultStatus = core.ResultStatus;
 pub const classifyResult = core.classifyResult;
+pub const QueryPool = queries.Pool;
+pub const QueryPoolOptions = queries.Options;
+pub const QueryKind = queries.Kind;
+pub const QueryResults = queries.Results;
+pub const QueryReadResult = queries.ReadResult;
+pub const QueryResultOptions = queries.ResultOptions;
+pub const QueryScope = queries.Scope;
+pub const CalibratedTimestamp = queries.CalibratedTimestamp;
+pub const TimeDomain = queries.TimeDomain;
+pub const ProfilingLock = queries.ProfilingLock;
+pub const PerformanceCounter = queries.PerformanceCounter;
+pub const PerformanceQuery = queries.Performance;
 
 const NonNullHandle = core.NonNullHandle;
 const count32 = core.count32;
@@ -659,7 +672,7 @@ pub const Entry = struct {
         );
         var debug_create_info: raw.VkDebugUtilsMessengerCreateInfoEXT = undefined;
         if (options.debug_messenger) |config| {
-            debug_create_info = config.createInfoRaw(instance_next);
+            debug_create_info = debug_utils.advanced.messengerCreateInfo(config, instance_next);
             instance_next = @ptrCast(&debug_create_info);
         }
         const create_info: raw.VkInstanceCreateInfo = .{
@@ -818,6 +831,10 @@ pub const Instance = struct {
     /// Returns the live raw handle for explicit FFI integration.
     pub fn rawHandle(instance: *const Instance) Error!raw.VkInstance {
         return instance._handle orelse error.InactiveObject;
+    }
+
+    pub fn debugObject(instance: *const Instance) Error!debug_utils.Object {
+        return .forInstance(.instance, try instance.rawHandle(), try instance.rawHandle());
     }
 
     pub fn load(
@@ -1159,6 +1176,8 @@ pub const CommandBufferRenderPassScope = commands.RenderPassScope;
 pub const CommandPool = commands.Pool;
 
 pub const SwapchainOptions = presentation.Options;
+pub const SwapchainMetadata = presentation.Metadata;
+pub const SwapchainImageViewOptions = presentation.ImageViewOptions;
 pub const AcquireOptions = presentation.AcquireOptions;
 pub const AcquireResult = presentation.AcquireResult;
 pub const PresentOptions = presentation.PresentOptions;
@@ -1196,6 +1215,10 @@ pub const PhysicalDevice = struct {
         return device._handle;
     }
 
+    pub fn debugObject(device: *const PhysicalDevice) Error!debug_utils.Object {
+        return .forInstance(.physical_device, device._handle, device._instance_handle);
+    }
+
     pub fn groupMember(device: *const PhysicalDevice) device_configuration.GroupMember {
         return .{ ._handle = device._handle, ._instance_handle = device._instance_handle };
     }
@@ -1216,6 +1239,87 @@ pub const PhysicalDevice = struct {
         }
         const value = device.propertiesRaw();
         return .fromRaw(&value);
+    }
+
+    pub fn performanceCounterCount(
+        device: *const PhysicalDevice,
+        family: QueueFamilyIndex,
+    ) Error!u32 {
+        const enumerate = device.dispatch.enumerate_performance_counters orelse return error.MissingCommand;
+        var count: u32 = 0;
+        try checkSuccess(enumerate(device._handle, family.toRaw(), &count, null, null));
+        if (count > enumeration_item_count_max) return error.TooManyObjects;
+        return count;
+    }
+
+    pub fn performanceCountersInto(
+        device: *const PhysicalDevice,
+        family: QueueFamilyIndex,
+        storage: []PerformanceCounter,
+    ) Error![]PerformanceCounter {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const required = try device.performanceCounterCount(family);
+        if (required > storage.len) return error.BufferTooSmall;
+        const enumerate = device.dispatch.enumerate_performance_counters orelse return error.MissingCommand;
+        var counters: [enumeration_item_count_max]raw.VkPerformanceCounterKHR = undefined;
+        var descriptions: [enumeration_item_count_max]raw.VkPerformanceCounterDescriptionKHR = undefined;
+        for (counters[0..storage.len]) |*counter| counter.* = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PERFORMANCE_COUNTER_KHR,
+        };
+        for (descriptions[0..storage.len]) |*description| description.* = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PERFORMANCE_COUNTER_DESCRIPTION_KHR,
+        };
+        var count: u32 = @intCast(storage.len);
+        const result = enumerate(
+            device._handle,
+            family.toRaw(),
+            &count,
+            if (storage.len == 0) null else counters[0..storage.len].ptr,
+            if (storage.len == 0) null else descriptions[0..storage.len].ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or count > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        for (storage[0..count], counters[0..count], descriptions[0..count]) |*output, counter, description| {
+            output.* = .fromRaw(counter, description);
+        }
+        return storage[0..count];
+    }
+
+    pub fn performanceCounters(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+        family: QueueFamilyIndex,
+    ) (Error || std.mem.Allocator.Error)![]PerformanceCounter {
+        var output = try gpa.alloc(PerformanceCounter, try device.performanceCounterCount(family));
+        errdefer gpa.free(output);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = device.performanceCountersInto(family, output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    output = try gpa.realloc(output, try device.performanceCounterCount(family));
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(output, written.len);
+        }
+        return error.EnumerationUnstable;
+    }
+
+    pub fn performanceQueryPasses(
+        device: *const PhysicalDevice,
+        performance: PerformanceQuery,
+    ) Error!u32 {
+        if (performance.counter_indices.len == 0) return error.InvalidOptions;
+        const get_passes = device.dispatch.get_performance_query_passes orelse return error.MissingCommand;
+        const info: raw.VkQueryPoolPerformanceCreateInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_QUERY_POOL_PERFORMANCE_CREATE_INFO_KHR,
+            .queueFamilyIndex = performance.queue_family.toRaw(),
+            .counterIndexCount = try count32(performance.counter_indices.len),
+            .pCounterIndices = performance.counter_indices.ptr,
+        };
+        var passes: u32 = 0;
+        get_passes(device._handle, &info, &passes);
+        return passes;
     }
 
     pub fn formatProperties(
@@ -2457,7 +2561,7 @@ pub const Device = struct {
         const set_name = device.dispatch.set_debug_utils_object_name_ext orelse {
             return error.MissingCommand;
         };
-        const object_info = try object.debugObject();
+        const object_info = try debug_utils.nameTarget(object);
         try object_info.validateParent(device_handle, device._instance_handle);
         const name_info: raw.VkDebugUtilsObjectNameInfoEXT = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
@@ -2939,6 +3043,77 @@ pub const Device = struct {
         });
     }
 
+    pub fn createQueryPool(device: *const Device, options: QueryPoolOptions) Error!QueryPool {
+        const device_handle = try device.dispatchHandle();
+        var resolved = options;
+        if (resolved.allocation_callbacks == null) resolved.allocation_callbacks = device.allocation_callbacks;
+        return queries.create(device_handle, @constCast(&device._state), .{
+            .create = device.dispatch.create_query_pool,
+            .destroy = device.dispatch.destroy_query_pool,
+            .get_results = device.dispatch.get_query_pool_results,
+            .reset_host = device.dispatch.reset_query_pool,
+            .begin = device.dispatch.cmd_begin_query,
+            .end = device.dispatch.cmd_end_query,
+            .reset = device.dispatch.cmd_reset_query_pool,
+            .write_timestamp = device.dispatch.cmd_write_timestamp,
+            .write_timestamp2 = device.dispatch.cmd_write_timestamp2,
+            .copy_results = device.dispatch.cmd_copy_query_pool_results,
+        }, resolved);
+    }
+
+    /// Samples multiple clock domains in one calibrated operation. The returned slice aliases
+    /// `storage` and stays valid for as long as that storage does.
+    pub fn calibratedTimestamps(
+        device: *const Device,
+        domains: []const TimeDomain,
+        storage: []CalibratedTimestamp,
+    ) Error!queries.Calibration {
+        const device_handle = try device.dispatchHandle();
+        if (domains.len == 0) return error.InvalidOptions;
+        if (domains.len > storage.len) return error.BufferTooSmall;
+        if (domains.len > 64) return error.CountOverflow;
+        const get_timestamps = device.dispatch.get_calibrated_timestamps orelse return error.MissingCommand;
+        var infos: [64]raw.VkCalibratedTimestampInfoKHR = undefined;
+        var values: [64]u64 = undefined;
+        for (domains, infos[0..domains.len]) |domain, *info| {
+            info.* = .{
+                .sType = raw.VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR,
+                .timeDomain = @intFromEnum(domain),
+            };
+        }
+        var max_deviation: u64 = 0;
+        try core.checkSuccessTracked(@constCast(&device._state), get_timestamps(
+            device_handle,
+            @intCast(domains.len),
+            infos[0..domains.len].ptr,
+            values[0..domains.len].ptr,
+            &max_deviation,
+        ));
+        for (storage[0..domains.len], domains, values[0..domains.len]) |*timestamp, domain, value| {
+            timestamp.* = .{ .domain = domain, .value = value };
+        }
+        return .{
+            .timestamps = storage[0..domains.len],
+            .max_deviation_nanoseconds = max_deviation,
+        };
+    }
+
+    pub fn acquireProfilingLock(device: *const Device, timeout: Timeout) Error!ProfilingLock {
+        const device_handle = try device.dispatchHandle();
+        const acquire = device.dispatch.acquire_profiling_lock orelse return error.MissingCommand;
+        const release = device.dispatch.release_profiling_lock orelse return error.MissingCommand;
+        const info: raw.VkAcquireProfilingLockInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_ACQUIRE_PROFILING_LOCK_INFO_KHR,
+            .timeout = timeout.toRaw(),
+        };
+        try core.checkSuccessTracked(@constCast(&device._state), acquire(device_handle, &info));
+        return .{
+            ._device_handle = device_handle,
+            ._device_state = @constCast(&device._state),
+            .release = release,
+        };
+    }
+
     pub fn resetFences(device: *const Device, fences: []const *const Fence) Error!void {
         const device_handle = try device.dispatchHandle();
         if (fences.len == 0) return;
@@ -3192,13 +3367,40 @@ pub const Device = struct {
             try core.checkSuccessTracked(@constCast(&device._state), result);
             unreachable;
         }
+        const live_handle = handle orelse return error.InvalidHandle;
+        var image_count: u32 = 0;
+        try core.checkSuccessTracked(@constCast(&device._state), get_images(
+            device_handle,
+            live_handle,
+            &image_count,
+            null,
+        ));
+        if (image_count > presentation.image_count_max) {
+            destroy_swapchain(device_handle, live_handle, options.allocation_callbacks);
+            return error.TooManyObjects;
+        }
         return .{
-            ._handle = handle orelse return error.InvalidHandle,
+            ._handle = live_handle,
             ._device_handle = device_handle,
+            ._device_state = @constCast(&device._state),
             .allocation_callbacks = options.allocation_callbacks,
             .destroy_swapchain = destroy_swapchain,
             .get_swapchain_images = get_images,
             .acquire_next_image = acquire_next_image,
+            .create_image_view = device.dispatch.create_image_view,
+            .destroy_image_view = device.dispatch.destroy_image_view,
+            .metadata_value = .{
+                .extent = options.image_extent,
+                .format = options.image_format,
+                .color_space = options.image_color_space,
+                .min_image_count = options.min_image_count,
+                .image_count = image_count,
+                .image_array_layers = options.image_array_layers,
+                .usage = options.image_usage,
+                .sharing_mode = if (concurrent) .concurrent else .exclusive,
+                .queue_family_count = @intCast(options.queue_family_indices.len),
+                .present_mode = options.present_mode,
+            },
         };
     }
 
@@ -3290,6 +3492,12 @@ const InstanceDispatch = struct {
     get_physical_device_queue_family_properties2: ?CommandFunction(
         raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties2,
     ),
+    enumerate_performance_counters: ?CommandFunction(
+        raw.PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR,
+    ),
+    get_performance_query_passes: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR,
+    ),
     enumerate_device_extension_properties: CommandFunction(
         raw.PFN_vkEnumerateDeviceExtensionProperties,
     ),
@@ -3372,6 +3580,18 @@ const InstanceDispatch = struct {
                 handle,
                 command.get_physical_device_sparse_image_format_properties2,
                 .instance,
+            ),
+            .enumerate_performance_counters = loadInstance(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR,
+                "vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR",
+            ),
+            .get_performance_query_passes = loadInstance(
+                get_instance_proc_addr,
+                handle,
+                raw.PFN_vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR,
+                "vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR",
             ),
             .get_physical_device_features = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -3546,6 +3766,19 @@ const DeviceDispatch = struct {
     get_event_status: CommandFunction(raw.PFN_vkGetEventStatus),
     set_event: CommandFunction(raw.PFN_vkSetEvent),
     reset_event: CommandFunction(raw.PFN_vkResetEvent),
+    create_query_pool: CommandFunction(raw.PFN_vkCreateQueryPool),
+    destroy_query_pool: CommandFunction(raw.PFN_vkDestroyQueryPool),
+    get_query_pool_results: CommandFunction(raw.PFN_vkGetQueryPoolResults),
+    reset_query_pool: ?CommandFunction(raw.PFN_vkResetQueryPool),
+    cmd_begin_query: CommandFunction(raw.PFN_vkCmdBeginQuery),
+    cmd_end_query: CommandFunction(raw.PFN_vkCmdEndQuery),
+    cmd_reset_query_pool: CommandFunction(raw.PFN_vkCmdResetQueryPool),
+    cmd_write_timestamp: CommandFunction(raw.PFN_vkCmdWriteTimestamp),
+    cmd_write_timestamp2: ?CommandFunction(raw.PFN_vkCmdWriteTimestamp2),
+    cmd_copy_query_pool_results: CommandFunction(raw.PFN_vkCmdCopyQueryPoolResults),
+    get_calibrated_timestamps: ?CommandFunction(raw.PFN_vkGetCalibratedTimestampsKHR),
+    acquire_profiling_lock: ?CommandFunction(raw.PFN_vkAcquireProfilingLockKHR),
+    release_profiling_lock: ?CommandFunction(raw.PFN_vkReleaseProfilingLockKHR),
     create_command_pool: CommandFunction(raw.PFN_vkCreateCommandPool),
     destroy_command_pool: CommandFunction(raw.PFN_vkDestroyCommandPool),
     allocate_command_buffers: CommandFunction(raw.PFN_vkAllocateCommandBuffers),
@@ -4068,6 +4301,19 @@ const DeviceDispatch = struct {
                 raw.PFN_vkResetEvent,
                 "vkResetEvent",
             ),
+            .create_query_pool = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCreateQueryPool, "vkCreateQueryPool"),
+            .destroy_query_pool = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkDestroyQueryPool, "vkDestroyQueryPool"),
+            .get_query_pool_results = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkGetQueryPoolResults, "vkGetQueryPoolResults"),
+            .reset_query_pool = loadDevice(get_device_proc_addr, handle, raw.PFN_vkResetQueryPool, "vkResetQueryPool"),
+            .cmd_begin_query = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBeginQuery, "vkCmdBeginQuery"),
+            .cmd_end_query = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdEndQuery, "vkCmdEndQuery"),
+            .cmd_reset_query_pool = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdResetQueryPool, "vkCmdResetQueryPool"),
+            .cmd_write_timestamp = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdWriteTimestamp, "vkCmdWriteTimestamp"),
+            .cmd_write_timestamp2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_write_timestamp2),
+            .cmd_copy_query_pool_results = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdCopyQueryPoolResults, "vkCmdCopyQueryPoolResults"),
+            .get_calibrated_timestamps = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetCalibratedTimestampsKHR, "vkGetCalibratedTimestampsKHR") orelse loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetCalibratedTimestampsEXT, "vkGetCalibratedTimestampsEXT"),
+            .acquire_profiling_lock = loadDevice(get_device_proc_addr, handle, raw.PFN_vkAcquireProfilingLockKHR, "vkAcquireProfilingLockKHR"),
+            .release_profiling_lock = loadDevice(get_device_proc_addr, handle, raw.PFN_vkReleaseProfilingLockKHR, "vkReleaseProfilingLockKHR"),
             .create_command_pool = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
@@ -4871,6 +5117,10 @@ var test_timeline_signal_value: u64 = 0;
 var test_created_semaphore_kind: SemaphoreKind = .binary;
 var test_created_semaphore_initial_value: u64 = 0;
 var test_destroy_image_view_count: usize = 0;
+var test_create_image_view_count: usize = 0;
+var test_create_image_view_fail_at: ?usize = null;
+var test_profiling_result: raw.VkResult = raw.VK_SUCCESS;
+var test_release_profiling_count: usize = 0;
 var test_destroy_buffer_count: usize = 0;
 var test_destroy_buffer_view_count: usize = 0;
 var test_free_memory_count: usize = 0;
@@ -5206,6 +5456,12 @@ fn testCreateImageView(
     _: [*c]const raw.VkAllocationCallbacks,
     handle: [*c]raw.VkImageView,
 ) callconv(.c) raw.VkResult {
+    const call_index = test_create_image_view_count;
+    test_create_image_view_count += 1;
+    if (test_create_image_view_fail_at == call_index) {
+        handle.* = null;
+        return raw.VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
     handle.* = if (test_resource_null_handle) null else testHandle(raw.VkImageView, 0x5100);
     return test_resource_result;
 }
@@ -6016,6 +6272,65 @@ fn testSetObjectName(
     return test_name_result;
 }
 
+fn testEnumeratePerformanceCounters(
+    _: raw.VkPhysicalDevice,
+    _: u32,
+    count: [*c]u32,
+    counters: [*c]raw.VkPerformanceCounterKHR,
+    descriptions: [*c]raw.VkPerformanceCounterDescriptionKHR,
+) callconv(.c) raw.VkResult {
+    if (counters == null or descriptions == null) {
+        count.* = 2;
+        return raw.VK_SUCCESS;
+    }
+    const written = @min(count.*, 2);
+    for (0..written) |index| {
+        counters[index].unit = raw.VK_PERFORMANCE_COUNTER_UNIT_BYTES_KHR;
+        counters[index].scope = raw.VK_PERFORMANCE_COUNTER_SCOPE_COMMAND_KHR;
+        counters[index].storage = raw.VK_PERFORMANCE_COUNTER_STORAGE_UINT64_KHR;
+        counters[index].uuid[0] = @intCast(index + 1);
+        descriptions[index].flags = if (index == 0)
+            raw.VK_PERFORMANCE_COUNTER_DESCRIPTION_PERFORMANCE_IMPACTING_BIT_KHR
+        else
+            raw.VK_PERFORMANCE_COUNTER_DESCRIPTION_CONCURRENTLY_IMPACTED_BIT_KHR;
+        const name = if (index == 0) "bytes" else "transactions";
+        @memcpy(descriptions[index].name[0..name.len], name);
+    }
+    count.* = written;
+    return if (written < 2) raw.VK_INCOMPLETE else raw.VK_SUCCESS;
+}
+
+fn testPerformanceQueryPasses(
+    _: raw.VkPhysicalDevice,
+    _: [*c]const raw.VkQueryPoolPerformanceCreateInfoKHR,
+    passes: [*c]u32,
+) callconv(.c) void {
+    passes.* = 3;
+}
+
+fn testCalibratedTimestamps(
+    _: raw.VkDevice,
+    count: u32,
+    _: [*c]const raw.VkCalibratedTimestampInfoKHR,
+    timestamps: [*c]u64,
+    max_deviation: [*c]u64,
+) callconv(.c) raw.VkResult {
+    for (0..count) |index| timestamps[index] = 1_000 + index;
+    max_deviation.* = 17;
+    return test_resource_result;
+}
+
+fn testAcquireProfilingLock(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkAcquireProfilingLockInfoKHR,
+) callconv(.c) raw.VkResult {
+    return test_profiling_result;
+}
+
+fn testReleaseProfilingLock(_: raw.VkDevice) callconv(.c) void {
+    test_release_profiling_count += 1;
+}
+
 fn testDebugCallback(
     _: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
     _: raw.VkDebugUtilsMessageTypeFlagsEXT,
@@ -6023,6 +6338,21 @@ fn testDebugCallback(
     _: ?*anyopaque,
 ) callconv(.c) raw.VkBool32 {
     return raw.VK_FALSE;
+}
+
+fn testSwapchainMetadata() SwapchainMetadata {
+    return .{
+        .extent = .{ .width = 640, .height = 480 },
+        .format = .b8g8r8a8_unorm,
+        .color_space = .srgb_nonlinear,
+        .min_image_count = 2,
+        .image_count = 2,
+        .image_array_layers = 1,
+        .usage = .init(&.{.color_attachment}),
+        .sharing_mode = .exclusive,
+        .queue_family_count = 0,
+        .present_mode = .fifo,
+    };
 }
 
 fn testInstance() Instance {
@@ -6051,6 +6381,8 @@ fn testInstance() Instance {
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
             ),
             .get_physical_device_queue_family_properties2 = null,
+            .enumerate_performance_counters = null,
+            .get_performance_query_passes = null,
             .enumerate_device_extension_properties = testFunction(
                 raw.PFN_vkEnumerateDeviceExtensionProperties,
             ),
@@ -6163,6 +6495,19 @@ fn testDevice() Device {
             .get_event_status = testFunction(raw.PFN_vkGetEventStatus),
             .set_event = testFunction(raw.PFN_vkSetEvent),
             .reset_event = testFunction(raw.PFN_vkResetEvent),
+            .create_query_pool = testFunction(raw.PFN_vkCreateQueryPool),
+            .destroy_query_pool = testFunction(raw.PFN_vkDestroyQueryPool),
+            .get_query_pool_results = testFunction(raw.PFN_vkGetQueryPoolResults),
+            .reset_query_pool = testFunction(raw.PFN_vkResetQueryPool),
+            .cmd_begin_query = testFunction(raw.PFN_vkCmdBeginQuery),
+            .cmd_end_query = testFunction(raw.PFN_vkCmdEndQuery),
+            .cmd_reset_query_pool = testFunction(raw.PFN_vkCmdResetQueryPool),
+            .cmd_write_timestamp = testFunction(raw.PFN_vkCmdWriteTimestamp),
+            .cmd_write_timestamp2 = testFunction(raw.PFN_vkCmdWriteTimestamp2),
+            .cmd_copy_query_pool_results = testFunction(raw.PFN_vkCmdCopyQueryPoolResults),
+            .get_calibrated_timestamps = null,
+            .acquire_profiling_lock = null,
+            .release_profiling_lock = null,
             .create_command_pool = testCreateCommandPool,
             .destroy_command_pool = testDestroyCommandPool,
             .allocate_command_buffers = testAllocateCommandBuffers,
@@ -7506,10 +7851,14 @@ test "swapchain acquisition and presentation preserve operation statuses" {
     var swapchain: Swapchain = .{
         ._handle = testHandle(raw.VkSwapchainKHR, 0x4000),
         ._device_handle = device._handle.?,
+        ._device_state = &device._state,
         .allocation_callbacks = null,
         .destroy_swapchain = testDestroySwapchain,
         .get_swapchain_images = testGetSwapchainImages,
         .acquire_next_image = testAcquireNextImage,
+        .create_image_view = testCreateImageView,
+        .destroy_image_view = testDestroyImageView,
+        .metadata_value = testSwapchainMetadata(),
     };
     defer swapchain.deinit();
 
@@ -7536,6 +7885,11 @@ test "swapchain acquisition and presentation preserve operation statuses" {
         try swapchain.acquireNextImage(.{ .semaphore = &semaphore }),
     );
     test_acquire_result = raw.VK_ERROR_DEVICE_LOST;
+    try std.testing.expectError(
+        error.DeviceLost,
+        swapchain.acquireNextImage(.{ .semaphore = &semaphore }),
+    );
+    try std.testing.expectEqual(core.DeviceState.Status.lost, device.status());
     try std.testing.expectError(
         error.DeviceLost,
         swapchain.acquireNextImage(.{ .semaphore = &semaphore }),
@@ -7577,12 +7931,104 @@ test "swapchain destruction invalidates borrowed images" {
         .destroy_swapchain = testDestroySwapchain,
         .get_swapchain_images = testGetSwapchainImages,
         .acquire_next_image = testAcquireNextImage,
+        .create_image_view = testCreateImageView,
+        .destroy_image_view = testDestroyImageView,
+        .metadata_value = testSwapchainMetadata(),
     };
     var storage: [2]SwapchainImage = undefined;
     const images_for_swapchain = try swapchain.imagesInto(&storage);
     _ = try images_for_swapchain[0].rawHandle();
     swapchain.deinit();
     try std.testing.expectError(error.StaleBorrow, images_for_swapchain[0].rawHandle());
+}
+
+test "swapchain retains metadata and batch views roll back or become stale" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_create_image_view_count = 0;
+    test_create_image_view_fail_at = null;
+    test_destroy_image_view_count = 0;
+    var swapchain: Swapchain = .{
+        ._handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        ._device_handle = testHandle(raw.VkDevice, 0x2000),
+        .allocation_callbacks = null,
+        .destroy_swapchain = testDestroySwapchain,
+        .get_swapchain_images = testGetSwapchainImages,
+        .acquire_next_image = testAcquireNextImage,
+        .create_image_view = testCreateImageView,
+        .destroy_image_view = testDestroyImageView,
+        .metadata_value = testSwapchainMetadata(),
+    };
+
+    const metadata = try swapchain.metadata();
+    try std.testing.expectEqual(@as(u32, 640), metadata.extent.width);
+    try std.testing.expectEqual(@as(u32, 2), metadata.image_count);
+    try std.testing.expectEqual(Format.b8g8r8a8_unorm, metadata.format);
+
+    test_create_image_view_fail_at = 1;
+    try std.testing.expectError(
+        error.OutOfHostMemory,
+        swapchain.createImageViews(std.testing.allocator, .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_image_view_count);
+
+    test_create_image_view_count = 0;
+    test_create_image_view_fail_at = null;
+    var views = try swapchain.createImageViews(std.testing.allocator, .{});
+    defer std.testing.allocator.free(views);
+    try std.testing.expectEqual(@as(usize, 2), views.len);
+    _ = try views[0].rawHandle();
+
+    swapchain.deinit();
+    try std.testing.expectError(error.StaleBorrow, views[0].rawHandle());
+    for (views) |*view| view.deinit();
+    try std.testing.expectEqual(@as(usize, 3), test_destroy_image_view_count);
+}
+
+test "calibrated timestamps and profiling locks preserve typed outcomes" {
+    var device = testDevice();
+    defer device.deinit();
+    device.dispatch.get_calibrated_timestamps = testCalibratedTimestamps;
+    device.dispatch.acquire_profiling_lock = testAcquireProfilingLock;
+    device.dispatch.release_profiling_lock = testReleaseProfilingLock;
+    test_resource_result = raw.VK_SUCCESS;
+    var storage: [2]CalibratedTimestamp = undefined;
+    const calibration = try device.calibratedTimestamps(
+        &.{ .device, .clock_monotonic },
+        &storage,
+    );
+    try std.testing.expectEqual(@as(u64, 17), calibration.max_deviation_nanoseconds);
+    try std.testing.expectEqual(@as(u64, 1_001), calibration.timestamps[1].value);
+
+    test_profiling_result = raw.VK_TIMEOUT;
+    try std.testing.expectError(error.UnexpectedVulkanResult, device.acquireProfilingLock(.immediate));
+    test_profiling_result = raw.VK_SUCCESS;
+    test_release_profiling_count = 0;
+    var lock = try device.acquireProfilingLock(.infinite);
+    lock.deinit();
+    lock.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_release_profiling_count);
+}
+
+test "performance counters enumerate without raw structures" {
+    var instance = testInstance();
+    instance.dispatch.enumerate_performance_counters = testEnumeratePerformanceCounters;
+    instance.dispatch.get_performance_query_passes = testPerformanceQueryPasses;
+    const physical_device: PhysicalDevice = .{
+        ._handle = testHandle(raw.VkPhysicalDevice, 0x1800),
+        ._instance_handle = instance._handle.?,
+        .dispatch = instance.dispatch,
+    };
+    const counters = try physical_device.performanceCounters(std.testing.allocator, .fromRaw(0));
+    defer std.testing.allocator.free(counters);
+    try std.testing.expectEqual(@as(usize, 2), counters.len);
+    try std.testing.expectEqualStrings("bytes", counters[0].name());
+    try std.testing.expect(counters[0].performance_impacting);
+    try std.testing.expect(counters[1].concurrently_impacted);
+    try std.testing.expectEqual(@as(u32, 3), try physical_device.performanceQueryPasses(.{
+        .queue_family = .fromRaw(0),
+        .counter_indices = &.{ 0, 1 },
+    }));
 }
 
 test "debug messenger handles fake dispatch success and failures" {

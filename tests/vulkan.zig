@@ -690,7 +690,7 @@ test "typed memory properties convert flags and sum every device-local heap" {
 
 test "debug utility options produce reusable callback and label views" {
     const messenger_config = vk.debug_utils.Config.fromHandler(typedDebugMessage, .{});
-    const messenger_info = messenger_config.createInfoRaw(null);
+    const messenger_info = vk.debug_utils.advanced.messengerCreateInfo(messenger_config, null);
     try std.testing.expectEqual(
         @as(vk.raw.VkStructureType, @intCast(
             vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -720,21 +720,49 @@ test "debug utility options produce reusable callback and label views" {
     try std.testing.expectEqualStrings("frame", std.mem.span(label.pLabelName));
     try std.testing.expectEqual(@as(f32, 0.5), label.color[1]);
 
+    const message_objects = [_]vk.raw.VkDebugUtilsObjectNameInfoEXT{.{
+        .sType = vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+        .objectType = vk.raw.VK_OBJECT_TYPE_BUFFER,
+        .objectHandle = 42,
+        .pObjectName = "vertex-buffer",
+    }};
+    const queue_labels = [_]vk.raw.VkDebugUtilsLabelEXT{.{
+        .sType = vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+        .pLabelName = "graphics",
+        .color = .{ 1, 0, 0, 1 },
+    }};
     var callback_data: vk.raw.VkDebugUtilsMessengerCallbackDataEXT = .{
         .sType = vk.raw.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT,
         .pMessageIdName = "validation-id",
         .pMessage = "validation message",
+        .objectCount = message_objects.len,
+        .pObjects = &message_objects,
+        .queueLabelCount = queue_labels.len,
+        .pQueueLabels = &queue_labels,
     };
-    const message = vk.debug_utils.Message.fromRawCallback(
+    const message = vk.debug_utils.advanced.messageFromRawCallback(
         vk.raw.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
         vk.raw.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
         &callback_data,
     ).?;
     try std.testing.expect(message.isError());
     try std.testing.expect(!message.isWarning());
+    try std.testing.expect(message.isValidation());
+    try std.testing.expect(!message.isGeneral());
+    try std.testing.expect(!message.isPerformance());
+    try std.testing.expect(!message.isDeviceAddressBinding());
     try std.testing.expectEqualStrings("validation-id", message.idName().?);
     try std.testing.expectEqualStrings("validation message", message.text().?);
-    try std.testing.expectEqual(@as(usize, 0), message.objectCount());
+    try std.testing.expectEqual(@as(usize, 1), message.objectCount());
+    const message_object = message.object(0).?;
+    try std.testing.expectEqual(vk.debug_utils.ObjectType.buffer, message_object.object_type);
+    try std.testing.expectEqual(@as(u64, 42), message_object.handle);
+    try std.testing.expectEqualStrings("vertex-buffer", message_object.name.?);
+    try std.testing.expectEqualStrings("graphics", message.queueLabel(0).?.name.?);
+    try std.testing.expectEqual(
+        &callback_data,
+        vk.debug_utils.advanced.callbackData(message),
+    );
 
     typed_handler_count = 0;
     const typed_config = vk.debug_utils.Config.fromHandler(

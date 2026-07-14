@@ -9,6 +9,7 @@ const command = @import("vulkan_commands");
 const types = @import("vulkan_types");
 const core = @import("core.zig");
 const image = @import("image.zig");
+const debug_utils = @import("debug_utils.zig");
 const commands = @import("command_buffer.zig");
 
 const CommandFunction = command.FunctionType;
@@ -166,6 +167,10 @@ pub const Session = struct {
     pub fn rawHandle(session: *const Session) core.Error!raw.VkOpticalFlowSessionNV {
         try session._owner.validate(session);
         return session._handle orelse error.InactiveObject;
+    }
+
+    pub fn debugObject(session: *const Session) core.Error!debug_utils.Object {
+        return .forDevice(.optical_flow_session, try session.rawHandle(), session._device_handle);
     }
 
     pub fn bindImage(

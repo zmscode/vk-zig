@@ -122,6 +122,8 @@ pub const ObjectType = enum(u32) {
     surface = raw.VK_OBJECT_TYPE_SURFACE_KHR,
     swapchain = raw.VK_OBJECT_TYPE_SWAPCHAIN_KHR,
     debug_messenger = raw.VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER_EXT,
+    sampler_ycbcr_conversion = raw.VK_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION,
+    optical_flow_session = raw.VK_OBJECT_TYPE_OPTICAL_FLOW_SESSION_NV,
     _,
 
     fn fromRaw(value: raw.VkObjectType) ObjectType {
@@ -133,11 +135,13 @@ pub const ObjectType = enum(u32) {
     }
 };
 
-pub const ObjectInfo = struct {
+pub const MessageObject = struct {
     object_type: ObjectType,
     handle: u64,
     name: ?[]const u8,
 };
+
+pub const ObjectInfo = MessageObject;
 
 /// A typed debug-name target produced by vk-zig wrapper objects.
 pub const Object = struct {
@@ -184,10 +188,26 @@ pub const Object = struct {
     }
 };
 
-pub const LabelInfo = struct {
+/// Converts any vk-zig wrapper with a `debugObject` method into a naming target.
+/// This is the common compile-time contract used by `Device.setObjectName`.
+pub fn nameTarget(value: anytype) core.Error!Object {
+    const Pointer = @TypeOf(value);
+    const pointer = switch (@typeInfo(Pointer)) {
+        .pointer => |info| info,
+        else => @compileError("a debug-name target must be passed by pointer"),
+    };
+    if (!@hasDecl(pointer.child, "debugObject")) {
+        @compileError(@typeName(pointer.child) ++ " does not implement debugObject");
+    }
+    return value.debugObject();
+}
+
+pub const MessageLabel = struct {
     name: ?[]const u8,
     color: [4]f32,
 };
+
+pub const LabelInfo = MessageLabel;
 
 /// A safe borrowed view over callback data. It is valid only during the callback.
 pub const Message = struct {
@@ -195,7 +215,7 @@ pub const Message = struct {
     message_types: MessageTypeFlags,
     _data: *const raw.VkDebugUtilsMessengerCallbackDataEXT,
 
-    pub fn fromRawCallback(
+    fn fromRawCallback(
         severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
         message_types: raw.VkDebugUtilsMessageTypeFlagsEXT,
         data: [*c]const raw.VkDebugUtilsMessengerCallbackDataEXT,
@@ -234,6 +254,22 @@ pub const Message = struct {
 
     pub fn isVerbose(message: Message) bool {
         return message.severity.contains(.verbose);
+    }
+
+    pub fn isGeneral(message: Message) bool {
+        return message.message_types.contains(.general);
+    }
+
+    pub fn isValidation(message: Message) bool {
+        return message.message_types.contains(.validation);
+    }
+
+    pub fn isPerformance(message: Message) bool {
+        return message.message_types.contains(.performance);
+    }
+
+    pub fn isDeviceAddressBinding(message: Message) bool {
+        return message.message_types.contains(.device_address_binding);
     }
 
     pub fn objectCount(message: Message) usize {
@@ -329,7 +365,7 @@ pub const Config = struct {
         return config._handler(config._user_data, message);
     }
 
-    pub fn createInfoRaw(
+    fn createInfoRaw(
         config: Config,
         next: ?*const anyopaque,
     ) raw.VkDebugUtilsMessengerCreateInfoEXT {
@@ -341,6 +377,29 @@ pub const Config = struct {
             .pfnUserCallback = config._callback,
             .pUserData = config._user_data,
         };
+    }
+};
+
+/// Explicit raw-ABI escape hatches. Normal diagnostics code should only use `Config` and
+/// `Message` through `InstanceOptions.debug_messenger` and typed handlers.
+pub const advanced = struct {
+    pub fn messengerCreateInfo(
+        config: Config,
+        next: ?*const anyopaque,
+    ) raw.VkDebugUtilsMessengerCreateInfoEXT {
+        return config.createInfoRaw(next);
+    }
+
+    pub fn messageFromRawCallback(
+        severity: raw.VkDebugUtilsMessageSeverityFlagBitsEXT,
+        message_types: raw.VkDebugUtilsMessageTypeFlagsEXT,
+        data: [*c]const raw.VkDebugUtilsMessengerCallbackDataEXT,
+    ) ?Message {
+        return .fromRawCallback(severity, message_types, data);
+    }
+
+    pub fn callbackData(message: Message) *const raw.VkDebugUtilsMessengerCallbackDataEXT {
+        return message._data;
     }
 };
 
@@ -378,6 +437,10 @@ pub const Messenger = struct {
     pub fn rawHandle(messenger: *const Messenger) core.Error!raw.VkDebugUtilsMessengerEXT {
         return messenger._handle orelse error.InactiveObject;
     }
+
+    pub fn debugObject(messenger: *const Messenger) core.Error!Object {
+        return .forInstance(.debug_messenger, try messenger.rawHandle(), messenger._instance_handle);
+    }
 };
 
 pub const MessengerDispatch = struct {
@@ -391,7 +454,7 @@ pub fn createMessenger(
     dispatch: MessengerDispatch,
     config: Config,
 ) core.Error!Messenger {
-    const create_info = config.createInfoRaw(null);
+    const create_info = advanced.messengerCreateInfo(config, null);
     var handle: raw.VkDebugUtilsMessengerEXT = null;
     const result = dispatch.create(instance_handle, &create_info, allocation_callbacks, &handle);
     if (result != raw.VK_SUCCESS) {

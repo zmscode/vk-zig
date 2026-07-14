@@ -422,6 +422,7 @@ pub const View = struct {
     samples: ?types.SampleCountBit,
     extent: ?types.Extent3D,
     layer_count: ?u32,
+    _image_borrow: ?core.Generation.Borrow = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
 
@@ -432,6 +433,7 @@ pub const View = struct {
     }
 
     pub fn rawHandle(view: *const View) core.Error!raw.VkImageView {
+        if (view._image_borrow) |borrow| try borrow.validate();
         return view._handle orelse error.InactiveObject;
     }
 
@@ -485,6 +487,10 @@ pub fn createView(
                 count -| options.subresource_range.base_array_layer
             else
                 null,
+        },
+        ._image_borrow = switch (options.image) {
+            .owned => null,
+            .swapchain => |value| value._swapchain_borrow,
         },
         .allocation_callbacks = allocation_callbacks,
         .destroy_image_view = destroy_image_view,

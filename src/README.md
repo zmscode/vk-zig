@@ -17,6 +17,7 @@ modules so changes do not accumulate in one file:
 - `command_buffer.zig`: command pools, command buffers, recording, and labels.
 - `queue.zig`: submission, synchronization handoff, presentation, and labels.
 - `presentation.zig`: surfaces, swapchains, image acquisition, and presentation data.
+- `query.zig`: query pools, typed readback, timestamps, calibration, and performance queries.
 - `debug_utils.zig`: typed validation messages, callbacks, labels, and messengers.
 
 Generated raw declarations and typed Vulkan vocabulary remain separate build
