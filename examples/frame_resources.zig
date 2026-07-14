@@ -8,7 +8,7 @@ pub const FrameResult = enum {
     acquire_timeout,
 };
 
-/// Records, submits, and presents one clear-only frame. `image_initialized`
+/// Records, submits, and presents one raw-free dynamic-rendering frame. `image_initialized`
 /// stores one layout bit for every image and must be reset on swapchain recreation.
 pub fn clearAndPresent(
     device: *const vk.Device,
@@ -17,6 +17,7 @@ pub fn clearAndPresent(
     present_queue: *const vk.Queue,
     graphics_family: vk.QueueFamilyIndex,
     format: vk.Format,
+    extent: vk.Extent2D,
     image_initialized: []bool,
 ) !FrameResult {
     var command_pool = try device.createCommandPool(.{
@@ -63,7 +64,7 @@ pub fn clearAndPresent(
         .aspect_mask = .init(&.{.color}),
     };
     var image_view = try device.createImageView(.{
-        .image = image,
+        .image = .{ .swapchain = image },
         .view_type = ._2d,
         .format = format,
         .subresource_range = color_range,
@@ -76,29 +77,41 @@ pub fn clearAndPresent(
         std.log.err("waiting for failed frame cleanup: {s}", .{@errorName(wait_error)});
     };
     try command_buffer.begin(.{ .flags = .init(&.{.one_time_submit}) });
-    try command_buffer.imageBarrier(.{
-        .source_stage = .init(&.{.top_of_pipe}),
-        .destination_stage = .init(&.{.transfer}),
-        .destination_access = .init(&.{.transfer_write}),
-        .old_layout = old_layout,
-        .new_layout = .transfer_dst_optimal,
-        .image = image,
-        .subresource_range = color_range,
+    try command_buffer.pipelineBarrier(.{
+        .image_barriers = &.{.{
+            .source_stage = .init(&.{.top_of_pipe}),
+            .destination_stage = .init(&.{.color_attachment_output}),
+            .destination_access = .init(&.{.color_attachment_write}),
+            .old_layout = old_layout,
+            .new_layout = .color_attachment_optimal,
+            .image = .{ .swapchain = image },
+            .subresource_range = color_range,
+        }},
     });
-    try command_buffer.clearColorImage(.{
-        .image = image,
-        .layout = .transfer_dst_optimal,
-        .color = .{ .float = .{ 0.03, 0.05, 0.09, 1.0 } },
-        .subresource_range = color_range,
+    var rendering_scope = try command_buffer.beginRendering(.{
+        .render_area = .{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = extent,
+        },
+        .color_attachments = &.{.{
+            .view = &image_view,
+            .layout = .color_attachment_optimal,
+            .load = .clear,
+            .store = .store,
+            .clear = .{ .color = .{ .float = .{ 0.03, 0.05, 0.09, 1.0 } } },
+        }},
     });
-    try command_buffer.imageBarrier(.{
-        .source_stage = .init(&.{.transfer}),
-        .destination_stage = .init(&.{.bottom_of_pipe}),
-        .source_access = .init(&.{.transfer_write}),
-        .old_layout = .transfer_dst_optimal,
-        .new_layout = .present_src_khr,
-        .image = image,
-        .subresource_range = color_range,
+    try rendering_scope.end();
+    try command_buffer.pipelineBarrier(.{
+        .image_barriers = &.{.{
+            .source_stage = .init(&.{.color_attachment_output}),
+            .source_access = .init(&.{.color_attachment_write}),
+            .destination_stage = .init(&.{.bottom_of_pipe}),
+            .old_layout = .color_attachment_optimal,
+            .new_layout = .present_src_khr,
+            .image = .{ .swapchain = image },
+            .subresource_range = color_range,
+        }},
     });
     try command_buffer.end();
 
@@ -106,7 +119,7 @@ pub fn clearAndPresent(
     try graphics_queue.submit(.{
         .waits = &.{.{
             .semaphore = &image_available,
-            .stage = .init(&.{.transfer}),
+            .stage = .init(&.{.color_attachment_output}),
         }},
         .command_buffers = &.{&command_buffer},
         .signals = &.{&render_finished},

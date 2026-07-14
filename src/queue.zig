@@ -79,6 +79,7 @@ pub const LabelScope = struct {
 pub const Queue = struct {
     _handle: QueueHandle,
     _device_handle: DeviceHandle,
+    _device_state: ?*core.DeviceState = null,
     queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
     queue_submit2: ?CommandFunction(raw.PFN_vkQueueSubmit2),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
@@ -101,6 +102,17 @@ pub const Queue = struct {
         };
     }
 
+    fn ensureDispatchAllowed(queue: *const Queue) core.Error!void {
+        if (queue._device_state) |state| try state.ensureDispatchAllowed();
+    }
+
+    fn checkResult(queue: *const Queue, result: raw.VkResult) core.Error!void {
+        if (queue._device_state) |state| {
+            return core.checkSuccessTracked(state, result);
+        }
+        return core.checkSuccess(result);
+    }
+
     pub fn rawHandle(queue: *const Queue) raw.VkQueue {
         return queue._handle;
     }
@@ -110,6 +122,7 @@ pub const Queue = struct {
     }
 
     pub fn submit(queue: *const Queue, options: SubmitOptions) core.Error!void {
+        try queue.ensureDispatchAllowed();
         if (options.waits.len > submission_item_count_max or
             options.command_buffers.len > submission_item_count_max or
             options.signals.len > submission_item_count_max)
@@ -151,11 +164,12 @@ pub const Queue = struct {
             .signalSemaphoreCount = @intCast(options.signals.len),
             .pSignalSemaphores = if (options.signals.len == 0) null else signal_handles[0..options.signals.len].ptr,
         };
-        try core.checkSuccess(queue.queue_submit(queue._handle, 1, &submit_info, fence_handle));
+        try queue.checkResult(queue.queue_submit(queue._handle, 1, &submit_info, fence_handle));
         for (options.command_buffers) |buffer| try buffer.markSubmitted();
     }
 
     pub fn submit2(queue: *const Queue, options: Submit2BatchOptions) core.Error!void {
+        try queue.ensureDispatchAllowed();
         if (options.submits.len > submission_batch_count_max) return error.CountOverflow;
         const fence_handle = try fenceHandle(queue._device_handle, options.fence);
         if (options.submits.len == 0 and fence_handle == null) return;
@@ -252,7 +266,7 @@ pub const Queue = struct {
             };
         }
 
-        try core.checkSuccess(submit2_command(
+        try queue.checkResult(submit2_command(
             queue._handle,
             @intCast(options.submits.len),
             if (options.submits.len == 0) null else submit_infos[0..options.submits.len].ptr,
@@ -271,7 +285,8 @@ pub const Queue = struct {
         submit_infos: []const raw.VkSubmitInfo,
         fence: raw.VkFence,
     ) core.Error!void {
-        try core.checkSuccess(queue.queue_submit(
+        try queue.ensureDispatchAllowed();
+        try queue.checkResult(queue.queue_submit(
             queue._handle,
             try core.count32(submit_infos.len),
             if (submit_infos.len == 0) null else submit_infos.ptr,
@@ -280,7 +295,8 @@ pub const Queue = struct {
     }
 
     pub fn waitIdle(queue: *const Queue) core.Error!void {
-        try core.checkSuccess(queue.queue_wait_idle(queue._handle));
+        try queue.ensureDispatchAllowed();
+        try queue.checkResult(queue.queue_wait_idle(queue._handle));
     }
 
     pub fn beginLabel(queue: *const Queue, options: debug_utils.LabelOptions) core.Error!void {
@@ -313,6 +329,7 @@ pub const Queue = struct {
         queue: *const Queue,
         options: presentation.PresentOptions,
     ) core.Error!presentation.PresentStatus {
+        try queue.ensureDispatchAllowed();
         const present_command = queue.queue_present_khr orelse return error.MissingCommand;
         if (options.swapchain._device_handle != queue._device_handle) return error.InvalidHandle;
         if (options.wait_semaphores.len > submission_item_count_max) return error.CountOverflow;
@@ -337,7 +354,7 @@ pub const Queue = struct {
         if (result == raw.VK_SUCCESS) return .success;
         if (result == raw.VK_SUBOPTIMAL_KHR) return .suboptimal;
         if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
-        try core.checkSuccess(result);
+        try queue.checkResult(result);
         unreachable;
     }
 };

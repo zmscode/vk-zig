@@ -54,28 +54,7 @@ pub const Options = struct {
     opaque_capture_address: ?OpaqueCaptureAddress = null,
 };
 
-pub const MemoryRequirements = struct {
-    size: Size,
-    alignment: Size,
-    memory_type_bits: u32,
-
-    pub fn supportsMemoryType(
-        requirements: MemoryRequirements,
-        memory_type_index: core.MemoryTypeIndex,
-    ) bool {
-        const index = memory_type_index.toRaw();
-        if (index >= 32) return false;
-        return (requirements.memory_type_bits & (@as(u32, 1) << @intCast(index))) != 0;
-    }
-
-    pub fn fromRaw(value: raw.VkMemoryRequirements) MemoryRequirements {
-        return .{
-            .size = .fromBytes(value.size),
-            .alignment = .fromBytes(value.alignment),
-            .memory_type_bits = value.memoryTypeBits,
-        };
-    }
-};
+pub const MemoryRequirements = memory.Requirements;
 
 pub const ViewOptions = struct {
     format: types.Format,
@@ -152,8 +131,15 @@ pub const Buffer = struct {
             var output: raw.VkMemoryRequirements2 = .{
                 .sType = raw.VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
             };
+            var dedicated: raw.VkMemoryDedicatedRequirements = .{
+                .sType = raw.VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS,
+            };
+            output.pNext = &dedicated;
             get_requirements(buffer._device_handle, &info, &output);
-            return .fromRaw(output.memoryRequirements);
+            var requirements = MemoryRequirements.fromRaw(output.memoryRequirements);
+            requirements.prefers_dedicated_allocation = dedicated.prefersDedicatedAllocation != raw.VK_FALSE;
+            requirements.requires_dedicated_allocation = dedicated.requiresDedicatedAllocation != raw.VK_FALSE;
+            return requirements;
         }
         var output: raw.VkMemoryRequirements = .{};
         buffer.dispatch.get_buffer_memory_requirements(

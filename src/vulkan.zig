@@ -5,15 +5,24 @@ pub const capabilities = @import("capabilities.zig");
 pub const configuration = @import("configuration.zig");
 pub const registry = @import("registry.zig");
 pub const physical_devices = @import("physical_device.zig");
+pub const device_configuration = @import("device.zig");
 pub const formats = @import("format.zig");
 pub const memory = @import("memory.zig");
 pub const buffers = @import("buffer.zig");
 pub const images = @import("image.zig");
+pub const samplers = @import("sampler.zig");
+pub const shaders = @import("shader.zig");
+pub const descriptors = @import("descriptor.zig");
+pub const pipelines = @import("pipeline.zig");
+pub const rendering = @import("rendering.zig");
+pub const transfers = @import("transfer.zig");
 pub const synchronization = @import("synchronization.zig");
 pub const commands = @import("command_buffer.zig");
 pub const presentation = @import("presentation.zig");
 pub const queues = @import("queue.zig");
 pub const debug_utils = @import("debug_utils.zig");
+pub const workflows = @import("workflows.zig");
+pub const optical_flow = @import("optical_flow.zig");
 
 /// Deprecated short name retained while applications migrate to `synchronization`.
 pub const sync = synchronization;
@@ -31,6 +40,12 @@ pub const CommandFunction = command.FunctionType;
 /// Generated Vulkan extension descriptors with stable sentinel-terminated names.
 pub const extension = command.extension;
 pub const Extension = command.Extension;
+pub const DeviceFeature = device_configuration.Feature;
+pub const DeviceFeatureSet = device_configuration.FeatureSet;
+pub const DeviceRequirements = device_configuration.Requirements;
+pub const DeviceEvaluation = device_configuration.Evaluation;
+pub const DeviceRejection = device_configuration.Rejection;
+pub const DeviceGlobalPriority = device_configuration.GlobalPriority;
 
 pub const Flags = types.Flags;
 pub const PhysicalDeviceType = types.PhysicalDeviceType;
@@ -82,6 +97,10 @@ pub const PipelineStageBit = types.PipelineStageBit;
 pub const PipelineStageFlags = types.PipelineStageFlags;
 pub const PipelineStage2Bit = types.PipelineStage2Bit;
 pub const PipelineStage2Flags = types.PipelineStage2Flags;
+pub const Access2Bit = types.Access2Bit;
+pub const Access2Flags = types.Access2Flags;
+pub const DependencyBit = types.DependencyBit;
+pub const DependencyFlags = types.DependencyFlags;
 pub const SubmitBit = types.SubmitBit;
 pub const SubmitFlags = types.SubmitFlags;
 pub const CommandPoolCreateBit = types.CommandPoolCreateBit;
@@ -124,6 +143,10 @@ pub const checkSuccess = core.checkSuccess;
 
 const NonNullHandle = core.NonNullHandle;
 const count32 = core.count32;
+
+fn bool32(value: bool) raw.VkBool32 {
+    return if (value) raw.VK_TRUE else raw.VK_FALSE;
+}
 
 pub const Choice = capabilities.Choice;
 pub const clampSurfaceExtent = capabilities.clampSurfaceExtent;
@@ -611,6 +634,10 @@ pub const Surface = presentation.Surface;
 pub const SwapchainImage = images.SwapchainImage;
 pub const ImageViewOptions = images.ViewOptions;
 pub const ImageView = images.View;
+pub const Image = images.Image;
+pub const ImageOptions = images.Options;
+pub const ImageReference = images.Reference;
+pub const ImageMemoryRequirements = images.MemoryRequirements;
 
 pub const SemaphoreKind = sync.SemaphoreKind;
 pub const SemaphoreOptions = sync.SemaphoreOptions;
@@ -622,6 +649,24 @@ pub const FenceStatus = sync.FenceStatus;
 pub const WaitMode = sync.WaitMode;
 pub const TimelineSemaphoreWait = sync.TimelineSemaphoreWait;
 pub const Fence = sync.Fence;
+pub const Event = sync.Event;
+pub const MemoryBarrier = sync.MemoryBarrier;
+pub const BufferMemoryBarrier = sync.BufferBarrier;
+pub const ImageMemoryBarrier = sync.ImageBarrier;
+pub const DependencyInfo = sync.DependencyInfo;
+pub const RenderingFlags = rendering.Flags;
+pub const RenderingAttachment = rendering.Attachment;
+pub const RenderingOptions = rendering.Options;
+pub const RenderingLoadOperation = rendering.LoadOperation;
+pub const RenderingStoreOperation = rendering.StoreOperation;
+pub const RenderingResolve = rendering.Resolve;
+pub const RenderingResolveMode = rendering.ResolveMode;
+pub const ImageSubresourceLayers = transfers.SubresourceLayers;
+pub const BufferCopy = transfers.BufferCopy;
+pub const BufferImageCopy = transfers.BufferImageCopy;
+pub const ImageCopy = transfers.ImageCopy;
+pub const ImageBlit = transfers.ImageBlit;
+pub const ImageResolve = transfers.ImageResolve;
 
 pub const CommandPoolOptions = commands.PoolOptions;
 pub const CommandBufferOptions = commands.Options;
@@ -629,6 +674,12 @@ pub const SecondaryCommandBufferInheritance = commands.SecondaryInheritance;
 pub const CommandBufferBeginOptions = commands.BeginOptions;
 pub const ImageBarrierOptions = commands.ImageBarrierOptions;
 pub const ClearColorImageOptions = commands.ClearColorImageOptions;
+pub const ClearDepthStencilImageOptions = commands.ClearDepthStencilImageOptions;
+pub const VertexBufferBinding = commands.VertexBufferBinding;
+pub const IndexType = commands.IndexType;
+pub const DrawOptions = commands.DrawOptions;
+pub const DrawIndexedOptions = commands.DrawIndexedOptions;
+pub const DispatchOptions = commands.DispatchOptions;
 pub const CommandBuffer = commands.Buffer;
 pub const CommandBufferLabelScope = commands.LabelScope;
 pub const CommandPool = commands.Pool;
@@ -910,15 +961,63 @@ pub const PhysicalDevice = struct {
         return gpa.realloc(output, written.len);
     }
 
-    pub fn features(device: *const PhysicalDevice) raw.VkPhysicalDeviceFeatures {
+    /// Returns the raw Vulkan 1.0 feature structure for explicit FFI interop.
+    pub fn featuresRaw(device: *const PhysicalDevice) raw.VkPhysicalDeviceFeatures {
         var value: raw.VkPhysicalDeviceFeatures = .{};
         device.dispatch.get_physical_device_features(device._handle, &value);
         return value;
     }
 
+    /// Queries a raw-free snapshot of supported core and promoted modern features.
+    pub fn features(device: *const PhysicalDevice) Error!DeviceFeatureSet {
+        const device_properties = device.properties();
+        const get_features2 = device.dispatch.get_physical_device_features2 orelse {
+            const core_features = device.featuresRaw();
+            return .fromCoreRaw(&core_features);
+        };
+
+        var features_11: raw.VkPhysicalDeviceVulkan11Features = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        };
+        var features_12: raw.VkPhysicalDeviceVulkan12Features = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        };
+        var features_13: raw.VkPhysicalDeviceVulkan13Features = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        };
+        var features_14: raw.VkPhysicalDeviceVulkan14Features = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+        };
+        var root: raw.VkPhysicalDeviceFeatures2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        };
+        if (device_properties.api_version.atLeast(.v1_1)) root.pNext = &features_11;
+        if (device_properties.api_version.atLeast(.v1_2)) features_11.pNext = &features_12;
+        if (device_properties.api_version.atLeast(.v1_3)) features_12.pNext = &features_13;
+        if (device_properties.api_version.atLeast(.v1_4)) features_13.pNext = &features_14;
+        get_features2(device._handle, &root);
+
+        var supported = DeviceFeatureSet.fromCoreRaw(&root.features);
+        if (features_11.protectedMemory != raw.VK_FALSE) supported.enable(.protected_memory);
+        if (features_11.samplerYcbcrConversion != raw.VK_FALSE) supported.enable(.sampler_ycbcr_conversion);
+        if (features_11.multiview != raw.VK_FALSE) supported.enable(.multiview);
+        if (features_11.shaderDrawParameters != raw.VK_FALSE) supported.enable(.shader_draw_parameters);
+        if (features_12.drawIndirectCount != raw.VK_FALSE) supported.enable(.draw_indirect_count);
+        if (features_12.timelineSemaphore != raw.VK_FALSE) supported.enable(.timeline_semaphore);
+        if (features_12.bufferDeviceAddress != raw.VK_FALSE) supported.enable(.buffer_device_address);
+        if (features_12.descriptorIndexing != raw.VK_FALSE) supported.enable(.descriptor_indexing);
+        if (features_13.synchronization2 != raw.VK_FALSE) supported.enable(.synchronization2);
+        if (features_13.dynamicRendering != raw.VK_FALSE) supported.enable(.dynamic_rendering);
+        if (features_13.maintenance4 != raw.VK_FALSE) supported.enable(.maintenance4);
+        if (features_14.globalPriorityQuery != raw.VK_FALSE) supported.enable(.global_priority_query);
+        if (features_14.hostImageCopy != raw.VK_FALSE) supported.enable(.host_image_copy);
+        if (features_14.pushDescriptor != raw.VK_FALSE) supported.enable(.push_descriptor);
+        return supported;
+    }
+
     /// Queries core and chained feature structures. `next` must point to a mutable
     /// Vulkan feature structure whose lifetime covers this call.
-    pub fn features2(
+    pub fn features2Raw(
         device: *const PhysicalDevice,
         next: ?*anyopaque,
     ) Error!raw.VkPhysicalDeviceFeatures2 {
@@ -932,6 +1031,10 @@ pub const PhysicalDevice = struct {
         get_features(device._handle, &value);
         return value;
     }
+
+    /// Deprecated raw escape hatch. Prefer `features`; use `features2Raw` only
+    /// when interoperating with a feature structure not yet wrapped by vk-zig.
+    pub const features2 = features2Raw;
 
     /// Returns the raw fixed-capacity Vulkan structure for diagnostics and interop.
     pub fn memoryPropertiesRaw(device: *const PhysicalDevice) raw.VkPhysicalDeviceMemoryProperties {
@@ -954,6 +1057,33 @@ pub const PhysicalDevice = struct {
     ) Error!void {
         const raw_properties = device.memoryPropertiesRaw();
         try output.initFromRaw(&raw_properties);
+    }
+
+    pub fn memoryBudget(device: *const PhysicalDevice) Error!memory.BudgetSnapshot {
+        const get_properties = device.dispatch.get_physical_device_memory_properties2 orelse {
+            return error.MissingCommand;
+        };
+        var budget: raw.VkPhysicalDeviceMemoryBudgetPropertiesEXT = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT,
+        };
+        var memory_properties: raw.VkPhysicalDeviceMemoryProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+            .pNext = &budget,
+        };
+        get_properties(device._handle, &memory_properties);
+        if (memory_properties.memoryProperties.memoryHeapCount > memory.heap_count_max) {
+            return error.InvalidProperties;
+        }
+        var snapshot: memory.BudgetSnapshot = .{
+            ._heaps = undefined,
+            .count = memory_properties.memoryProperties.memoryHeapCount,
+        };
+        for (0..snapshot.count) |index| snapshot._heaps[index] = .{
+            .heap_index = .fromRaw(@intCast(index)),
+            .budget = .fromBytes(budget.heapBudget[index]),
+            .usage = .fromBytes(budget.heapUsage[index]),
+        };
+        return snapshot;
     }
 
     pub fn queueFamilyProperties(
@@ -1168,18 +1298,92 @@ pub const PhysicalDevice = struct {
         return snapshot.findType(options);
     }
 
+    /// Evaluates logical-device requirements without creating a device or
+    /// assigning an application-specific suitability score.
+    pub fn evaluateDeviceRequirements(
+        physical_device: *const PhysicalDevice,
+        requirements: DeviceRequirements,
+    ) Error!DeviceEvaluation {
+        var extension_count: u32 = 0;
+        try checkSuccess(physical_device.dispatch.enumerate_device_extension_properties(
+            physical_device._handle,
+            null,
+            &extension_count,
+            null,
+        ));
+        if (extension_count > device_configuration.extension_count_max) return error.CountOverflow;
+        var extension_properties: [device_configuration.extension_count_max]raw.VkExtensionProperties = undefined;
+        var extension_written = extension_count;
+        const extension_result = physical_device.dispatch.enumerate_device_extension_properties(
+            physical_device._handle,
+            null,
+            &extension_written,
+            extension_properties[0..extension_count].ptr,
+        );
+        if (extension_result == raw.VK_INCOMPLETE) return error.EnumerationUnstable;
+        try checkSuccess(extension_result);
+
+        var family_count: u32 = 0;
+        physical_device.dispatch.get_physical_device_queue_family_properties(
+            physical_device._handle,
+            &family_count,
+            null,
+        );
+        if (family_count > device_configuration.queue_count_max) return error.CountOverflow;
+        var raw_families: [device_configuration.queue_count_max]raw.VkQueueFamilyProperties = undefined;
+        var family_written = family_count;
+        physical_device.dispatch.get_physical_device_queue_family_properties(
+            physical_device._handle,
+            &family_written,
+            raw_families[0..family_count].ptr,
+        );
+        if (family_written > family_count) return error.EnumerationUnstable;
+        var families: [device_configuration.queue_count_max]QueueFamily = undefined;
+        for (raw_families[0..family_written], 0..) |property, index| {
+            families[index] = .{
+                .index = .fromRaw(@intCast(index)),
+                .flags = .fromRaw(property.queueFlags),
+                .queue_count = property.queueCount,
+                .timestamp_valid_bits = property.timestampValidBits,
+                .minimum_image_transfer_granularity = .fromRaw(property.minImageTransferGranularity),
+            };
+        }
+        return device_configuration.evaluate(requirements, .{
+            .api_version = physical_device.properties().api_version,
+            .extensions = extension_properties[0..extension_written],
+            .features = try physical_device.features(),
+            .queue_families = families[0..family_written],
+        });
+    }
+
     pub fn createDevice(
         physical_device: *const PhysicalDevice,
         options: DeviceOptions,
     ) Error!Device {
-        try options.validate();
+        if (options.enable_portability_subset and platform != .metal) {
+            return error.PortabilityNotSupported;
+        }
+        const evaluation = try physical_device.evaluateDeviceRequirements(options);
+        if (!evaluation.supported()) {
+            return switch (evaluation.reasons()[0]) {
+                .missing_extension, .unsatisfied_extension_dependency, .instance_extension_used_as_device_extension => error.ExtensionNotPresent,
+                .missing_feature => error.FeatureNotPresent,
+                .missing_queue_family, .insufficient_queue_count, .queue_capability_missing => error.QueueFamilyNotFound,
+                .invalid_options => error.InvalidOptions,
+            };
+        }
 
         var queue_infos: [device_queue_count_max]raw.VkDeviceQueueCreateInfo = undefined;
+        var priority_infos: [device_queue_count_max]raw.VkDeviceQueueGlobalPriorityCreateInfo = undefined;
         for (options.queues, 0..) |queue, index| {
+            priority_infos[index] = .{
+                .sType = raw.VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO,
+                .globalPriority = if (queue.global_priority) |priority| priority.toRaw() else raw.VK_QUEUE_GLOBAL_PRIORITY_MEDIUM,
+            };
             queue_infos[index] = .{
                 .sType = raw.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                .pNext = queue.next,
-                .flags = queue.flags,
+                .pNext = if (queue.global_priority != null) &priority_infos[index] else null,
+                .flags = if (queue.protected) @intCast(raw.VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT) else 0,
                 .queueFamilyIndex = queue.family_index.toRaw(),
                 .queueCount = @intCast(queue.priorities.len),
                 .pQueuePriorities = queue.priorities.ptr,
@@ -1187,28 +1391,78 @@ pub const PhysicalDevice = struct {
         }
 
         var extension_pointers: [name_count_max][*c]const u8 = undefined;
-        var extension_count = try fillNamePointers(options.extensions, &extension_pointers);
+        var enabled_extensions: [name_count_max]Extension = undefined;
+        var extension_count: usize = 0;
+        for (options.extensions) |item| {
+            if (extension_count == extension_pointers.len) return error.CountOverflow;
+            extension_pointers[extension_count] = item.name.ptr;
+            enabled_extensions[extension_count] = item;
+            extension_count += 1;
+        }
         if (options.enable_portability_subset) {
-            if (platform != .metal) return error.PortabilityNotSupported;
-            const portability_extension = Portability.deviceExtensions()[0];
-            if (!containsName(options.extensions, portability_extension)) {
+            const portability_extension = extension.khr_portability_subset;
+            var found = false;
+            for (options.extensions) |item| {
+                if (std.mem.eql(u8, item.name, portability_extension.name)) found = true;
+            }
+            if (!found) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
-                extension_pointers[extension_count] = portability_extension.ptr;
+                extension_pointers[extension_count] = portability_extension.name.ptr;
+                enabled_extensions[extension_count] = portability_extension;
                 extension_count += 1;
             }
         }
 
+        const enabled_core_features = options.features.coreRaw();
+        var features_11: raw.VkPhysicalDeviceVulkan11Features = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+            .protectedMemory = bool32(options.features.contains(.protected_memory)),
+            .samplerYcbcrConversion = bool32(options.features.contains(.sampler_ycbcr_conversion)),
+            .multiview = bool32(options.features.contains(.multiview)),
+            .shaderDrawParameters = bool32(options.features.contains(.shader_draw_parameters)),
+        };
+        var features_12: raw.VkPhysicalDeviceVulkan12Features = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+            .drawIndirectCount = bool32(options.features.contains(.draw_indirect_count)),
+            .timelineSemaphore = bool32(options.features.contains(.timeline_semaphore)),
+            .bufferDeviceAddress = bool32(options.features.contains(.buffer_device_address)),
+            .descriptorIndexing = bool32(options.features.contains(.descriptor_indexing)),
+        };
+        var features_13: raw.VkPhysicalDeviceVulkan13Features = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+            .synchronization2 = bool32(options.features.contains(.synchronization2)),
+            .dynamicRendering = bool32(options.features.contains(.dynamic_rendering)),
+            .maintenance4 = bool32(options.features.contains(.maintenance4)),
+        };
+        var features_14: raw.VkPhysicalDeviceVulkan14Features = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+            .globalPriorityQuery = bool32(options.features.contains(.global_priority_query)),
+            .hostImageCopy = bool32(options.features.contains(.host_image_copy)),
+            .pushDescriptor = bool32(options.features.contains(.push_descriptor)),
+        };
+        var feature_root: raw.VkPhysicalDeviceFeatures2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .features = enabled_core_features,
+        };
+        const api_version = physical_device.properties().api_version;
+        if (api_version.atLeast(.v1_1)) feature_root.pNext = &features_11;
+        if (api_version.atLeast(.v1_2)) features_11.pNext = &features_12;
+        if (api_version.atLeast(.v1_3)) features_12.pNext = &features_13;
+        if (api_version.atLeast(.v1_4)) features_13.pNext = &features_14;
+
         const create_info: raw.VkDeviceCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = options.next,
-            .flags = options.flags,
+            .pNext = if (options.features.hasPromoted()) &feature_root else null,
             .queueCreateInfoCount = @intCast(options.queues.len),
             .pQueueCreateInfos = queue_infos[0..options.queues.len].ptr,
             .enabledExtensionCount = @intCast(extension_count),
             .ppEnabledExtensionNames = pointerArray(extension_pointers[0..extension_count]),
-            .pEnabledFeatures = options.enabled_features,
+            .pEnabledFeatures = if (options.features.hasPromoted()) null else &enabled_core_features,
         };
-        return physical_device.createDeviceRaw(&create_info, options.allocation_callbacks);
+        var device = try physical_device.createDeviceRaw(&create_info, null);
+        device.enabled_capabilities = .init(enabled_extensions[0..extension_count], options.features);
+        device._max_push_constant_size = physical_device.properties().limits.max_push_constants_size;
+        return device;
     }
 
     pub fn createDeviceRaw(
@@ -1244,6 +1498,7 @@ pub const PhysicalDevice = struct {
             ._instance_handle = physical_device._instance_handle,
             .allocation_callbacks = allocation_callbacks,
             .dispatch = dispatch,
+            .enabled_capabilities = .{},
         };
     }
 };
@@ -1260,60 +1515,64 @@ pub const MemoryHeap = memory.Heap;
 pub const MemoryProperties = memory.Properties;
 pub const MemoryAllocationOptions = memory.AllocationOptions;
 pub const MemoryAllocation = memory.Allocation;
+pub const MemoryMapOptions = memory.MapOptions;
+pub const MappedMemory = memory.MappedRange;
+pub const MemoryRequirements = memory.Requirements;
+pub const MemoryPreference = memory.Preference;
+pub const MemoryHeapBudget = memory.HeapBudget;
+pub const MemoryBudgetSnapshot = memory.BudgetSnapshot;
+pub const Sampler = samplers.Sampler;
+pub const SamplerOptions = samplers.Options;
+pub const SamplerFilter = samplers.Filter;
+pub const SamplerAddressMode = samplers.AddressMode;
+pub const SamplerMipmapMode = samplers.MipmapMode;
+pub const SamplerCompareOperation = samplers.CompareOperation;
+pub const SamplerReductionMode = samplers.ReductionMode;
+pub const SamplerBorderColor = samplers.BorderColor;
+pub const SamplerYcbcrConversion = samplers.YcbcrConversion;
+pub const SamplerYcbcrOptions = samplers.YcbcrOptions;
+pub const ShaderModule = shaders.Module;
+pub const ShaderStage = shaders.Stage;
+pub const ShaderStageOptions = shaders.StageOptions;
+pub const ShaderSpecialization = shaders.Specialization;
+pub const ShaderSpecializationEntry = shaders.SpecializationEntry;
+pub const ShaderStageSet = shaders.StageSet;
+pub const DescriptorType = descriptors.Type;
+pub const DescriptorBinding = descriptors.Binding;
+pub const DescriptorSetLayout = descriptors.SetLayout;
+pub const DescriptorSetLayoutOptions = descriptors.LayoutOptions;
+pub const DescriptorPool = descriptors.Pool;
+pub const DescriptorPoolOptions = descriptors.PoolOptions;
+pub const DescriptorPoolSize = descriptors.PoolSize;
+pub const DescriptorSet = descriptors.Set;
+pub const PipelineLayout = pipelines.Layout;
+pub const PipelineLayoutOptions = pipelines.LayoutOptions;
+pub const PushConstantRange = pipelines.PushConstantRange;
+pub const Pipeline = pipelines.Pipeline;
+pub const PipelineCreateResult = pipelines.CreateResult;
+pub const GraphicsPipelineOptions = pipelines.GraphicsOptions;
+pub const ComputePipelineOptions = pipelines.ComputeOptions;
+pub const PipelineBindPoint = pipelines.BindPoint;
 pub const selectMemoryTypeIndex = memory.selectTypeIndex;
 pub const selectMemoryTypeIndexRaw = memory.selectTypeIndexRaw;
 
-pub const DeviceQueueOptions = struct {
-    family_index: QueueFamilyIndex,
-    priorities: []const f32,
-    flags: raw.VkDeviceQueueCreateFlags = 0,
-    next: ?*const anyopaque = null,
-};
-
-pub const DeviceOptions = struct {
-    queues: []const DeviceQueueOptions,
-    extensions: []const [:0]const u8 = &.{},
-    enabled_features: ?*const raw.VkPhysicalDeviceFeatures = null,
-    flags: raw.VkDeviceCreateFlags = 0,
-    next: ?*const anyopaque = null,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
-    enable_portability_subset: bool = false,
-
-    /// Validates the bounded queue and extension inputs without calling Vulkan.
-    pub fn validate(options: DeviceOptions) Error!void {
-        if (options.queues.len == 0) return error.InvalidOptions;
-        if (options.queues.len > device_queue_count_max) return error.CountOverflow;
-        if (options.extensions.len > name_count_max) return error.CountOverflow;
-        for (options.queues, 0..) |queue, queue_index| {
-            if (queue.priorities.len == 0) return error.InvalidOptions;
-            if (queue.priorities.len > std.math.maxInt(u32)) return error.CountOverflow;
-            for (queue.priorities) |priority| {
-                if (!std.math.isFinite(priority)) return error.InvalidOptions;
-                if (priority < 0.0) return error.InvalidOptions;
-                if (priority > 1.0) return error.InvalidOptions;
-            }
-            for (options.queues[0..queue_index]) |previous_queue| {
-                if (previous_queue.family_index == queue.family_index) {
-                    return error.InvalidOptions;
-                }
-            }
-        }
-        if (options.enable_portability_subset and platform != .metal) {
-            return error.PortabilityNotSupported;
-        }
-    }
-};
+pub const DeviceQueueOptions = device_configuration.QueueOptions;
+pub const DeviceOptions = device_configuration.Requirements;
 
 pub const Device = struct {
     _handle: ?DeviceHandle,
     _instance_handle: InstanceHandle,
+    _state: core.DeviceState = .{},
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: DeviceDispatch,
+    enabled_capabilities: device_configuration.EnabledCapabilities = .{},
+    _max_push_constant_size: u32 = 128,
 
     pub fn deinit(device: *Device) void {
         const handle = device._handle orelse return;
         device.dispatch.destroy_device(handle, device.allocation_callbacks);
         device._handle = null;
+        device._state.markDestroyed();
     }
 
     /// Returns the live raw handle for explicit FFI integration.
@@ -1326,9 +1585,31 @@ pub const Device = struct {
         return .forDevice(.device, handle, handle);
     }
 
+    /// Returns the monotonic device status shared with child wrappers.
+    pub fn status(device: *const Device) core.DeviceState.Status {
+        return device._state.status();
+    }
+
+    fn dispatchHandle(device: *const Device) Error!DeviceHandle {
+        try device._state.ensureDispatchAllowed();
+        return device._handle orelse error.InactiveObject;
+    }
+
     pub fn waitIdle(device: *const Device) Error!void {
-        const handle = device._handle orelse return error.InactiveObject;
-        try checkSuccess(device.dispatch.device_wait_idle(handle));
+        const handle = try device.dispatchHandle();
+        try core.checkSuccessTracked(@constCast(&device._state), device.dispatch.device_wait_idle(handle));
+    }
+
+    pub fn enabledExtensions(device: *const Device) []const [:0]const u8 {
+        return device.enabled_capabilities.extensions();
+    }
+
+    pub fn supportsExtension(device: *const Device, item: Extension) bool {
+        return device.enabled_capabilities.supportsExtension(item);
+    }
+
+    pub fn supportsFeature(device: *const Device, feature: DeviceFeature) bool {
+        return device.enabled_capabilities.supportsFeature(feature);
     }
 
     pub fn queue(
@@ -1336,7 +1617,7 @@ pub const Device = struct {
         family_index: QueueFamilyIndex,
         queue_index: QueueIndex,
     ) Error!Queue {
-        const device_handle = device._handle orelse return error.InactiveObject;
+        const device_handle = try device.dispatchHandle();
         var handle: raw.VkQueue = null;
         device.dispatch.get_device_queue(
             device_handle,
@@ -1348,6 +1629,7 @@ pub const Device = struct {
         return .{
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = device_handle,
+            ._device_state = @constCast(&device._state),
             .queue_submit = device.dispatch.queue_submit,
             .queue_submit2 = device.dispatch.queue_submit2,
             .queue_wait_idle = device.dispatch.queue_wait_idle,
@@ -1452,10 +1734,122 @@ pub const Device = struct {
             .{
                 .allocate = device.dispatch.allocate_memory,
                 .free = device.dispatch.free_memory,
+                .map = device.dispatch.map_memory,
+                .unmap = device.dispatch.unmap_memory,
+                .map2 = device.dispatch.map_memory2,
+                .unmap2 = device.dispatch.unmap_memory2,
+                .flush = device.dispatch.flush_mapped_memory_ranges,
+                .invalidate = device.dispatch.invalidate_mapped_memory_ranges,
+                .get_commitment = device.dispatch.get_device_memory_commitment,
                 .get_opaque_capture_address = device.dispatch.get_device_memory_opaque_capture_address,
             },
             options,
         );
+    }
+
+    pub fn createSampler(device: *const Device, options: samplers.Options) Error!samplers.Sampler {
+        const device_handle = try device.dispatchHandle();
+        return samplers.create(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_sampler,
+            .destroy = device.dispatch.destroy_sampler,
+        }, options);
+    }
+
+    pub fn createSamplerYcbcrConversion(
+        device: *const Device,
+        options: samplers.YcbcrOptions,
+    ) Error!samplers.YcbcrConversion {
+        const device_handle = try device.dispatchHandle();
+        const create_conversion = device.dispatch.create_sampler_ycbcr_conversion orelse return error.MissingCommand;
+        const destroy_conversion = device.dispatch.destroy_sampler_ycbcr_conversion orelse return error.MissingCommand;
+        return samplers.createYcbcrConversion(device_handle, device.allocation_callbacks, .{
+            .create = create_conversion,
+            .destroy = destroy_conversion,
+        }, options);
+    }
+
+    pub fn createShaderModule(
+        device: *const Device,
+        words: []const u32,
+    ) Error!shaders.Module {
+        const device_handle = try device.dispatchHandle();
+        return shaders.createWords(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_shader_module,
+            .destroy = device.dispatch.destroy_shader_module,
+            .get_identifier = device.dispatch.get_shader_module_identifier_ext,
+        }, words);
+    }
+
+    pub fn createShaderModuleBytes(
+        device: *const Device,
+        bytes: []align(4) const u8,
+    ) Error!shaders.Module {
+        const device_handle = try device.dispatchHandle();
+        return shaders.createBytes(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_shader_module,
+            .destroy = device.dispatch.destroy_shader_module,
+            .get_identifier = device.dispatch.get_shader_module_identifier_ext,
+        }, bytes);
+    }
+
+    pub fn createDescriptorSetLayout(
+        device: *const Device,
+        options: descriptors.LayoutOptions,
+    ) Error!descriptors.SetLayout {
+        const device_handle = try device.dispatchHandle();
+        return descriptors.createLayout(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_descriptor_set_layout,
+            .destroy = device.dispatch.destroy_descriptor_set_layout,
+        }, options);
+    }
+
+    pub fn createDescriptorPool(
+        device: *const Device,
+        options: descriptors.PoolOptions,
+    ) Error!descriptors.Pool {
+        const device_handle = try device.dispatchHandle();
+        return descriptors.createPool(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_descriptor_pool,
+            .destroy = device.dispatch.destroy_descriptor_pool,
+            .reset = device.dispatch.reset_descriptor_pool,
+            .allocate = device.dispatch.allocate_descriptor_sets,
+            .free = device.dispatch.free_descriptor_sets,
+        }, options);
+    }
+
+    pub fn createPipelineLayout(
+        device: *const Device,
+        options: pipelines.LayoutOptions,
+    ) Error!pipelines.Layout {
+        const device_handle = try device.dispatchHandle();
+        return pipelines.createLayout(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_pipeline_layout,
+            .destroy = device.dispatch.destroy_pipeline_layout,
+        }, device._max_push_constant_size, options);
+    }
+
+    pub fn createGraphicsPipeline(
+        device: *const Device,
+        options: pipelines.GraphicsOptions,
+    ) Error!pipelines.CreateResult {
+        const device_handle = try device.dispatchHandle();
+        return pipelines.createGraphics(device_handle, device.allocation_callbacks, .{
+            .create_graphics = device.dispatch.create_graphics_pipelines,
+            .create_compute = device.dispatch.create_compute_pipelines,
+            .destroy = device.dispatch.destroy_pipeline,
+        }, options);
+    }
+
+    pub fn createComputePipeline(
+        device: *const Device,
+        options: pipelines.ComputeOptions,
+    ) Error!pipelines.CreateResult {
+        const device_handle = try device.dispatchHandle();
+        return pipelines.createCompute(device_handle, device.allocation_callbacks, .{
+            .create_graphics = device.dispatch.create_graphics_pipelines,
+            .create_compute = device.dispatch.create_compute_pipelines,
+            .destroy = device.dispatch.destroy_pipeline,
+        }, options);
     }
 
     pub fn createAllocatedBuffer(
@@ -1511,6 +1905,18 @@ pub const Device = struct {
             device.dispatch.destroy_image_view,
             options,
         );
+    }
+
+    pub fn createImage(device: *const Device, options: images.Options) Error!images.Image {
+        const device_handle = try device.dispatchHandle();
+        return images.create(device_handle, device.allocation_callbacks, .{
+            .create_image = device.dispatch.create_image,
+            .destroy_image = device.dispatch.destroy_image,
+            .get_image_memory_requirements = device.dispatch.get_image_memory_requirements,
+            .get_image_memory_requirements2 = device.dispatch.get_image_memory_requirements2,
+            .bind_image_memory = device.dispatch.bind_image_memory,
+            .bind_image_memory2 = device.dispatch.bind_image_memory2,
+        }, options);
     }
 
     pub fn createSemaphore(
@@ -1600,6 +2006,17 @@ pub const Device = struct {
             .reset_fences = device.dispatch.reset_fences,
             .wait_for_fences = device.dispatch.wait_for_fences,
         };
+    }
+
+    pub fn createEvent(device: *const Device) Error!sync.Event {
+        const device_handle = try device.dispatchHandle();
+        return sync.createEvent(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_event,
+            .destroy = device.dispatch.destroy_event,
+            .status = device.dispatch.get_event_status,
+            .set = device.dispatch.set_event,
+            .reset = device.dispatch.reset_event,
+        });
     }
 
     pub fn resetFences(device: *const Device, fences: []const *const Fence) Error!void {
@@ -1720,7 +2137,44 @@ pub const Device = struct {
             .end_command_buffer = device.dispatch.end_command_buffer,
             .reset_command_buffer = device.dispatch.reset_command_buffer,
             .cmd_pipeline_barrier = device.dispatch.cmd_pipeline_barrier,
+            .cmd_pipeline_barrier2 = device.dispatch.cmd_pipeline_barrier2,
+            .cmd_set_event2 = device.dispatch.cmd_set_event2,
+            .cmd_reset_event2 = device.dispatch.cmd_reset_event2,
+            .cmd_wait_events2 = device.dispatch.cmd_wait_events2,
+            .cmd_begin_rendering = device.dispatch.cmd_begin_rendering,
+            .cmd_end_rendering = device.dispatch.cmd_end_rendering,
             .cmd_clear_color_image = device.dispatch.cmd_clear_color_image,
+            .cmd_clear_depth_stencil_image = device.dispatch.cmd_clear_depth_stencil_image,
+            .cmd_fill_buffer = device.dispatch.cmd_fill_buffer,
+            .cmd_update_buffer = device.dispatch.cmd_update_buffer,
+            .cmd_copy_buffer = device.dispatch.cmd_copy_buffer,
+            .cmd_copy_buffer2 = device.dispatch.cmd_copy_buffer2,
+            .cmd_copy_buffer_to_image = device.dispatch.cmd_copy_buffer_to_image,
+            .cmd_copy_image_to_buffer = device.dispatch.cmd_copy_image_to_buffer,
+            .cmd_copy_image = device.dispatch.cmd_copy_image,
+            .cmd_blit_image = device.dispatch.cmd_blit_image,
+            .cmd_resolve_image = device.dispatch.cmd_resolve_image,
+            .cmd_bind_pipeline = device.dispatch.cmd_bind_pipeline,
+            .cmd_bind_descriptor_sets = device.dispatch.cmd_bind_descriptor_sets,
+            .cmd_bind_vertex_buffers = device.dispatch.cmd_bind_vertex_buffers,
+            .cmd_bind_index_buffer = device.dispatch.cmd_bind_index_buffer,
+            .cmd_set_viewport = device.dispatch.cmd_set_viewport,
+            .cmd_set_scissor = device.dispatch.cmd_set_scissor,
+            .cmd_set_line_width = device.dispatch.cmd_set_line_width,
+            .cmd_set_depth_bias = device.dispatch.cmd_set_depth_bias,
+            .cmd_set_blend_constants = device.dispatch.cmd_set_blend_constants,
+            .cmd_set_depth_bounds = device.dispatch.cmd_set_depth_bounds,
+            .cmd_push_constants = device.dispatch.cmd_push_constants,
+            .cmd_draw = device.dispatch.cmd_draw,
+            .cmd_draw_indexed = device.dispatch.cmd_draw_indexed,
+            .cmd_draw_indirect = device.dispatch.cmd_draw_indirect,
+            .cmd_draw_indexed_indirect = device.dispatch.cmd_draw_indexed_indirect,
+            .cmd_draw_indirect_count = device.dispatch.cmd_draw_indirect_count,
+            .cmd_draw_indexed_indirect_count = device.dispatch.cmd_draw_indexed_indirect_count,
+            .cmd_dispatch = device.dispatch.cmd_dispatch,
+            .cmd_dispatch_indirect = device.dispatch.cmd_dispatch_indirect,
+            .cmd_dispatch_base = device.dispatch.cmd_dispatch_base,
+            .cmd_execute_commands = device.dispatch.cmd_execute_commands,
             .cmd_begin_debug_utils_label_ext = device.dispatch.cmd_begin_debug_utils_label_ext,
             .cmd_end_debug_utils_label_ext = device.dispatch.cmd_end_debug_utils_label_ext,
             .cmd_insert_debug_utils_label_ext = device.dispatch.cmd_insert_debug_utils_label_ext,
@@ -1883,6 +2337,9 @@ const InstanceDispatch = struct {
     get_physical_device_memory_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceMemoryProperties,
     ),
+    get_physical_device_memory_properties2: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceMemoryProperties2,
+    ),
     get_physical_device_queue_family_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
     ),
@@ -1981,6 +2438,12 @@ const InstanceDispatch = struct {
                 raw.PFN_vkGetPhysicalDeviceMemoryProperties,
                 "vkGetPhysicalDeviceMemoryProperties",
             ),
+            .get_physical_device_memory_properties2 = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_memory_properties2,
+                .instance,
+            ),
             .get_physical_device_queue_family_properties = try loadInstanceRequired(
                 get_instance_proc_addr,
                 handle,
@@ -2037,9 +2500,35 @@ const DeviceDispatch = struct {
     device_wait_idle: CommandFunction(raw.PFN_vkDeviceWaitIdle),
     allocate_memory: CommandFunction(raw.PFN_vkAllocateMemory),
     free_memory: CommandFunction(raw.PFN_vkFreeMemory),
+    map_memory: CommandFunction(raw.PFN_vkMapMemory),
+    unmap_memory: CommandFunction(raw.PFN_vkUnmapMemory),
+    map_memory2: ?CommandFunction(raw.PFN_vkMapMemory2),
+    unmap_memory2: ?CommandFunction(raw.PFN_vkUnmapMemory2),
+    flush_mapped_memory_ranges: CommandFunction(raw.PFN_vkFlushMappedMemoryRanges),
+    invalidate_mapped_memory_ranges: CommandFunction(raw.PFN_vkInvalidateMappedMemoryRanges),
+    get_device_memory_commitment: CommandFunction(raw.PFN_vkGetDeviceMemoryCommitment),
     get_device_memory_opaque_capture_address: ?CommandFunction(
         raw.PFN_vkGetDeviceMemoryOpaqueCaptureAddress,
     ),
+    create_sampler: CommandFunction(raw.PFN_vkCreateSampler),
+    destroy_sampler: CommandFunction(raw.PFN_vkDestroySampler),
+    create_sampler_ycbcr_conversion: ?CommandFunction(raw.PFN_vkCreateSamplerYcbcrConversion),
+    destroy_sampler_ycbcr_conversion: ?CommandFunction(raw.PFN_vkDestroySamplerYcbcrConversion),
+    create_shader_module: CommandFunction(raw.PFN_vkCreateShaderModule),
+    destroy_shader_module: CommandFunction(raw.PFN_vkDestroyShaderModule),
+    get_shader_module_identifier_ext: ?CommandFunction(raw.PFN_vkGetShaderModuleIdentifierEXT),
+    create_descriptor_set_layout: CommandFunction(raw.PFN_vkCreateDescriptorSetLayout),
+    destroy_descriptor_set_layout: CommandFunction(raw.PFN_vkDestroyDescriptorSetLayout),
+    create_descriptor_pool: CommandFunction(raw.PFN_vkCreateDescriptorPool),
+    destroy_descriptor_pool: CommandFunction(raw.PFN_vkDestroyDescriptorPool),
+    reset_descriptor_pool: CommandFunction(raw.PFN_vkResetDescriptorPool),
+    allocate_descriptor_sets: CommandFunction(raw.PFN_vkAllocateDescriptorSets),
+    free_descriptor_sets: CommandFunction(raw.PFN_vkFreeDescriptorSets),
+    create_pipeline_layout: CommandFunction(raw.PFN_vkCreatePipelineLayout),
+    destroy_pipeline_layout: CommandFunction(raw.PFN_vkDestroyPipelineLayout),
+    create_graphics_pipelines: CommandFunction(raw.PFN_vkCreateGraphicsPipelines),
+    create_compute_pipelines: CommandFunction(raw.PFN_vkCreateComputePipelines),
+    destroy_pipeline: CommandFunction(raw.PFN_vkDestroyPipeline),
     create_buffer: CommandFunction(raw.PFN_vkCreateBuffer),
     destroy_buffer: CommandFunction(raw.PFN_vkDestroyBuffer),
     get_buffer_memory_requirements: CommandFunction(raw.PFN_vkGetBufferMemoryRequirements),
@@ -2050,6 +2539,12 @@ const DeviceDispatch = struct {
     destroy_buffer_view: CommandFunction(raw.PFN_vkDestroyBufferView),
     bind_buffer_memory: CommandFunction(raw.PFN_vkBindBufferMemory),
     bind_buffer_memory2: ?CommandFunction(raw.PFN_vkBindBufferMemory2),
+    create_image: CommandFunction(raw.PFN_vkCreateImage),
+    destroy_image: CommandFunction(raw.PFN_vkDestroyImage),
+    get_image_memory_requirements: CommandFunction(raw.PFN_vkGetImageMemoryRequirements),
+    get_image_memory_requirements2: ?CommandFunction(raw.PFN_vkGetImageMemoryRequirements2),
+    bind_image_memory: CommandFunction(raw.PFN_vkBindImageMemory),
+    bind_image_memory2: ?CommandFunction(raw.PFN_vkBindImageMemory2),
     create_image_view: CommandFunction(raw.PFN_vkCreateImageView),
     destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
     create_semaphore: CommandFunction(raw.PFN_vkCreateSemaphore),
@@ -2062,6 +2557,11 @@ const DeviceDispatch = struct {
     get_fence_status: CommandFunction(raw.PFN_vkGetFenceStatus),
     reset_fences: CommandFunction(raw.PFN_vkResetFences),
     wait_for_fences: CommandFunction(raw.PFN_vkWaitForFences),
+    create_event: CommandFunction(raw.PFN_vkCreateEvent),
+    destroy_event: CommandFunction(raw.PFN_vkDestroyEvent),
+    get_event_status: CommandFunction(raw.PFN_vkGetEventStatus),
+    set_event: CommandFunction(raw.PFN_vkSetEvent),
+    reset_event: CommandFunction(raw.PFN_vkResetEvent),
     create_command_pool: CommandFunction(raw.PFN_vkCreateCommandPool),
     destroy_command_pool: CommandFunction(raw.PFN_vkDestroyCommandPool),
     allocate_command_buffers: CommandFunction(raw.PFN_vkAllocateCommandBuffers),
@@ -2071,7 +2571,44 @@ const DeviceDispatch = struct {
     end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
     cmd_pipeline_barrier: CommandFunction(raw.PFN_vkCmdPipelineBarrier),
+    cmd_pipeline_barrier2: ?CommandFunction(raw.PFN_vkCmdPipelineBarrier2),
+    cmd_set_event2: ?CommandFunction(raw.PFN_vkCmdSetEvent2),
+    cmd_reset_event2: ?CommandFunction(raw.PFN_vkCmdResetEvent2),
+    cmd_wait_events2: ?CommandFunction(raw.PFN_vkCmdWaitEvents2),
+    cmd_begin_rendering: ?CommandFunction(raw.PFN_vkCmdBeginRendering),
+    cmd_end_rendering: ?CommandFunction(raw.PFN_vkCmdEndRendering),
     cmd_clear_color_image: CommandFunction(raw.PFN_vkCmdClearColorImage),
+    cmd_clear_depth_stencil_image: CommandFunction(raw.PFN_vkCmdClearDepthStencilImage),
+    cmd_fill_buffer: CommandFunction(raw.PFN_vkCmdFillBuffer),
+    cmd_update_buffer: CommandFunction(raw.PFN_vkCmdUpdateBuffer),
+    cmd_copy_buffer: CommandFunction(raw.PFN_vkCmdCopyBuffer),
+    cmd_copy_buffer2: ?CommandFunction(raw.PFN_vkCmdCopyBuffer2),
+    cmd_copy_buffer_to_image: CommandFunction(raw.PFN_vkCmdCopyBufferToImage),
+    cmd_copy_image_to_buffer: CommandFunction(raw.PFN_vkCmdCopyImageToBuffer),
+    cmd_copy_image: CommandFunction(raw.PFN_vkCmdCopyImage),
+    cmd_blit_image: CommandFunction(raw.PFN_vkCmdBlitImage),
+    cmd_resolve_image: CommandFunction(raw.PFN_vkCmdResolveImage),
+    cmd_bind_pipeline: CommandFunction(raw.PFN_vkCmdBindPipeline),
+    cmd_bind_descriptor_sets: CommandFunction(raw.PFN_vkCmdBindDescriptorSets),
+    cmd_bind_vertex_buffers: CommandFunction(raw.PFN_vkCmdBindVertexBuffers),
+    cmd_bind_index_buffer: CommandFunction(raw.PFN_vkCmdBindIndexBuffer),
+    cmd_set_viewport: CommandFunction(raw.PFN_vkCmdSetViewport),
+    cmd_set_scissor: CommandFunction(raw.PFN_vkCmdSetScissor),
+    cmd_set_line_width: CommandFunction(raw.PFN_vkCmdSetLineWidth),
+    cmd_set_depth_bias: CommandFunction(raw.PFN_vkCmdSetDepthBias),
+    cmd_set_blend_constants: CommandFunction(raw.PFN_vkCmdSetBlendConstants),
+    cmd_set_depth_bounds: CommandFunction(raw.PFN_vkCmdSetDepthBounds),
+    cmd_push_constants: CommandFunction(raw.PFN_vkCmdPushConstants),
+    cmd_draw: CommandFunction(raw.PFN_vkCmdDraw),
+    cmd_draw_indexed: CommandFunction(raw.PFN_vkCmdDrawIndexed),
+    cmd_draw_indirect: CommandFunction(raw.PFN_vkCmdDrawIndirect),
+    cmd_draw_indexed_indirect: CommandFunction(raw.PFN_vkCmdDrawIndexedIndirect),
+    cmd_draw_indirect_count: ?CommandFunction(raw.PFN_vkCmdDrawIndirectCount),
+    cmd_draw_indexed_indirect_count: ?CommandFunction(raw.PFN_vkCmdDrawIndexedIndirectCount),
+    cmd_dispatch: CommandFunction(raw.PFN_vkCmdDispatch),
+    cmd_dispatch_indirect: CommandFunction(raw.PFN_vkCmdDispatchIndirect),
+    cmd_dispatch_base: ?CommandFunction(raw.PFN_vkCmdDispatchBase),
+    cmd_execute_commands: CommandFunction(raw.PFN_vkCmdExecuteCommands),
     create_swapchain_khr: ?CommandFunction(raw.PFN_vkCreateSwapchainKHR),
     destroy_swapchain_khr: ?CommandFunction(raw.PFN_vkDestroySwapchainKHR),
     get_swapchain_images_khr: ?CommandFunction(raw.PFN_vkGetSwapchainImagesKHR),
@@ -2138,6 +2675,157 @@ const DeviceDispatch = struct {
                 raw.PFN_vkFreeMemory,
                 "vkFreeMemory",
             ),
+            .map_memory = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkMapMemory,
+                "vkMapMemory",
+            ),
+            .unmap_memory = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkUnmapMemory,
+                "vkUnmapMemory",
+            ),
+            .map_memory2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.map_memory2,
+            ),
+            .unmap_memory2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.unmap_memory2,
+            ),
+            .flush_mapped_memory_ranges = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkFlushMappedMemoryRanges,
+                "vkFlushMappedMemoryRanges",
+            ),
+            .invalidate_mapped_memory_ranges = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkInvalidateMappedMemoryRanges,
+                "vkInvalidateMappedMemoryRanges",
+            ),
+            .get_device_memory_commitment = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetDeviceMemoryCommitment,
+                "vkGetDeviceMemoryCommitment",
+            ),
+            .create_sampler = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateSampler,
+                "vkCreateSampler",
+            ),
+            .destroy_sampler = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroySampler,
+                "vkDestroySampler",
+            ),
+            .create_sampler_ycbcr_conversion = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.create_sampler_ycbcr_conversion,
+            ),
+            .destroy_sampler_ycbcr_conversion = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.destroy_sampler_ycbcr_conversion,
+            ),
+            .create_shader_module = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateShaderModule,
+                "vkCreateShaderModule",
+            ),
+            .destroy_shader_module = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyShaderModule,
+                "vkDestroyShaderModule",
+            ),
+            .get_shader_module_identifier_ext = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.get_shader_module_identifier_ext,
+            ),
+            .create_descriptor_set_layout = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout",
+            ),
+            .destroy_descriptor_set_layout = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyDescriptorSetLayout,
+                "vkDestroyDescriptorSetLayout",
+            ),
+            .create_descriptor_pool = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateDescriptorPool,
+                "vkCreateDescriptorPool",
+            ),
+            .destroy_descriptor_pool = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyDescriptorPool,
+                "vkDestroyDescriptorPool",
+            ),
+            .reset_descriptor_pool = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkResetDescriptorPool,
+                "vkResetDescriptorPool",
+            ),
+            .allocate_descriptor_sets = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkAllocateDescriptorSets,
+                "vkAllocateDescriptorSets",
+            ),
+            .free_descriptor_sets = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkFreeDescriptorSets,
+                "vkFreeDescriptorSets",
+            ),
+            .create_pipeline_layout = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreatePipelineLayout,
+                "vkCreatePipelineLayout",
+            ),
+            .destroy_pipeline_layout = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyPipelineLayout,
+                "vkDestroyPipelineLayout",
+            ),
+            .create_graphics_pipelines = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateGraphicsPipelines,
+                "vkCreateGraphicsPipelines",
+            ),
+            .create_compute_pipelines = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateComputePipelines,
+                "vkCreateComputePipelines",
+            ),
+            .destroy_pipeline = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyPipeline,
+                "vkDestroyPipeline",
+            ),
             .get_device_memory_opaque_capture_address = loadDeviceDescriptor(
                 get_device_proc_addr,
                 handle,
@@ -2198,6 +2886,40 @@ const DeviceDispatch = struct {
                 get_device_proc_addr,
                 handle,
                 command.bind_buffer_memory2,
+            ),
+            .create_image = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateImage,
+                "vkCreateImage",
+            ),
+            .destroy_image = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyImage,
+                "vkDestroyImage",
+            ),
+            .get_image_memory_requirements = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetImageMemoryRequirements,
+                "vkGetImageMemoryRequirements",
+            ),
+            .get_image_memory_requirements2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.get_image_memory_requirements2,
+            ),
+            .bind_image_memory = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkBindImageMemory,
+                "vkBindImageMemory",
+            ),
+            .bind_image_memory2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.bind_image_memory2,
             ),
             .create_image_view = try loadDeviceRequired(
                 get_device_proc_addr,
@@ -2268,6 +2990,36 @@ const DeviceDispatch = struct {
                 raw.PFN_vkWaitForFences,
                 "vkWaitForFences",
             ),
+            .create_event = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreateEvent,
+                "vkCreateEvent",
+            ),
+            .destroy_event = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyEvent,
+                "vkDestroyEvent",
+            ),
+            .get_event_status = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetEventStatus,
+                "vkGetEventStatus",
+            ),
+            .set_event = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkSetEvent,
+                "vkSetEvent",
+            ),
+            .reset_event = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkResetEvent,
+                "vkResetEvent",
+            ),
             .create_command_pool = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
@@ -2322,12 +3074,122 @@ const DeviceDispatch = struct {
                 raw.PFN_vkCmdPipelineBarrier,
                 "vkCmdPipelineBarrier",
             ),
+            .cmd_pipeline_barrier2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.cmd_pipeline_barrier2,
+            ),
+            .cmd_set_event2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.cmd_set_event2,
+            ),
+            .cmd_reset_event2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.cmd_reset_event2,
+            ),
+            .cmd_wait_events2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.cmd_wait_events2,
+            ),
+            .cmd_begin_rendering = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.cmd_begin_rendering,
+            ),
+            .cmd_end_rendering = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.cmd_end_rendering,
+            ),
             .cmd_clear_color_image = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
                 raw.PFN_vkCmdClearColorImage,
                 "vkCmdClearColorImage",
             ),
+            .cmd_clear_depth_stencil_image = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdClearDepthStencilImage,
+                "vkCmdClearDepthStencilImage",
+            ),
+            .cmd_fill_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdFillBuffer,
+                "vkCmdFillBuffer",
+            ),
+            .cmd_update_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdUpdateBuffer,
+                "vkCmdUpdateBuffer",
+            ),
+            .cmd_copy_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdCopyBuffer,
+                "vkCmdCopyBuffer",
+            ),
+            .cmd_copy_buffer2 = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.cmd_copy_buffer2,
+            ),
+            .cmd_copy_buffer_to_image = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdCopyBufferToImage,
+                "vkCmdCopyBufferToImage",
+            ),
+            .cmd_copy_image_to_buffer = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdCopyImageToBuffer,
+                "vkCmdCopyImageToBuffer",
+            ),
+            .cmd_copy_image = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdCopyImage,
+                "vkCmdCopyImage",
+            ),
+            .cmd_blit_image = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdBlitImage,
+                "vkCmdBlitImage",
+            ),
+            .cmd_resolve_image = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdResolveImage,
+                "vkCmdResolveImage",
+            ),
+            .cmd_bind_pipeline = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindPipeline, "vkCmdBindPipeline"),
+            .cmd_bind_descriptor_sets = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindDescriptorSets, "vkCmdBindDescriptorSets"),
+            .cmd_bind_vertex_buffers = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindVertexBuffers, "vkCmdBindVertexBuffers"),
+            .cmd_bind_index_buffer = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindIndexBuffer, "vkCmdBindIndexBuffer"),
+            .cmd_set_viewport = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetViewport, "vkCmdSetViewport"),
+            .cmd_set_scissor = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetScissor, "vkCmdSetScissor"),
+            .cmd_set_line_width = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetLineWidth, "vkCmdSetLineWidth"),
+            .cmd_set_depth_bias = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetDepthBias, "vkCmdSetDepthBias"),
+            .cmd_set_blend_constants = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetBlendConstants, "vkCmdSetBlendConstants"),
+            .cmd_set_depth_bounds = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetDepthBounds, "vkCmdSetDepthBounds"),
+            .cmd_push_constants = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdPushConstants, "vkCmdPushConstants"),
+            .cmd_draw = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDraw, "vkCmdDraw"),
+            .cmd_draw_indexed = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDrawIndexed, "vkCmdDrawIndexed"),
+            .cmd_draw_indirect = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDrawIndirect, "vkCmdDrawIndirect"),
+            .cmd_draw_indexed_indirect = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDrawIndexedIndirect, "vkCmdDrawIndexedIndirect"),
+            .cmd_draw_indirect_count = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_draw_indirect_count),
+            .cmd_draw_indexed_indirect_count = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_draw_indexed_indirect_count),
+            .cmd_dispatch = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDispatch, "vkCmdDispatch"),
+            .cmd_dispatch_indirect = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdDispatchIndirect, "vkCmdDispatchIndirect"),
+            .cmd_dispatch_base = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_dispatch_base),
+            .cmd_execute_commands = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdExecuteCommands, "vkCmdExecuteCommands"),
             .create_swapchain_khr = loadDevice(
                 get_device_proc_addr,
                 handle,
@@ -2873,6 +3735,13 @@ var test_buffer_view_range: u64 = 0;
 var test_bound_memory_offset: u64 = 0;
 var test_allocated_memory_size: u64 = 0;
 var test_allocated_memory_type: u32 = 0;
+var test_map_result: raw.VkResult = raw.VK_SUCCESS;
+var test_unmap_result: raw.VkResult = raw.VK_SUCCESS;
+var test_map_count: usize = 0;
+var test_unmap_count: usize = 0;
+var test_cache_offset: u64 = 0;
+var test_cache_size: u64 = 0;
+var test_mapped_storage: [256]u8 = undefined;
 var test_destroy_semaphore_count: usize = 0;
 var test_destroy_fence_count: usize = 0;
 var test_destroy_command_pool_count: usize = 0;
@@ -2886,6 +3755,14 @@ var test_end_command_buffer_count: usize = 0;
 var test_reset_command_buffer_count: usize = 0;
 var test_pipeline_barrier_count: usize = 0;
 var test_clear_color_count: usize = 0;
+var test_begin_rendering_count: usize = 0;
+var test_end_rendering_count: usize = 0;
+var test_rendering_flags: raw.VkRenderingFlags = 0;
+var test_rendering_color_count: u32 = 0;
+var test_destroy_pipeline_layout_count: usize = 0;
+var test_push_constant_count: usize = 0;
+var test_push_constant_offset: u32 = 0;
+var test_push_constant_size: u32 = 0;
 var test_end_command_label_count: usize = 0;
 var test_acquire_result: raw.VkResult = raw.VK_SUCCESS;
 var test_acquire_image_index: u32 = 0;
@@ -3171,6 +4048,53 @@ fn testAllocateMemory(
     return test_resource_result;
 }
 
+fn testMapMemory(
+    _: raw.VkDevice,
+    _: raw.VkDeviceMemory,
+    offset: raw.VkDeviceSize,
+    _: raw.VkDeviceSize,
+    _: raw.VkMemoryMapFlags,
+    output: [*c]?*anyopaque,
+) callconv(.c) raw.VkResult {
+    test_map_count += 1;
+    if (test_map_result == raw.VK_SUCCESS) output.* = @ptrCast(&test_mapped_storage[offset]);
+    return test_map_result;
+}
+
+fn testUnmapMemory(_: raw.VkDevice, _: raw.VkDeviceMemory) callconv(.c) void {
+    test_unmap_count += 1;
+}
+
+fn testMapMemory2(
+    _: raw.VkDevice,
+    info: [*c]const raw.VkMemoryMapInfo,
+    output: [*c]?*anyopaque,
+) callconv(.c) raw.VkResult {
+    test_map_count += 1;
+    if (test_map_result == raw.VK_SUCCESS) output.* = @ptrCast(&test_mapped_storage[info.*.offset]);
+    return test_map_result;
+}
+
+fn testUnmapMemory2(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkMemoryUnmapInfo,
+) callconv(.c) raw.VkResult {
+    test_unmap_count += 1;
+    return test_unmap_result;
+}
+
+fn testCacheMemory(
+    _: raw.VkDevice,
+    count: u32,
+    ranges: [*c]const raw.VkMappedMemoryRange,
+) callconv(.c) raw.VkResult {
+    if (count != 0) {
+        test_cache_offset = ranges[0].offset;
+        test_cache_size = ranges[0].size;
+    }
+    return test_map_result;
+}
+
 fn testFreeMemory(
     _: raw.VkDevice,
     _: raw.VkDeviceMemory,
@@ -3400,6 +4324,50 @@ fn testCmdClearColorImage(
     test_clear_color_count += 1;
 }
 
+fn testCmdBeginRendering(
+    _: raw.VkCommandBuffer,
+    info: [*c]const raw.VkRenderingInfo,
+) callconv(.c) void {
+    test_begin_rendering_count += 1;
+    test_rendering_flags = info.*.flags;
+    test_rendering_color_count = info.*.colorAttachmentCount;
+}
+
+fn testCmdEndRendering(_: raw.VkCommandBuffer) callconv(.c) void {
+    test_end_rendering_count += 1;
+}
+
+fn testCreatePipelineLayout(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkPipelineLayoutCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    output: [*c]raw.VkPipelineLayout,
+) callconv(.c) raw.VkResult {
+    output.* = testHandle(raw.VkPipelineLayout, 0x5900);
+    return test_resource_result;
+}
+
+fn testDestroyPipelineLayout(
+    _: raw.VkDevice,
+    _: raw.VkPipelineLayout,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {
+    test_destroy_pipeline_layout_count += 1;
+}
+
+fn testCmdPushConstants(
+    _: raw.VkCommandBuffer,
+    _: raw.VkPipelineLayout,
+    _: raw.VkShaderStageFlags,
+    offset: u32,
+    size: u32,
+    _: ?*const anyopaque,
+) callconv(.c) void {
+    test_push_constant_count += 1;
+    test_push_constant_offset = offset;
+    test_push_constant_size = size;
+}
+
 fn testCmdEndLabel(_: raw.VkCommandBuffer) callconv(.c) void {
     test_end_command_label_count += 1;
 }
@@ -3620,6 +4588,7 @@ fn testInstance() Instance {
             .get_physical_device_features = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures),
             .get_physical_device_features2 = testFunction(raw.PFN_vkGetPhysicalDeviceFeatures2),
             .get_physical_device_memory_properties = testGetPhysicalDeviceMemoryProperties,
+            .get_physical_device_memory_properties2 = null,
             .get_physical_device_queue_family_properties = testFunction(
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
             ),
@@ -3656,7 +4625,33 @@ fn testDevice() Device {
             .device_wait_idle = testFunction(raw.PFN_vkDeviceWaitIdle),
             .allocate_memory = testAllocateMemory,
             .free_memory = testFreeMemory,
+            .map_memory = testFunction(raw.PFN_vkMapMemory),
+            .unmap_memory = testFunction(raw.PFN_vkUnmapMemory),
+            .map_memory2 = null,
+            .unmap_memory2 = null,
+            .flush_mapped_memory_ranges = testFunction(raw.PFN_vkFlushMappedMemoryRanges),
+            .invalidate_mapped_memory_ranges = testFunction(raw.PFN_vkInvalidateMappedMemoryRanges),
+            .get_device_memory_commitment = testFunction(raw.PFN_vkGetDeviceMemoryCommitment),
             .get_device_memory_opaque_capture_address = null,
+            .create_sampler = testFunction(raw.PFN_vkCreateSampler),
+            .destroy_sampler = testFunction(raw.PFN_vkDestroySampler),
+            .create_sampler_ycbcr_conversion = null,
+            .destroy_sampler_ycbcr_conversion = null,
+            .create_shader_module = testFunction(raw.PFN_vkCreateShaderModule),
+            .destroy_shader_module = testFunction(raw.PFN_vkDestroyShaderModule),
+            .get_shader_module_identifier_ext = null,
+            .create_descriptor_set_layout = testFunction(raw.PFN_vkCreateDescriptorSetLayout),
+            .destroy_descriptor_set_layout = testFunction(raw.PFN_vkDestroyDescriptorSetLayout),
+            .create_descriptor_pool = testFunction(raw.PFN_vkCreateDescriptorPool),
+            .destroy_descriptor_pool = testFunction(raw.PFN_vkDestroyDescriptorPool),
+            .reset_descriptor_pool = testFunction(raw.PFN_vkResetDescriptorPool),
+            .allocate_descriptor_sets = testFunction(raw.PFN_vkAllocateDescriptorSets),
+            .free_descriptor_sets = testFunction(raw.PFN_vkFreeDescriptorSets),
+            .create_pipeline_layout = testFunction(raw.PFN_vkCreatePipelineLayout),
+            .destroy_pipeline_layout = testFunction(raw.PFN_vkDestroyPipelineLayout),
+            .create_graphics_pipelines = testFunction(raw.PFN_vkCreateGraphicsPipelines),
+            .create_compute_pipelines = testFunction(raw.PFN_vkCreateComputePipelines),
+            .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
             .create_buffer = testCreateBuffer,
             .destroy_buffer = testDestroyBuffer,
             .get_buffer_memory_requirements = testGetBufferMemoryRequirements,
@@ -3667,6 +4662,12 @@ fn testDevice() Device {
             .destroy_buffer_view = testDestroyBufferView,
             .bind_buffer_memory = testBindBufferMemory,
             .bind_buffer_memory2 = null,
+            .create_image = testFunction(raw.PFN_vkCreateImage),
+            .destroy_image = testFunction(raw.PFN_vkDestroyImage),
+            .get_image_memory_requirements = testFunction(raw.PFN_vkGetImageMemoryRequirements),
+            .get_image_memory_requirements2 = null,
+            .bind_image_memory = testFunction(raw.PFN_vkBindImageMemory),
+            .bind_image_memory2 = null,
             .create_image_view = testCreateImageView,
             .destroy_image_view = testDestroyImageView,
             .create_semaphore = testCreateSemaphore,
@@ -3679,6 +4680,11 @@ fn testDevice() Device {
             .get_fence_status = testGetFenceStatus,
             .reset_fences = testResetFences,
             .wait_for_fences = testWaitForFences,
+            .create_event = testFunction(raw.PFN_vkCreateEvent),
+            .destroy_event = testFunction(raw.PFN_vkDestroyEvent),
+            .get_event_status = testFunction(raw.PFN_vkGetEventStatus),
+            .set_event = testFunction(raw.PFN_vkSetEvent),
+            .reset_event = testFunction(raw.PFN_vkResetEvent),
             .create_command_pool = testCreateCommandPool,
             .destroy_command_pool = testDestroyCommandPool,
             .allocate_command_buffers = testAllocateCommandBuffers,
@@ -3688,7 +4694,44 @@ fn testDevice() Device {
             .end_command_buffer = testEndCommandBuffer,
             .reset_command_buffer = testResetCommandBuffer,
             .cmd_pipeline_barrier = testCmdPipelineBarrier,
+            .cmd_pipeline_barrier2 = null,
+            .cmd_set_event2 = null,
+            .cmd_reset_event2 = null,
+            .cmd_wait_events2 = null,
+            .cmd_begin_rendering = null,
+            .cmd_end_rendering = null,
             .cmd_clear_color_image = testCmdClearColorImage,
+            .cmd_clear_depth_stencil_image = testFunction(raw.PFN_vkCmdClearDepthStencilImage),
+            .cmd_fill_buffer = testFunction(raw.PFN_vkCmdFillBuffer),
+            .cmd_update_buffer = testFunction(raw.PFN_vkCmdUpdateBuffer),
+            .cmd_copy_buffer = testFunction(raw.PFN_vkCmdCopyBuffer),
+            .cmd_copy_buffer2 = null,
+            .cmd_copy_buffer_to_image = testFunction(raw.PFN_vkCmdCopyBufferToImage),
+            .cmd_copy_image_to_buffer = testFunction(raw.PFN_vkCmdCopyImageToBuffer),
+            .cmd_copy_image = testFunction(raw.PFN_vkCmdCopyImage),
+            .cmd_blit_image = testFunction(raw.PFN_vkCmdBlitImage),
+            .cmd_resolve_image = testFunction(raw.PFN_vkCmdResolveImage),
+            .cmd_bind_pipeline = testFunction(raw.PFN_vkCmdBindPipeline),
+            .cmd_bind_descriptor_sets = testFunction(raw.PFN_vkCmdBindDescriptorSets),
+            .cmd_bind_vertex_buffers = testFunction(raw.PFN_vkCmdBindVertexBuffers),
+            .cmd_bind_index_buffer = testFunction(raw.PFN_vkCmdBindIndexBuffer),
+            .cmd_set_viewport = testFunction(raw.PFN_vkCmdSetViewport),
+            .cmd_set_scissor = testFunction(raw.PFN_vkCmdSetScissor),
+            .cmd_set_line_width = testFunction(raw.PFN_vkCmdSetLineWidth),
+            .cmd_set_depth_bias = testFunction(raw.PFN_vkCmdSetDepthBias),
+            .cmd_set_blend_constants = testFunction(raw.PFN_vkCmdSetBlendConstants),
+            .cmd_set_depth_bounds = testFunction(raw.PFN_vkCmdSetDepthBounds),
+            .cmd_push_constants = testFunction(raw.PFN_vkCmdPushConstants),
+            .cmd_draw = testFunction(raw.PFN_vkCmdDraw),
+            .cmd_draw_indexed = testFunction(raw.PFN_vkCmdDrawIndexed),
+            .cmd_draw_indirect = testFunction(raw.PFN_vkCmdDrawIndirect),
+            .cmd_draw_indexed_indirect = testFunction(raw.PFN_vkCmdDrawIndexedIndirect),
+            .cmd_draw_indirect_count = null,
+            .cmd_draw_indexed_indirect_count = null,
+            .cmd_dispatch = testFunction(raw.PFN_vkCmdDispatch),
+            .cmd_dispatch_indirect = testFunction(raw.PFN_vkCmdDispatchIndirect),
+            .cmd_dispatch_base = null,
+            .cmd_execute_commands = testFunction(raw.PFN_vkCmdExecuteCommands),
             .create_swapchain_khr = null,
             .destroy_swapchain_khr = null,
             .get_swapchain_images_khr = null,
@@ -3898,7 +4941,7 @@ test "owned frame resources clean up success and provisional failure exactly onc
         .index = .fromRaw(0),
     };
     var image_view = try device.createImageView(.{
-        .image = &image,
+        .image = .{ .swapchain = &image },
         .view_type = ._2d,
         .format = .b8g8r8a8_srgb,
         .subresource_range = .{ .aspect_mask = .init(&.{.color}) },
@@ -3922,7 +4965,7 @@ test "owned frame resources clean up success and provisional failure exactly onc
 
     test_resource_result = raw.VK_ERROR_OUT_OF_HOST_MEMORY;
     try std.testing.expectError(error.OutOfHostMemory, device.createImageView(.{
-        .image = &image,
+        .image = .{ .swapchain = &image },
         .view_type = ._2d,
         .format = .b8g8r8a8_srgb,
         .subresource_range = .{ .aspect_mask = .init(&.{.color}) },
@@ -3976,7 +5019,7 @@ test "typed command recording and fence results avoid raw Vulkan at call sites" 
         .subresource_range = color_range,
     });
     try command_buffer.clearColorImage(.{
-        .image = &image,
+        .image = .{ .swapchain = &image },
         .layout = .transfer_dst_optimal,
         .color = .{ .float = .{ 0.1, 0.2, 0.3, 1.0 } },
         .subresource_range = color_range,
@@ -4480,6 +5523,97 @@ test "secondary command buffers use typed inheritance and free idempotently" {
     );
 }
 
+test "dynamic rendering scopes record typed attachments and end once" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_begin_rendering_count = 0;
+    test_end_rendering_count = 0;
+    test_rendering_flags = 0;
+    test_rendering_color_count = 0;
+
+    var device = testDevice();
+    defer device.deinit();
+    device.dispatch.cmd_begin_rendering = testCmdBeginRendering;
+    device.dispatch.cmd_end_rendering = testCmdEndRendering;
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
+    try command_buffer.begin(.{});
+
+    const view: ImageView = .{
+        ._handle = testHandle(raw.VkImageView, 0x5100),
+        ._device_handle = device._handle.?,
+        .allocation_callbacks = null,
+        .destroy_image_view = testDestroyImageView,
+    };
+    var scope = try command_buffer.beginRendering(.{
+        .flags = .{ .suspending = true },
+        .render_area = .{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = .{ .width = 64, .height = 64 },
+        },
+        .color_attachments = &.{.{
+            .view = &view,
+            .layout = .color_attachment_optimal,
+            .load = .clear,
+            .clear = .{ .color = .{ .float = .{ 0, 0, 0, 1 } } },
+        }},
+    });
+    try std.testing.expectError(error.InvalidOptions, command_buffer.end());
+    try scope.end();
+    try scope.end();
+    try command_buffer.end();
+
+    try std.testing.expectEqual(@as(usize, 1), test_begin_rendering_count);
+    try std.testing.expectEqual(@as(usize, 1), test_end_rendering_count);
+    try std.testing.expectEqual(@as(u32, 1), test_rendering_color_count);
+    try std.testing.expect((test_rendering_flags & raw.VK_RENDERING_SUSPENDING_BIT) != 0);
+}
+
+test "pipeline layouts validate and record typed push constants" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_destroy_pipeline_layout_count = 0;
+    test_push_constant_count = 0;
+
+    var device = testDevice();
+    defer device.deinit();
+    device.dispatch.create_pipeline_layout = testCreatePipelineLayout;
+    device.dispatch.destroy_pipeline_layout = testDestroyPipelineLayout;
+    device.dispatch.cmd_push_constants = testCmdPushConstants;
+    const stages = ShaderStageSet.init(&.{ .vertex, .fragment });
+    var layout = try device.createPipelineLayout(.{
+        .push_constants = &.{.{ .stages = stages, .offset = 4, .size = 16 }},
+    });
+    defer layout.deinit();
+
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
+    const Value = extern struct { x: u32, y: u32 };
+    try std.testing.expectError(
+        error.InvalidOptions,
+        command_buffer.pushConstantsValue(&layout, stages, 4, Value{ .x = 1, .y = 2 }),
+    );
+    try command_buffer.begin(.{});
+    try command_buffer.pushConstantsValue(&layout, stages, 4, Value{ .x = 1, .y = 2 });
+    try std.testing.expectEqual(@as(usize, 1), test_push_constant_count);
+    try std.testing.expectEqual(@as(u32, 4), test_push_constant_offset);
+    try std.testing.expectEqual(@as(u32, @sizeOf(Value)), test_push_constant_size);
+    var foreign_layout = layout;
+    foreign_layout._device_handle = testHandle(raw.VkDevice, 0x9999);
+    try std.testing.expectError(
+        error.InvalidOptions,
+        command_buffer.pushConstantsValue(&foreign_layout, stages, 4, Value{ .x = 1, .y = 2 }),
+    );
+    try command_buffer.end();
+
+    layout.deinit();
+    layout.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_pipeline_layout_count);
+}
+
 test "destroyed command pools invalidate their borrowed command buffers" {
     test_resource_result = raw.VK_SUCCESS;
     var device = testDevice();
@@ -4861,6 +5995,62 @@ test "buffer and allocation creation roll back provisional handles" {
     );
     try std.testing.expectEqual(@as(usize, 1), test_free_memory_count);
     test_resource_result = raw.VK_SUCCESS;
+}
+
+test "mapped memory bounds cache ranges and supports legacy and map2 paths" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_map_result = raw.VK_SUCCESS;
+    test_unmap_result = raw.VK_SUCCESS;
+    test_map_count = 0;
+    test_unmap_count = 0;
+    test_cache_offset = 0;
+    test_cache_size = 0;
+
+    var device = testDevice();
+    defer device.deinit();
+    device.dispatch.map_memory = testMapMemory;
+    device.dispatch.unmap_memory = testUnmapMemory;
+    device.dispatch.flush_mapped_memory_ranges = testCacheMemory;
+    device.dispatch.invalidate_mapped_memory_ranges = testCacheMemory;
+    var allocation = try device.allocateMemory(.{
+        .size = .fromBytes(256),
+        .memory_type_index = .fromRaw(0),
+        .non_coherent_atom_size = .fromBytes(64),
+    });
+    defer allocation.deinit();
+
+    var mapped = try allocation.map(.{
+        .offset = .fromBytes(3),
+        .range = .{ .bytes = .fromBytes(10) },
+    });
+    try std.testing.expectEqual(@as(usize, 10), (try mapped.bytes()).len);
+    try mapped.flush();
+    try std.testing.expectEqual(@as(u64, 0), test_cache_offset);
+    try std.testing.expectEqual(@as(u64, 64), test_cache_size);
+    try mapped.invalidate();
+    try mapped.unmap();
+    try std.testing.expectError(error.InactiveObject, mapped.bytes());
+    try std.testing.expectError(error.InvalidOptions, allocation.unmap());
+    mapped.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_unmap_count);
+
+    device.dispatch.map_memory2 = testMapMemory2;
+    device.dispatch.unmap_memory2 = testUnmapMemory2;
+    var map2_allocation = try device.allocateMemory(.{
+        .size = .fromBytes(256),
+        .memory_type_index = .fromRaw(0),
+    });
+    defer map2_allocation.deinit();
+    var whole = try map2_allocation.map(.{});
+    try std.testing.expectEqual(@as(usize, 256), (try whole.bytes()).len);
+    try whole.unmap();
+
+    test_map_result = raw.VK_ERROR_DEVICE_LOST;
+    defer test_map_result = raw.VK_SUCCESS;
+    try std.testing.expectError(error.DeviceLost, map2_allocation.map(.{}));
+    try std.testing.expectEqual(@as(usize, 3), test_map_count);
+    try std.testing.expectEqual(@as(usize, 2), test_unmap_count);
 }
 
 test "allocated buffer convenience owns and binds both resources" {

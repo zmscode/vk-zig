@@ -92,7 +92,8 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-Logical-device creation keeps queue priorities and extension names as bounded Zig slices:
+Logical-device creation is a typed requirements contract. Extension dependencies, promoted
+extensions, requested features, and queue counts are checked before `vkCreateDevice`:
 
 ```zig
 const priorities = [_]f32{1.0};
@@ -102,11 +103,15 @@ const queues = [_]vk.DeviceQueueOptions{.{
 }};
 var device = try physical_device.createDevice(.{
     .queues = &queues,
+    .extensions = &.{vk.extension.khr_swapchain},
+    .features = .init(&.{ .synchronization2, .dynamic_rendering }),
+    .enabled_instance_extensions = &.{vk.extension.khr_surface.name},
     .enable_portability_subset = vk.platform == .metal,
 });
 defer device.deinit();
 
 const queue = try device.queue(graphics_family, .first);
+std.debug.assert(device.supportsFeature(.dynamic_rendering));
 ```
 
 Generated names remove repeated string literals, while `ExtensionSet` combines platform/windowing
@@ -162,6 +167,38 @@ defer vertex_buffer.deinit();
 Use `createBuffer`, `memoryRequirements`, `allocateMemory`, and `Buffer.bindMemory` when placing
 several resources into one allocation. See `examples/buffer_setup.zig` for the complete setup.
 
+Mapped allocations expose only their requested range and normalize non-coherent flushes to the
+device atom size:
+
+```zig
+var mapped = try allocation.map(.{
+    .offset = .fromBytes(upload_offset),
+    .range = .{ .bytes = .fromBytes(source.len) },
+});
+defer mapped.deinit();
+@memcpy(try mapped.bytes(), source);
+try mapped.flush();
+```
+
+Dynamic rendering, synchronization2, and transfer recording use typed image references and
+slices. The scope is idempotent, so explicit cleanup and `defer` are both safe:
+
+```zig
+var rendering_scope = try command_buffer.beginRendering(.{
+    .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+    .color_attachments = &.{.{
+        .view = &color_view,
+        .layout = .color_attachment_optimal,
+        .load = .clear,
+        .store = .store,
+        .clear = .{ .color = .{ .float = .{ 0.03, 0.05, 0.09, 1.0 } } },
+    }},
+});
+defer rendering_scope.deinit();
+// Bind a graphics pipeline and record draws here.
+try rendering_scope.end();
+```
+
 Physical memory properties are owned typed snapshots, so their slices remain valid as long as the
 snapshot does. Counts and heap indices are validated before any slice is exposed:
 
@@ -189,9 +226,10 @@ var loader = try vk.Loader.initFromPath("/custom/VulkanSDK/macOS/lib/libvulkan.d
 defer loader.deinit();
 ```
 
-The wrapper intentionally covers discovery and ownership fundamentals without hiding Vulkan.
-Use the generated raw structs for create-info values. Generated command descriptors bind each
-command's name, function-pointer type, and dispatch scope:
+The typed wrapper covers normal discovery, resource ownership, memory, pipelines, descriptors,
+synchronization, rendering, and command recording without hiding Vulkan's explicit model.
+Generated command descriptors remain available for platform integration and advanced extension
+work; each descriptor binds the command's name, function-pointer type, and dispatch scope:
 
 ```zig
 const create_surface = (try instance.load(

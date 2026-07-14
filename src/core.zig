@@ -32,6 +32,12 @@ pub const Error = error{
     SizeOverflow,
     UnsupportedSurfaceConfiguration,
     QueueFamilyNotFound,
+    CopiedOwner,
+    StaleBorrow,
+    DeviceDestroyed,
+    CapacityExceeded,
+    UnsupportedCodec,
+    UnsupportedOperation,
 };
 
 pub const LoaderError = error{
@@ -215,6 +221,164 @@ pub const QueueFamilyOwnership = union(enum) {
     }
 };
 
+/// The state shared by a device and every child wrapper created from it.
+///
+/// Device loss is monotonic: once observed, dispatching operations fail locally with
+/// `error.DeviceLost`. Destruction remains permitted because Vulkan cleanup is host-only and
+/// must stay idempotent after loss. The wrapper never attempts transparent device recovery.
+pub const DeviceState = struct {
+    value: std.atomic.Value(u8) = .init(@intFromEnum(Status.active)),
+
+    pub const Status = enum(u8) {
+        active,
+        lost,
+        destroyed,
+    };
+
+    pub fn status(state: *const DeviceState) Status {
+        return @enumFromInt(state.value.load(.acquire));
+    }
+
+    pub fn ensureDispatchAllowed(state: *const DeviceState) Error!void {
+        return switch (state.status()) {
+            .active => {},
+            .lost => error.DeviceLost,
+            .destroyed => error.InactiveObject,
+        };
+    }
+
+    pub fn markLost(state: *DeviceState) void {
+        const active = @intFromEnum(Status.active);
+        const lost = @intFromEnum(Status.lost);
+        _ = state.value.cmpxchgStrong(active, lost, .acq_rel, .acquire);
+    }
+
+    pub fn markDestroyed(state: *DeviceState) void {
+        state.value.store(@intFromEnum(Status.destroyed), .release);
+    }
+};
+
+/// A non-copyable owner guard for wrappers initialized in their final storage.
+///
+/// Zig values are copyable by default. Owning wrappers therefore bind this guard to their final
+/// address. A copied value fails validation instead of independently destroying the same Vulkan
+/// handle. Callers moving an owner must use the wrapper's explicit `moveTo` operation.
+pub const Owner = struct {
+    address: usize,
+    active: bool = true,
+
+    pub fn init(object: anytype) Owner {
+        return .{ .address = objectAddress(object) };
+    }
+
+    pub fn validate(owner: *const Owner, object: anytype) Error!void {
+        if (owner.address != objectAddress(object)) return error.CopiedOwner;
+        if (!owner.active) return error.InactiveObject;
+    }
+
+    pub fn release(owner: *Owner, object: anytype) Error!bool {
+        if (owner.address != objectAddress(object)) return error.CopiedOwner;
+        if (!owner.active) return false;
+        owner.active = false;
+        return true;
+    }
+
+    pub fn rebind(owner: *Owner, source: anytype, destination: anytype) Error!void {
+        try owner.validate(source);
+        owner.address = objectAddress(destination);
+    }
+
+    fn objectAddress(object: anytype) usize {
+        const ObjectPointer = @TypeOf(object);
+        if (@typeInfo(ObjectPointer) != .pointer) {
+            @compileError("an owner guard requires a pointer to its containing object");
+        }
+        return @intFromPtr(object);
+    }
+};
+
+/// A parent generation shared with borrowed child handles.
+pub const Generation = struct {
+    value: u64 = 1,
+    active: bool = true,
+
+    pub fn borrow(generation: *const Generation) Borrow {
+        return .{ .parent = generation, .value = generation.value };
+    }
+
+    pub fn advance(generation: *Generation) void {
+        generation.value +%= 1;
+        if (generation.value == 0) generation.value = 1;
+    }
+
+    pub fn invalidate(generation: *Generation) void {
+        if (!generation.active) return;
+        generation.active = false;
+        generation.advance();
+    }
+
+    pub const Borrow = struct {
+        parent: *const Generation,
+        value: u64,
+
+        pub fn validate(borrowed: Borrow) Error!void {
+            if (!borrowed.parent.active) return error.StaleBorrow;
+            if (borrowed.parent.value != borrowed.value) return error.StaleBorrow;
+        }
+    };
+};
+
+/// Host synchronization and GPU-lifetime metadata attached to public wrapper operations.
+/// No hidden mutex is taken; callers retain ownership of their threading policy.
+pub const Contract = struct {
+    host_access: HostAccess,
+    gpu_lifetime: GpuLifetime = .not_retained,
+
+    pub const HostAccess = enum {
+        immutable_query,
+        distinct_children_concurrent,
+        externally_synchronized,
+    };
+
+    pub const GpuLifetime = enum {
+        not_retained,
+        until_command_recording_ends,
+        until_submission_completes,
+    };
+};
+
+/// Non-fatal Vulkan outcomes that must not be collapsed into a success-only helper.
+pub const ResultStatus = enum {
+    success,
+    not_ready,
+    timeout,
+    incomplete,
+    suboptimal,
+    out_of_date,
+    pipeline_compile_required,
+    deferred,
+    thread_done,
+    thread_idle,
+    operation_deferred,
+    operation_not_deferred,
+};
+
+/// Classifies every common Vulkan status and maps fatal results to the shared error set.
+pub fn classifyResult(result: raw.VkResult) Error!ResultStatus {
+    if (result == raw.VK_SUCCESS) return .success;
+    if (result == raw.VK_NOT_READY) return .not_ready;
+    if (result == raw.VK_TIMEOUT) return .timeout;
+    if (result == raw.VK_INCOMPLETE) return .incomplete;
+    if (result == raw.VK_SUBOPTIMAL_KHR) return .suboptimal;
+    if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
+    if (result == raw.VK_PIPELINE_COMPILE_REQUIRED) return .pipeline_compile_required;
+    if (result == raw.VK_THREAD_DONE_KHR) return .thread_done;
+    if (result == raw.VK_THREAD_IDLE_KHR) return .thread_idle;
+    if (result == raw.VK_OPERATION_DEFERRED_KHR) return .operation_deferred;
+    if (result == raw.VK_OPERATION_NOT_DEFERRED_KHR) return .operation_not_deferred;
+    return mapFatalResult(result);
+}
+
 pub fn NonNullHandle(comptime OptionalHandle: type) type {
     return switch (@typeInfo(OptionalHandle)) {
         .optional => |optional| optional.child,
@@ -226,6 +390,23 @@ pub fn NonNullHandle(comptime OptionalHandle: type) type {
 /// Do not use this for enumerate, wait, acquire, or present commands that allow status results.
 pub fn checkSuccess(result: raw.VkResult) Error!void {
     if (result == raw.VK_SUCCESS) return;
+    return mapFatalResult(result);
+}
+
+/// Maps a success-only command and records confirmed device loss for future short-circuiting.
+pub fn checkSuccessTracked(state: *DeviceState, result: raw.VkResult) Error!void {
+    if (result == raw.VK_SUCCESS) return;
+    if (result == raw.VK_ERROR_DEVICE_LOST) state.markLost();
+    return mapFatalResult(result);
+}
+
+/// Classifies a status-bearing command and records confirmed device loss.
+pub fn classifyResultTracked(state: *DeviceState, result: raw.VkResult) Error!ResultStatus {
+    if (result == raw.VK_ERROR_DEVICE_LOST) state.markLost();
+    return classifyResult(result);
+}
+
+fn mapFatalResult(result: raw.VkResult) Error {
     if (result == raw.VK_ERROR_OUT_OF_HOST_MEMORY) return error.OutOfHostMemory;
     if (result == raw.VK_ERROR_OUT_OF_DEVICE_MEMORY) return error.OutOfDeviceMemory;
     if (result == raw.VK_ERROR_INITIALIZATION_FAILED) return error.InitializationFailed;

@@ -226,6 +226,20 @@ const flag_specs = [_]FlagSpec{
         .constant_prefix = "VK_PIPELINE_STAGE_2_",
     },
     .{
+        .registry_name = "VkAccessFlagBits2",
+        .bit_name = "Access2Bit",
+        .flags_name = "Access2Flags",
+        .raw_flags_name = "VkAccessFlags2",
+        .constant_prefix = "VK_ACCESS_2_",
+    },
+    .{
+        .registry_name = "VkDependencyFlagBits",
+        .bit_name = "DependencyBit",
+        .flags_name = "DependencyFlags",
+        .raw_flags_name = "VkDependencyFlags",
+        .constant_prefix = "VK_DEPENDENCY_",
+    },
+    .{
         .registry_name = "VkSubmitFlagBits",
         .bit_name = "SubmitBit",
         .flags_name = "SubmitFlags",

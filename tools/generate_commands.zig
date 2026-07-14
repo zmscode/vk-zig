@@ -20,6 +20,13 @@ const ApiVersion = struct {
     minor: u8,
 };
 
+const RegistryExtension = struct {
+    name: []const u8,
+    scope: Scope,
+    promoted_to: ?[]const u8,
+    depends: ?[]const u8,
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -63,9 +70,13 @@ pub fn main(init: std.process.Init) !void {
     defer command_extensions.deinit(gpa);
     try collectCommandExtensions(gpa, registry, &command_extensions);
 
-    var registry_extensions: std.ArrayList([]const u8) = .empty;
+    var registry_extensions: std.ArrayList(RegistryExtension) = .empty;
     defer {
-        for (registry_extensions.items) |extension_name| gpa.free(extension_name);
+        for (registry_extensions.items) |item| {
+            gpa.free(item.name);
+            if (item.promoted_to) |value| gpa.free(value);
+            if (item.depends) |value| gpa.free(value);
+        }
         registry_extensions.deinit(gpa);
     }
     try collectRegistryExtensions(gpa, registry, &registry_extensions);
@@ -156,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
 fn collectRegistryExtensions(
     gpa: std.mem.Allocator,
     registry: []const u8,
-    extensions: *std.ArrayList([]const u8),
+    extensions: *std.ArrayList(RegistryExtension),
 ) !void {
     var cursor: usize = 0;
     while (std.mem.indexOfPos(u8, registry, cursor, "<extension ")) |extension_start| {
@@ -165,9 +176,30 @@ fn collectRegistryExtensions(
         };
         const opening_tag = registry[extension_start .. tag_end + 1];
         const name = attribute(opening_tag, "name") orelse return error.InvalidRegistry;
-        if (std.mem.startsWith(u8, name, "VK_")) {
-            try extensions.append(gpa, try gpa.dupe(u8, name));
-        }
+        const extension_type = attribute(opening_tag, "type") orelse {
+            cursor = tag_end + 1;
+            continue;
+        };
+        const scope: Scope = if (std.mem.eql(u8, extension_type, "instance"))
+            .instance
+        else if (std.mem.eql(u8, extension_type, "device"))
+            .device
+        else {
+            cursor = tag_end + 1;
+            continue;
+        };
+        if (std.mem.startsWith(u8, name, "VK_")) try extensions.append(gpa, .{
+            .name = try gpa.dupe(u8, name),
+            .scope = scope,
+            .promoted_to = if (attribute(opening_tag, "promotedto")) |value|
+                try gpa.dupe(u8, value)
+            else
+                null,
+            .depends = if (attribute(opening_tag, "depends")) |value|
+                try gpa.dupe(u8, value)
+            else
+                null,
+        });
         cursor = tag_end + 1;
     }
 }
@@ -508,23 +540,30 @@ fn extensionSnakeName(extension_name: []const u8, buffer: []u8) ![]const u8 {
     return buffer[0..source.len];
 }
 
-fn writeExtensions(writer: *std.Io.Writer, extensions: []const []const u8) !void {
+fn writeExtensions(writer: *std.Io.Writer, extensions: []const RegistryExtension) !void {
     try writer.writeAll(
         \\
         \\pub const Extension = struct {
         \\    name: [:0]const u8,
+        \\    scope: Scope,
+        \\    promoted_to: ?[:0]const u8 = null,
+        \\    depends: ?[:0]const u8 = null,
         \\};
         \\
         \\pub const extension = struct {
         \\
     );
-    for (extensions) |extension_name| {
+    for (extensions) |item| {
         var name_buffer: [256]u8 = undefined;
-        const generated_name = try extensionSnakeName(extension_name, &name_buffer);
+        const generated_name = try extensionSnakeName(item.name, &name_buffer);
         try writer.print(
-            "    pub const {s}: Extension = .{{ .name = \"{s}\" }};\n",
-            .{ generated_name, extension_name },
+            "    pub const {s}: Extension = .{{ .name = \"{s}\", .scope = .{s}, .promoted_to = ",
+            .{ generated_name, item.name, @tagName(item.scope) },
         );
+        if (item.promoted_to) |value| try writer.print("\"{s}\"", .{value}) else try writer.writeAll("null");
+        try writer.writeAll(", .depends = ");
+        if (item.depends) |value| try writer.print("\"{s}\"", .{value}) else try writer.writeAll("null");
+        try writer.writeAll(" };\n");
     }
     try writer.writeAll("};\n");
 }
