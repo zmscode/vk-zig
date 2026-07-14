@@ -16,6 +16,36 @@ const image_count_max = 4096;
 const enumeration_attempt_count_max = 4;
 const queue_family_count_max = 64;
 
+pub const MetalSurfaceOptions = struct {
+    layer: *const anyopaque,
+};
+
+pub const Win32SurfaceOptions = struct {
+    instance: *anyopaque,
+    window: *anyopaque,
+};
+
+pub const XlibSurfaceOptions = struct {
+    display: *anyopaque,
+    window: c_ulong,
+};
+
+pub const XcbSurfaceOptions = struct {
+    connection: *anyopaque,
+    window: u32,
+};
+
+pub const WaylandSurfaceOptions = struct {
+    display: *anyopaque,
+    surface: *anyopaque,
+};
+
+pub const AndroidSurfaceOptions = struct {
+    window: *anyopaque,
+};
+
+pub const HeadlessSurfaceOptions = struct {};
+
 pub const Surface = struct {
     _handle: ?SurfaceHandle,
     _instance_handle: InstanceHandle,

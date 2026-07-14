@@ -1,6 +1,7 @@
 const std = @import("std");
 const raw = @import("vulkan_raw");
 const command = @import("vulkan_commands");
+const types = @import("vulkan_types");
 const core = @import("core.zig");
 const physical_device = @import("physical_device.zig");
 const registry = @import("registry.zig");
@@ -10,85 +11,8 @@ pub const queue_count_max = 64;
 pub const group_device_count_max = raw.VK_MAX_DEVICE_GROUP_SIZE;
 pub const rejection_count_max = extension_count_max + queue_count_max + 32;
 
-/// Vulkan features commonly needed by modern applications. Core 1.0 features
-/// use their unqualified names; promoted features document their core version.
-pub const Feature = enum {
-    robust_buffer_access,
-    full_draw_index_uint32,
-    image_cube_array,
-    independent_blend,
-    geometry_shader,
-    tessellation_shader,
-    sample_rate_shading,
-    dual_source_blend,
-    logic_op,
-    multi_draw_indirect,
-    draw_indirect_first_instance,
-    depth_clamp,
-    depth_bias_clamp,
-    fill_mode_non_solid,
-    depth_bounds,
-    wide_lines,
-    large_points,
-    alpha_to_one,
-    multi_viewport,
-    sampler_anisotropy,
-    texture_compression_etc2,
-    texture_compression_astc_ldr,
-    texture_compression_bc,
-    occlusion_query_precise,
-    pipeline_statistics_query,
-    vertex_pipeline_stores_and_atomics,
-    fragment_stores_and_atomics,
-    shader_tessellation_and_geometry_point_size,
-    shader_image_gather_extended,
-    shader_storage_image_extended_formats,
-    shader_storage_image_multisample,
-    shader_storage_image_read_without_format,
-    shader_storage_image_write_without_format,
-    shader_uniform_buffer_array_dynamic_indexing,
-    shader_sampled_image_array_dynamic_indexing,
-    shader_storage_buffer_array_dynamic_indexing,
-    shader_storage_image_array_dynamic_indexing,
-    shader_clip_distance,
-    shader_cull_distance,
-    shader_float64,
-    shader_int64,
-    shader_int16,
-    shader_resource_residency,
-    shader_resource_min_lod,
-    sparse_binding,
-    sparse_residency_buffer,
-    sparse_residency_image_2d,
-    sparse_residency_image_3d,
-    sparse_residency_2_samples,
-    sparse_residency_4_samples,
-    sparse_residency_8_samples,
-    sparse_residency_16_samples,
-    sparse_residency_aliased,
-    variable_multisample_rate,
-    inherited_queries,
-
-    // Vulkan 1.1+
-    protected_memory,
-    sampler_ycbcr_conversion,
-    multiview,
-    shader_draw_parameters,
-    // Vulkan 1.2+
-    draw_indirect_count,
-    timeline_semaphore,
-    buffer_device_address,
-    descriptor_indexing,
-    imageless_framebuffer,
-    // Vulkan 1.3+
-    synchronization2,
-    dynamic_rendering,
-    maintenance4,
-    // Vulkan 1.4+
-    global_priority_query,
-    host_image_copy,
-    push_descriptor,
-};
+/// Generated from every core Vulkan 1.0-1.4 feature structure.
+pub const Feature = types.Feature;
 
 pub const FeatureSet = struct {
     bits: std.EnumSet(Feature) = .initEmpty(),
@@ -118,6 +42,14 @@ pub const FeatureSet = struct {
             if (required.contains(feature) and !set.contains(feature)) return feature;
         }
         return null;
+    }
+
+    pub fn generated(set: FeatureSet) types.FeatureSet {
+        return .{ .bits = set.bits };
+    }
+
+    pub fn fromGenerated(set: types.FeatureSet) FeatureSet {
+        return .{ .bits = set.bits };
     }
 
     pub fn coreRaw(set: FeatureSet) raw.VkPhysicalDeviceFeatures {

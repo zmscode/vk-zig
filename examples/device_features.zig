@@ -13,19 +13,19 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(devices);
 
     for (devices) |*device| {
-        const features = try device.features2(null);
+        const features = try device.features();
         const properties = device.properties();
         std.log.info("{s} selected features:", .{properties.name()});
         std.log.info(
             "  geometry shader: {s}",
-            .{support.boolName(features.features.geometryShader)},
+            .{support.boolName(features.contains(.geometry_shader))},
         );
         std.log.info(
             "  tessellation shader: {s}",
-            .{support.boolName(features.features.tessellationShader)},
+            .{support.boolName(features.contains(.tessellation_shader))},
         );
         std.log.info("  sampler anisotropy: {s}", .{
-            support.boolName(features.features.samplerAnisotropy),
+            support.boolName(features.contains(.sampler_anisotropy)),
         });
     }
 }

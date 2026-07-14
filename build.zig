@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     const platform = b.option(
         Platform,
         "platform",
-        "Platform surface declarations (none, metal, win32, xlib, xcb, wayland)",
+        "Platform surface declarations (none, metal, win32, xlib, xcb, wayland, android)",
     ) orelse Platform.default(target.result.os.tag);
 
     platform.validate(target.result.os.tag);
@@ -97,6 +97,7 @@ const Platform = enum {
     xlib,
     xcb,
     wayland,
+    android,
 
     fn default(os_tag: std.Target.Os.Tag) Platform {
         return switch (os_tag) {
@@ -114,6 +115,9 @@ const Platform = enum {
             },
             .win32 => if (os_tag != .windows) {
                 @panic("the win32 Vulkan platform requires a Windows target");
+            },
+            .android => if (os_tag != .linux) {
+                @panic("the Android Vulkan platform requires an Android target");
             },
             else => {},
         }
@@ -149,6 +153,7 @@ fn addTranslateC(
         .xlib => translate_c.defineCMacro("VK_ZIG_PLATFORM_XLIB", null),
         .xcb => translate_c.defineCMacro("VK_ZIG_PLATFORM_XCB", null),
         .wayland => translate_c.defineCMacro("VK_ZIG_PLATFORM_WAYLAND", null),
+        .android => translate_c.defineCMacro("VK_ZIG_PLATFORM_ANDROID", null),
     }
     return translate_c;
 }

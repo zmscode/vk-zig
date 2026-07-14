@@ -5,6 +5,7 @@ pub const capabilities = @import("capabilities.zig");
 pub const configuration = @import("configuration.zig");
 pub const registry = @import("registry.zig");
 pub const physical_devices = @import("physical_device.zig");
+pub const feature_chains = @import("feature_chain.zig");
 pub const device_configuration = @import("device.zig");
 pub const formats = @import("format.zig");
 pub const memory = @import("memory.zig");
@@ -43,6 +44,8 @@ pub const extension = command.extension;
 pub const Extension = command.Extension;
 pub const DeviceFeature = device_configuration.Feature;
 pub const DeviceFeatureSet = device_configuration.FeatureSet;
+pub const DeviceFeatureProfile = feature_chains.Profile;
+pub const deviceFeatureProfileRequirements = feature_chains.profileRequirements;
 pub const DeviceRequirements = device_configuration.Requirements;
 pub const DeviceEvaluation = device_configuration.Evaluation;
 pub const DeviceRejection = device_configuration.Rejection;
@@ -176,6 +179,7 @@ const PhysicalDeviceHandle = NonNullHandle(raw.VkPhysicalDevice);
 const DeviceHandle = NonNullHandle(raw.VkDevice);
 
 pub const Portability = configuration.Portability;
+pub const SurfaceConfiguration = configuration.SurfaceConfiguration;
 pub const ExtensionSet = registry.NameSet;
 pub const boundedCString = registry.boundedCString;
 pub const extensionName = registry.extensionName;
@@ -630,10 +634,151 @@ pub const Instance = struct {
             .destroy_surface = destroy_surface,
         };
     }
+
+    fn finishSurfaceCreation(
+        instance: *const Instance,
+        result: raw.VkResult,
+        created: raw.VkSurfaceKHR,
+        allocation_callbacks: ?*const raw.VkAllocationCallbacks,
+    ) Error!Surface {
+        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const destroy_surface = (try instance.load(command.destroy_surface_khr)) orelse return error.MissingCommand;
+        if (result != raw.VK_SUCCESS) {
+            if (created) |provisional| destroy_surface(instance_handle, provisional, allocation_callbacks);
+            try checkSuccess(result);
+            unreachable;
+        }
+        return .{
+            ._handle = created orelse return error.InvalidHandle,
+            ._instance_handle = instance_handle,
+            .allocation_callbacks = allocation_callbacks,
+            .destroy_surface = destroy_surface,
+        };
+    }
+
+    pub fn createMetalSurface(instance: *const Instance, options: presentation.MetalSurfaceOptions) Error!Surface {
+        if (comptime platform == .metal) {
+            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const create = (try instance.load(command.create_metal_surface_ext)) orelse return error.MissingCommand;
+            const info: raw.VkMetalSurfaceCreateInfoEXT = .{
+                .sType = raw.VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
+                .pLayer = @ptrCast(options.layer),
+            };
+            var handle: raw.VkSurfaceKHR = null;
+            const result = create(instance_handle, &info, instance.allocation_callbacks, &handle);
+            return instance.finishSurfaceCreation(result, handle, instance.allocation_callbacks);
+        } else return error.UnsupportedOperation;
+    }
+
+    pub fn createWin32Surface(instance: *const Instance, options: presentation.Win32SurfaceOptions) Error!Surface {
+        if (comptime platform == .win32) {
+            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const create = (try instance.load(command.create_win32_surface_khr)) orelse return error.MissingCommand;
+            const info: raw.VkWin32SurfaceCreateInfoKHR = .{
+                .sType = raw.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+                .hinstance = @ptrCast(options.instance),
+                .hwnd = @ptrCast(options.window),
+            };
+            var handle: raw.VkSurfaceKHR = null;
+            const result = create(instance_handle, &info, instance.allocation_callbacks, &handle);
+            return instance.finishSurfaceCreation(result, handle, instance.allocation_callbacks);
+        } else return error.UnsupportedOperation;
+    }
+
+    pub fn createXlibSurface(instance: *const Instance, options: presentation.XlibSurfaceOptions) Error!Surface {
+        if (comptime platform == .xlib) {
+            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const create = (try instance.load(command.create_xlib_surface_khr)) orelse return error.MissingCommand;
+            const info: raw.VkXlibSurfaceCreateInfoKHR = .{
+                .sType = raw.VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
+                .dpy = @ptrCast(options.display),
+                .window = options.window,
+            };
+            var handle: raw.VkSurfaceKHR = null;
+            const result = create(instance_handle, &info, instance.allocation_callbacks, &handle);
+            return instance.finishSurfaceCreation(result, handle, instance.allocation_callbacks);
+        } else return error.UnsupportedOperation;
+    }
+
+    pub fn createXcbSurface(instance: *const Instance, options: presentation.XcbSurfaceOptions) Error!Surface {
+        if (comptime platform == .xcb) {
+            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const create = (try instance.load(command.create_xcb_surface_khr)) orelse return error.MissingCommand;
+            const info: raw.VkXcbSurfaceCreateInfoKHR = .{
+                .sType = raw.VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
+                .connection = @ptrCast(options.connection),
+                .window = options.window,
+            };
+            var handle: raw.VkSurfaceKHR = null;
+            const result = create(instance_handle, &info, instance.allocation_callbacks, &handle);
+            return instance.finishSurfaceCreation(result, handle, instance.allocation_callbacks);
+        } else return error.UnsupportedOperation;
+    }
+
+    pub fn createWaylandSurface(instance: *const Instance, options: presentation.WaylandSurfaceOptions) Error!Surface {
+        if (comptime platform == .wayland) {
+            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const create = (try instance.load(command.create_wayland_surface_khr)) orelse return error.MissingCommand;
+            const info: raw.VkWaylandSurfaceCreateInfoKHR = .{
+                .sType = raw.VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
+                .display = @ptrCast(options.display),
+                .surface = @ptrCast(options.surface),
+            };
+            var handle: raw.VkSurfaceKHR = null;
+            const result = create(instance_handle, &info, instance.allocation_callbacks, &handle);
+            return instance.finishSurfaceCreation(result, handle, instance.allocation_callbacks);
+        } else return error.UnsupportedOperation;
+    }
+
+    pub fn createAndroidSurface(instance: *const Instance, options: presentation.AndroidSurfaceOptions) Error!Surface {
+        if (comptime platform == .android) {
+            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const create = (try instance.load(command.create_android_surface_khr)) orelse return error.MissingCommand;
+            const info: raw.VkAndroidSurfaceCreateInfoKHR = .{
+                .sType = raw.VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
+                .window = @ptrCast(options.window),
+            };
+            var handle: raw.VkSurfaceKHR = null;
+            const result = create(instance_handle, &info, instance.allocation_callbacks, &handle);
+            return instance.finishSurfaceCreation(result, handle, instance.allocation_callbacks);
+        } else return error.UnsupportedOperation;
+    }
+
+    pub fn createHeadlessSurface(instance: *const Instance, options: presentation.HeadlessSurfaceOptions) Error!Surface {
+        _ = options;
+        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const create = (try instance.load(command.create_headless_surface_ext)) orelse return error.MissingCommand;
+        const info: raw.VkHeadlessSurfaceCreateInfoEXT = .{
+            .sType = raw.VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT,
+        };
+        var handle: raw.VkSurfaceKHR = null;
+        const result = create(instance_handle, &info, instance.allocation_callbacks, &handle);
+        return instance.finishSurfaceCreation(result, handle, instance.allocation_callbacks);
+    }
+
+    pub fn createSurfaceWithAdapter(instance: *const Instance, adapter: SurfaceAdapter) Error!Surface {
+        _ = instance._handle orelse return error.InactiveObject;
+        var surface = try adapter.create(adapter.context, instance);
+        errdefer surface.deinit();
+        if (surface._instance_handle != instance._handle.?) return error.InvalidHandle;
+        return surface;
+    }
+};
+
+pub const SurfaceAdapter = struct {
+    context: ?*anyopaque = null,
+    create: *const fn (?*anyopaque, *const Instance) Error!Surface,
 };
 
 /// An owned `VkSurfaceKHR`. This wrapper must be destroyed before its parent instance.
 pub const Surface = presentation.Surface;
+pub const MetalSurfaceOptions = presentation.MetalSurfaceOptions;
+pub const Win32SurfaceOptions = presentation.Win32SurfaceOptions;
+pub const XlibSurfaceOptions = presentation.XlibSurfaceOptions;
+pub const XcbSurfaceOptions = presentation.XcbSurfaceOptions;
+pub const WaylandSurfaceOptions = presentation.WaylandSurfaceOptions;
+pub const AndroidSurfaceOptions = presentation.AndroidSurfaceOptions;
+pub const HeadlessSurfaceOptions = presentation.HeadlessSurfaceOptions;
 pub const SwapchainImage = images.SwapchainImage;
 pub const ImageViewOptions = images.ViewOptions;
 pub const ImageView = images.View;
@@ -721,6 +866,9 @@ pub const Swapchain = presentation.Swapchain;
 pub const PhysicalDeviceLimits = physical_devices.Limits;
 pub const SparseProperties = physical_devices.SparseProperties;
 pub const PhysicalDeviceProperties = physical_devices.Properties;
+pub const PhysicalDeviceIdentification = physical_devices.Identification;
+pub const PhysicalDeviceDriverProperties = physical_devices.DriverProperties;
+pub const DriverId = physical_devices.DriverId;
 
 pub const FormatProperties = format_support.Properties;
 pub const ImageFormatOptions = format_support.ImageOptions;
@@ -757,6 +905,13 @@ pub const PhysicalDevice = struct {
     }
 
     pub fn properties(device: *const PhysicalDevice) PhysicalDeviceProperties {
+        if (device.dispatch.get_physical_device_properties2) |get_properties2| {
+            const base = device.propertiesRaw();
+            const api_version = Version.decode(base.apiVersion);
+            var storage: feature_chains.PropertyStorage = .{};
+            get_properties2(device._handle, storage.link(api_version));
+            return storage.properties(api_version);
+        }
         const value = device.propertiesRaw();
         return .fromRaw(&value);
     }
@@ -1013,47 +1168,11 @@ pub const PhysicalDevice = struct {
         const device_properties = device.properties();
         const get_features2 = device.dispatch.get_physical_device_features2 orelse {
             const core_features = device.featuresRaw();
-            return .fromCoreRaw(&core_features);
+            return .fromGenerated(feature_chains.FeatureSet.fromCoreRaw(&core_features));
         };
-
-        var features_11: raw.VkPhysicalDeviceVulkan11Features = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-        };
-        var features_12: raw.VkPhysicalDeviceVulkan12Features = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        };
-        var features_13: raw.VkPhysicalDeviceVulkan13Features = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        };
-        var features_14: raw.VkPhysicalDeviceVulkan14Features = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-        };
-        var root: raw.VkPhysicalDeviceFeatures2 = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        };
-        if (device_properties.api_version.atLeast(.v1_1)) root.pNext = &features_11;
-        if (device_properties.api_version.atLeast(.v1_2)) features_11.pNext = &features_12;
-        if (device_properties.api_version.atLeast(.v1_3)) features_12.pNext = &features_13;
-        if (device_properties.api_version.atLeast(.v1_4)) features_13.pNext = &features_14;
-        get_features2(device._handle, &root);
-
-        var supported = DeviceFeatureSet.fromCoreRaw(&root.features);
-        if (features_11.protectedMemory != raw.VK_FALSE) supported.enable(.protected_memory);
-        if (features_11.samplerYcbcrConversion != raw.VK_FALSE) supported.enable(.sampler_ycbcr_conversion);
-        if (features_11.multiview != raw.VK_FALSE) supported.enable(.multiview);
-        if (features_11.shaderDrawParameters != raw.VK_FALSE) supported.enable(.shader_draw_parameters);
-        if (features_12.drawIndirectCount != raw.VK_FALSE) supported.enable(.draw_indirect_count);
-        if (features_12.timelineSemaphore != raw.VK_FALSE) supported.enable(.timeline_semaphore);
-        if (features_12.bufferDeviceAddress != raw.VK_FALSE) supported.enable(.buffer_device_address);
-        if (features_12.descriptorIndexing != raw.VK_FALSE) supported.enable(.descriptor_indexing);
-        if (features_12.imagelessFramebuffer != raw.VK_FALSE) supported.enable(.imageless_framebuffer);
-        if (features_13.synchronization2 != raw.VK_FALSE) supported.enable(.synchronization2);
-        if (features_13.dynamicRendering != raw.VK_FALSE) supported.enable(.dynamic_rendering);
-        if (features_13.maintenance4 != raw.VK_FALSE) supported.enable(.maintenance4);
-        if (features_14.globalPriorityQuery != raw.VK_FALSE) supported.enable(.global_priority_query);
-        if (features_14.hostImageCopy != raw.VK_FALSE) supported.enable(.host_image_copy);
-        if (features_14.pushDescriptor != raw.VK_FALSE) supported.enable(.push_descriptor);
-        return supported;
+        var storage: feature_chains.FeatureStorage = .{};
+        get_features2(device._handle, storage.link(device_properties.api_version));
+        return .fromGenerated(storage.featureSet());
     }
 
     /// Queries core and chained feature structures. `next` must point to a mutable
@@ -1158,25 +1277,109 @@ pub const PhysicalDevice = struct {
         return error.EnumerationUnstable;
     }
 
+    pub fn queueFamilyCount(device: *const PhysicalDevice) Error!u32 {
+        var count: u32 = 0;
+        if (device.dispatch.get_physical_device_queue_family_properties2) |get_properties2| {
+            get_properties2(device._handle, &count, null);
+        } else {
+            device.dispatch.get_physical_device_queue_family_properties(device._handle, &count, null);
+        }
+        try validateEnumerationCount(count);
+        if (count > device_queue_count_max) return error.CountOverflow;
+        return count;
+    }
+
+    pub fn queueFamiliesInto(
+        device: *const PhysicalDevice,
+        storage: []QueueFamily,
+    ) Error![]QueueFamily {
+        if (storage.len > device_queue_count_max) return error.CountOverflow;
+        var written: u32 = @intCast(storage.len);
+        if (device.dispatch.get_physical_device_queue_family_properties2) |get_properties2| {
+            var raw_properties: [device_queue_count_max]raw.VkQueueFamilyProperties2 = undefined;
+            var video: [device_queue_count_max]raw.VkQueueFamilyVideoPropertiesKHR = undefined;
+            var query_status: [device_queue_count_max]raw.VkQueueFamilyQueryResultStatusPropertiesKHR = undefined;
+            var priorities: [device_queue_count_max]raw.VkQueueFamilyGlobalPriorityProperties = undefined;
+            for (0..storage.len) |index| {
+                priorities[index] = .{ .sType = raw.VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES };
+                query_status[index] = .{
+                    .sType = raw.VK_STRUCTURE_TYPE_QUEUE_FAMILY_QUERY_RESULT_STATUS_PROPERTIES_KHR,
+                    .pNext = &priorities[index],
+                };
+                video[index] = .{
+                    .sType = raw.VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR,
+                    .pNext = &query_status[index],
+                };
+                raw_properties[index] = .{
+                    .sType = raw.VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2,
+                    .pNext = &video[index],
+                };
+            }
+            get_properties2(
+                device._handle,
+                &written,
+                if (storage.len == 0) null else raw_properties[0..storage.len].ptr,
+            );
+            if (written > storage.len) return error.BufferTooSmall;
+            for (storage[0..written], raw_properties[0..written], video[0..written], query_status[0..written], priorities[0..written], 0..) |*family, property, video_property, query_property, priority_property, index| {
+                if (priority_property.priorityCount > raw.VK_MAX_GLOBAL_PRIORITY_SIZE) return error.InvalidProperties;
+                var global_priorities: physical_devices.GlobalPriorityProperties = .{};
+                global_priorities.count = priority_property.priorityCount;
+                for (priority_property.priorities[0..priority_property.priorityCount], 0..) |priority, priority_index| {
+                    global_priorities._values[priority_index] = .fromRaw(priority);
+                }
+                family.* = .{
+                    .index = .fromRaw(@intCast(index)),
+                    .flags = .fromRaw(property.queueFamilyProperties.queueFlags),
+                    .queue_count = property.queueFamilyProperties.queueCount,
+                    .timestamp_valid_bits = property.queueFamilyProperties.timestampValidBits,
+                    .minimum_image_transfer_granularity = .fromRaw(property.queueFamilyProperties.minImageTransferGranularity),
+                    .video_codec_operations = .fromRaw(video_property.videoCodecOperations),
+                    .query_result_status_support = query_property.queryResultStatusSupport != raw.VK_FALSE,
+                    .global_priorities = global_priorities,
+                };
+            }
+        } else {
+            var raw_properties: [device_queue_count_max]raw.VkQueueFamilyProperties = undefined;
+            device.dispatch.get_physical_device_queue_family_properties(
+                device._handle,
+                &written,
+                if (storage.len == 0) null else raw_properties[0..storage.len].ptr,
+            );
+            if (written > storage.len) return error.BufferTooSmall;
+            for (storage[0..written], raw_properties[0..written], 0..) |*family, property, index| {
+                family.* = .{
+                    .index = .fromRaw(@intCast(index)),
+                    .flags = .fromRaw(property.queueFlags),
+                    .queue_count = property.queueCount,
+                    .timestamp_valid_bits = property.timestampValidBits,
+                    .minimum_image_transfer_granularity = .fromRaw(property.minImageTransferGranularity),
+                };
+            }
+        }
+        return storage[0..written];
+    }
+
     pub fn queueFamilies(
         device: *const PhysicalDevice,
         gpa: std.mem.Allocator,
     ) (Error || std.mem.Allocator.Error)![]QueueFamily {
-        const queue_properties = try device.queueFamilyProperties(gpa);
-        defer gpa.free(queue_properties);
-        const families = try gpa.alloc(QueueFamily, queue_properties.len);
-        for (families, queue_properties, 0..) |*family, property, index| {
-            family.* = .{
-                .index = .fromRaw(@intCast(index)),
-                .flags = .fromRaw(property.queueFlags),
-                .queue_count = property.queueCount,
-                .timestamp_valid_bits = property.timestampValidBits,
-                .minimum_image_transfer_granularity = .fromRaw(
-                    property.minImageTransferGranularity,
-                ),
+        var output = try gpa.alloc(QueueFamily, try device.queueFamilyCount());
+        errdefer gpa.free(output);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = device.queueFamiliesInto(output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try device.queueFamilyCount();
+                    const next = if (required > output.len) required else @min(output.len * 2, device_queue_count_max);
+                    if (next <= output.len) return error.EnumerationUnstable;
+                    output = try gpa.realloc(output, next);
+                    continue;
+                },
+                else => |other| return other,
             };
+            return gpa.realloc(output, written.len);
         }
-        return families;
+        return error.EnumerationUnstable;
     }
 
     pub fn deviceExtensions(
@@ -1454,43 +1657,11 @@ pub const PhysicalDevice = struct {
             }
         }
 
-        const enabled_core_features = options.features.coreRaw();
-        var features_11: raw.VkPhysicalDeviceVulkan11Features = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-            .protectedMemory = bool32(options.features.contains(.protected_memory)),
-            .samplerYcbcrConversion = bool32(options.features.contains(.sampler_ycbcr_conversion)),
-            .multiview = bool32(options.features.contains(.multiview)),
-            .shaderDrawParameters = bool32(options.features.contains(.shader_draw_parameters)),
-        };
-        var features_12: raw.VkPhysicalDeviceVulkan12Features = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-            .drawIndirectCount = bool32(options.features.contains(.draw_indirect_count)),
-            .timelineSemaphore = bool32(options.features.contains(.timeline_semaphore)),
-            .bufferDeviceAddress = bool32(options.features.contains(.buffer_device_address)),
-            .descriptorIndexing = bool32(options.features.contains(.descriptor_indexing)),
-            .imagelessFramebuffer = bool32(options.features.contains(.imageless_framebuffer)),
-        };
-        var features_13: raw.VkPhysicalDeviceVulkan13Features = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-            .synchronization2 = bool32(options.features.contains(.synchronization2)),
-            .dynamicRendering = bool32(options.features.contains(.dynamic_rendering)),
-            .maintenance4 = bool32(options.features.contains(.maintenance4)),
-        };
-        var features_14: raw.VkPhysicalDeviceVulkan14Features = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-            .globalPriorityQuery = bool32(options.features.contains(.global_priority_query)),
-            .hostImageCopy = bool32(options.features.contains(.host_image_copy)),
-            .pushDescriptor = bool32(options.features.contains(.push_descriptor)),
-        };
-        var feature_root: raw.VkPhysicalDeviceFeatures2 = .{
-            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-            .features = enabled_core_features,
-        };
         const api_version = physical_device.properties().api_version;
-        if (api_version.atLeast(.v1_1)) feature_root.pNext = &features_11;
-        if (api_version.atLeast(.v1_2)) features_11.pNext = &features_12;
-        if (api_version.atLeast(.v1_3)) features_12.pNext = &features_13;
-        if (api_version.atLeast(.v1_4)) features_13.pNext = &features_14;
+        const generated_features = options.features.generated();
+        var feature_storage = feature_chains.FeatureStorage.init(generated_features);
+        const feature_root = feature_storage.link(api_version);
+        const has_promoted_features = generated_features.hasPromoted();
 
         var group_handles: [device_configuration.group_device_count_max]raw.VkPhysicalDevice = undefined;
         var group_info: raw.VkDeviceGroupDeviceCreateInfo = .{
@@ -1507,17 +1678,17 @@ pub const PhysicalDevice = struct {
             if (!contains_primary) return error.InvalidHandle;
             group_info.physicalDeviceCount = @intCast(options.device_group.len);
             group_info.pPhysicalDevices = group_handles[0..options.device_group.len].ptr;
-            group_info.pNext = if (options.features.hasPromoted()) &feature_root else null;
+            group_info.pNext = if (has_promoted_features) feature_root else null;
         }
 
         const create_info: raw.VkDeviceCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = if (options.device_group.len != 0) &group_info else if (options.features.hasPromoted()) &feature_root else null,
+            .pNext = if (options.device_group.len != 0) &group_info else if (has_promoted_features) feature_root else null,
             .queueCreateInfoCount = @intCast(options.queues.len),
             .pQueueCreateInfos = queue_infos[0..options.queues.len].ptr,
             .enabledExtensionCount = @intCast(extension_count),
             .ppEnabledExtensionNames = pointerArray(extension_pointers[0..extension_count]),
-            .pEnabledFeatures = if (options.features.hasPromoted()) null else &enabled_core_features,
+            .pEnabledFeatures = if (has_promoted_features) null else &feature_storage.root.features,
         };
         var device = try physical_device.createDeviceRaw(&create_info, null);
         device.enabled_capabilities = .init(enabled_extensions[0..extension_count], options.features, api_version);
@@ -1568,8 +1739,15 @@ pub const PhysicalDevice = struct {
 pub const QueueCapability = physical_devices.QueueCapability;
 pub const QueueFamily = physical_devices.QueueFamily;
 pub const QueueFamilySelectionOptions = physical_devices.QueueSelectionOptions;
+pub const QueueFamilySelection = physical_devices.QueueSelection;
+pub const QueueFamilySelectionFailure = physical_devices.QueueSelectionFailure;
+pub const QueueVideoCodecOperationBit = physical_devices.VideoCodecOperationBit;
+pub const QueueVideoCodecOperations = physical_devices.VideoCodecOperations;
+pub const QueueGlobalPriority = physical_devices.QueueGlobalPriority;
 pub const selectQueueFamily = physical_devices.selectQueueFamily;
+pub const selectQueueFamilyDetailed = physical_devices.selectQueueFamilyDetailed;
 pub const selectQueueFamilyForSurface = physical_devices.selectQueueFamilyForSurface;
+pub const selectQueueFamilyForSurfaceDetailed = physical_devices.selectQueueFamilyForSurfaceDetailed;
 
 pub const MemoryTypeOptions = memory.TypeOptions;
 pub const MemoryType = memory.Type;
@@ -1602,12 +1780,24 @@ pub const ShaderStageSet = shaders.StageSet;
 pub const ShaderIdentifier = shaders.Identifier;
 pub const DescriptorType = descriptors.Type;
 pub const DescriptorBinding = descriptors.Binding;
+pub const DescriptorBindingFlags = descriptors.BindingFlags;
 pub const DescriptorSetLayout = descriptors.SetLayout;
 pub const DescriptorSetLayoutOptions = descriptors.LayoutOptions;
 pub const DescriptorPool = descriptors.Pool;
 pub const DescriptorPoolOptions = descriptors.PoolOptions;
 pub const DescriptorPoolSize = descriptors.PoolSize;
 pub const DescriptorSet = descriptors.Set;
+pub const DescriptorSetAllocateOptions = descriptors.AllocateOptions;
+pub const DescriptorImageInfo = descriptors.ImageInfo;
+pub const DescriptorBufferInfo = descriptors.BufferInfo;
+pub const DescriptorWrite = descriptors.Write;
+pub const DescriptorWriteData = descriptors.WriteData;
+pub const DescriptorCopy = descriptors.Copy;
+pub const DescriptorPushWrite = descriptors.PushWrite;
+pub const DescriptorSetLayoutSupport = descriptors.LayoutSupport;
+pub const DescriptorUpdateTemplate = descriptors.UpdateTemplate;
+pub const DescriptorUpdateTemplateOptions = descriptors.TemplateOptions;
+pub const DescriptorUpdateTemplateEntry = descriptors.TemplateEntry;
 pub const PipelineLayout = pipelines.Layout;
 pub const PipelineLayoutOptions = pipelines.LayoutOptions;
 pub const PushConstantRange = pipelines.PushConstantRange;
@@ -1924,10 +2114,39 @@ pub const Device = struct {
         options: descriptors.LayoutOptions,
     ) Error!descriptors.SetLayout {
         const device_handle = try device.dispatchHandle();
+        if (options.push_descriptor and !device.supportsFeature(.push_descriptor)) return error.FeatureNotPresent;
+        for (options.bindings) |binding| {
+            if (binding.descriptor_type == .inline_uniform_block and !device.supportsFeature(.inline_uniform_block)) return error.FeatureNotPresent;
+            if (binding.flags.contains(.partially_bound) and !device.supportsFeature(.descriptor_binding_partially_bound)) return error.FeatureNotPresent;
+            if (binding.flags.contains(.variable_descriptor_count) and !device.supportsFeature(.descriptor_binding_variable_descriptor_count)) return error.FeatureNotPresent;
+            if (binding.flags.contains(.update_unused_while_pending) and !device.supportsFeature(.descriptor_binding_update_unused_while_pending)) return error.FeatureNotPresent;
+            if (binding.flags.contains(.update_after_bind)) {
+                const feature: DeviceFeature = switch (binding.descriptor_type) {
+                    .uniform_buffer, .uniform_buffer_dynamic => .descriptor_binding_uniform_buffer_update_after_bind,
+                    .sampler, .combined_image_sampler, .sampled_image => .descriptor_binding_sampled_image_update_after_bind,
+                    .storage_image => .descriptor_binding_storage_image_update_after_bind,
+                    .storage_buffer, .storage_buffer_dynamic => .descriptor_binding_storage_buffer_update_after_bind,
+                    .uniform_texel_buffer => .descriptor_binding_uniform_texel_buffer_update_after_bind,
+                    .storage_texel_buffer => .descriptor_binding_storage_texel_buffer_update_after_bind,
+                    .inline_uniform_block => .descriptor_binding_inline_uniform_block_update_after_bind,
+                    else => return error.InvalidOptions,
+                };
+                if (!device.supportsFeature(feature)) return error.FeatureNotPresent;
+            }
+        }
         return descriptors.createLayout(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_descriptor_set_layout,
             .destroy = device.dispatch.destroy_descriptor_set_layout,
         }, options);
+    }
+
+    pub fn descriptorSetLayoutSupport(
+        device: *const Device,
+        options: descriptors.LayoutOptions,
+    ) Error!descriptors.LayoutSupport {
+        const device_handle = try device.dispatchHandle();
+        const get_support = device.dispatch.get_descriptor_set_layout_support orelse return error.MissingCommand;
+        return descriptors.queryLayoutSupport(device_handle, get_support, options);
     }
 
     pub fn createDescriptorPool(
@@ -1941,6 +2160,27 @@ pub const Device = struct {
             .reset = device.dispatch.reset_descriptor_pool,
             .allocate = device.dispatch.allocate_descriptor_sets,
             .free = device.dispatch.free_descriptor_sets,
+        }, options);
+    }
+
+    pub fn updateDescriptorSets(
+        device: *const Device,
+        writes: []const descriptors.Write,
+        copies: []const descriptors.Copy,
+    ) Error!void {
+        const device_handle = try device.dispatchHandle();
+        return descriptors.update(device_handle, device.dispatch.update_descriptor_sets, writes, copies);
+    }
+
+    pub fn createDescriptorUpdateTemplate(
+        device: *const Device,
+        options: descriptors.TemplateOptions,
+    ) Error!descriptors.UpdateTemplate {
+        const device_handle = try device.dispatchHandle();
+        return descriptors.createUpdateTemplate(device_handle, device.allocation_callbacks, .{
+            .create = device.dispatch.create_descriptor_update_template orelse return error.MissingCommand,
+            .destroy = device.dispatch.destroy_descriptor_update_template orelse return error.MissingCommand,
+            .update = device.dispatch.update_descriptor_set_with_template orelse return error.MissingCommand,
         }, options);
     }
 
@@ -2361,6 +2601,7 @@ pub const Device = struct {
             .cmd_resolve_image2 = device.dispatch.cmd_resolve_image2,
             .cmd_bind_pipeline = device.dispatch.cmd_bind_pipeline,
             .cmd_bind_descriptor_sets = device.dispatch.cmd_bind_descriptor_sets,
+            .cmd_push_descriptor_set = device.dispatch.cmd_push_descriptor_set,
             .cmd_bind_vertex_buffers = device.dispatch.cmd_bind_vertex_buffers,
             .cmd_bind_index_buffer = device.dispatch.cmd_bind_index_buffer,
             .cmd_set_viewport = device.dispatch.cmd_set_viewport,
@@ -2527,6 +2768,7 @@ const InstanceDispatch = struct {
     destroy_instance: CommandFunction(raw.PFN_vkDestroyInstance),
     enumerate_physical_devices: CommandFunction(raw.PFN_vkEnumeratePhysicalDevices),
     get_physical_device_properties: CommandFunction(raw.PFN_vkGetPhysicalDeviceProperties),
+    get_physical_device_properties2: ?CommandFunction(raw.PFN_vkGetPhysicalDeviceProperties2),
     get_physical_device_format_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceFormatProperties,
     ),
@@ -2555,6 +2797,9 @@ const InstanceDispatch = struct {
     ),
     get_physical_device_queue_family_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
+    ),
+    get_physical_device_queue_family_properties2: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties2,
     ),
     enumerate_device_extension_properties: CommandFunction(
         raw.PFN_vkEnumerateDeviceExtensionProperties,
@@ -2602,6 +2847,12 @@ const InstanceDispatch = struct {
                 handle,
                 raw.PFN_vkGetPhysicalDeviceProperties,
                 "vkGetPhysicalDeviceProperties",
+            ),
+            .get_physical_device_properties2 = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_properties2,
+                .instance,
             ),
             .get_physical_device_format_properties = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -2668,6 +2919,12 @@ const InstanceDispatch = struct {
                 handle,
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
                 "vkGetPhysicalDeviceQueueFamilyProperties",
+            ),
+            .get_physical_device_queue_family_properties2 = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_queue_family_properties2,
+                .instance,
             ),
             .enumerate_device_extension_properties = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -2744,6 +3001,11 @@ const DeviceDispatch = struct {
     reset_descriptor_pool: CommandFunction(raw.PFN_vkResetDescriptorPool),
     allocate_descriptor_sets: CommandFunction(raw.PFN_vkAllocateDescriptorSets),
     free_descriptor_sets: CommandFunction(raw.PFN_vkFreeDescriptorSets),
+    update_descriptor_sets: CommandFunction(raw.PFN_vkUpdateDescriptorSets),
+    get_descriptor_set_layout_support: ?CommandFunction(raw.PFN_vkGetDescriptorSetLayoutSupport),
+    create_descriptor_update_template: ?CommandFunction(raw.PFN_vkCreateDescriptorUpdateTemplate),
+    destroy_descriptor_update_template: ?CommandFunction(raw.PFN_vkDestroyDescriptorUpdateTemplate),
+    update_descriptor_set_with_template: ?CommandFunction(raw.PFN_vkUpdateDescriptorSetWithTemplate),
     create_pipeline_layout: CommandFunction(raw.PFN_vkCreatePipelineLayout),
     destroy_pipeline_layout: CommandFunction(raw.PFN_vkDestroyPipelineLayout),
     create_graphics_pipelines: CommandFunction(raw.PFN_vkCreateGraphicsPipelines),
@@ -2837,6 +3099,7 @@ const DeviceDispatch = struct {
     cmd_resolve_image2: ?CommandFunction(raw.PFN_vkCmdResolveImage2),
     cmd_bind_pipeline: CommandFunction(raw.PFN_vkCmdBindPipeline),
     cmd_bind_descriptor_sets: CommandFunction(raw.PFN_vkCmdBindDescriptorSets),
+    cmd_push_descriptor_set: ?CommandFunction(raw.PFN_vkCmdPushDescriptorSet),
     cmd_bind_vertex_buffers: CommandFunction(raw.PFN_vkCmdBindVertexBuffers),
     cmd_bind_index_buffer: CommandFunction(raw.PFN_vkCmdBindIndexBuffer),
     cmd_set_viewport: CommandFunction(raw.PFN_vkCmdSetViewport),
@@ -3052,6 +3315,32 @@ const DeviceDispatch = struct {
                 handle,
                 raw.PFN_vkFreeDescriptorSets,
                 "vkFreeDescriptorSets",
+            ),
+            .update_descriptor_sets = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkUpdateDescriptorSets,
+                "vkUpdateDescriptorSets",
+            ),
+            .get_descriptor_set_layout_support = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.get_descriptor_set_layout_support,
+            ),
+            .create_descriptor_update_template = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.create_descriptor_update_template,
+            ),
+            .destroy_descriptor_update_template = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.destroy_descriptor_update_template,
+            ),
+            .update_descriptor_set_with_template = loadDeviceDescriptor(
+                get_device_proc_addr,
+                handle,
+                command.update_descriptor_set_with_template,
             ),
             .create_pipeline_layout = try loadDeviceRequired(
                 get_device_proc_addr,
@@ -3455,6 +3744,7 @@ const DeviceDispatch = struct {
             .cmd_resolve_image2 = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_resolve_image2),
             .cmd_bind_pipeline = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindPipeline, "vkCmdBindPipeline"),
             .cmd_bind_descriptor_sets = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindDescriptorSets, "vkCmdBindDescriptorSets"),
+            .cmd_push_descriptor_set = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_push_descriptor_set),
             .cmd_bind_vertex_buffers = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindVertexBuffers, "vkCmdBindVertexBuffers"),
             .cmd_bind_index_buffer = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdBindIndexBuffer, "vkCmdBindIndexBuffer"),
             .cmd_set_viewport = try loadDeviceRequired(get_device_proc_addr, handle, raw.PFN_vkCmdSetViewport, "vkCmdSetViewport"),
@@ -3967,6 +4257,7 @@ const TestCommand = enum {
     create_messenger,
     destroy_messenger,
     destroy_surface,
+    create_surface,
     surface_support,
     set_object_name,
     features2_alias_only,
@@ -4135,6 +4426,10 @@ fn testGetInstanceProcAddr(
     if (testNameEquals(name, "vkDestroySurfaceKHR")) {
         if (test_missing_command == .destroy_surface) return null;
         return @ptrCast(&testDestroySurface);
+    }
+    if (testNameEquals(name, "vkCreateHeadlessSurfaceEXT")) {
+        if (test_missing_command == .create_surface) return null;
+        return @ptrCast(&testCreateHeadlessSurface);
     }
     if (testNameEquals(name, "vkGetPhysicalDeviceSurfaceSupportKHR")) {
         if (test_missing_command == .surface_support) return null;
@@ -4997,6 +5292,23 @@ fn testDestroySurface(
     test_destroy_surface_count += 1;
 }
 
+fn testCreateHeadlessSurface(
+    _: raw.VkInstance,
+    _: [*c]const raw.VkHeadlessSurfaceCreateInfoEXT,
+    _: [*c]const raw.VkAllocationCallbacks,
+    surface: [*c]raw.VkSurfaceKHR,
+) callconv(.c) raw.VkResult {
+    surface.* = testHandle(raw.VkSurfaceKHR, 0x3000);
+    return test_surface_result;
+}
+
+fn testSurfaceAdapterCreate(context: ?*anyopaque, instance: *const Instance) Error!Surface {
+    const wrong_parent = context != null;
+    var surface = try instance.adoptSurface(testHandle(raw.VkSurfaceKHR, 0x3100), instance.allocation_callbacks);
+    if (wrong_parent) surface._instance_handle = testHandle(raw.VkInstance, 0x9999);
+    return surface;
+}
+
 fn testSurfaceSupport(
     _: raw.VkPhysicalDevice,
     _: u32,
@@ -5005,6 +5317,32 @@ fn testSurfaceSupport(
 ) callconv(.c) raw.VkResult {
     supported[0] = test_surface_supported;
     return test_surface_result;
+}
+
+fn testGetQueueFamilyProperties2(
+    _: raw.VkPhysicalDevice,
+    count: [*c]u32,
+    properties: [*c]raw.VkQueueFamilyProperties2,
+) callconv(.c) void {
+    if (properties == null) {
+        count.* = 1;
+        return;
+    }
+    count.* = 1;
+    properties[0].queueFamilyProperties = .{
+        .queueFlags = raw.VK_QUEUE_GRAPHICS_BIT | raw.VK_QUEUE_VIDEO_DECODE_BIT_KHR,
+        .queueCount = 2,
+        .timestampValidBits = 48,
+        .minImageTransferGranularity = .{ .width = 2, .height = 4, .depth = 1 },
+    };
+    const video: *raw.VkQueueFamilyVideoPropertiesKHR = @ptrCast(@alignCast(properties[0].pNext.?));
+    video.videoCodecOperations = raw.VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+    const query: *raw.VkQueueFamilyQueryResultStatusPropertiesKHR = @ptrCast(@alignCast(video.pNext.?));
+    query.queryResultStatusSupport = raw.VK_TRUE;
+    const priorities: *raw.VkQueueFamilyGlobalPriorityProperties = @ptrCast(@alignCast(query.pNext.?));
+    priorities.priorityCount = 2;
+    priorities.priorities[0] = raw.VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
+    priorities.priorities[1] = raw.VK_QUEUE_GLOBAL_PRIORITY_HIGH;
 }
 
 fn testSurfaceFormats(
@@ -5082,6 +5420,7 @@ fn testInstance() Instance {
             .destroy_instance = testDestroyInstance,
             .enumerate_physical_devices = testFunction(raw.PFN_vkEnumeratePhysicalDevices),
             .get_physical_device_properties = testFunction(raw.PFN_vkGetPhysicalDeviceProperties),
+            .get_physical_device_properties2 = null,
             .get_physical_device_format_properties = testGetPhysicalDeviceFormatProperties,
             .get_physical_device_image_format_properties = testGetPhysicalDeviceImageFormatProperties,
             .get_physical_device_format_properties2 = testGetPhysicalDeviceFormatProperties2,
@@ -5095,6 +5434,7 @@ fn testInstance() Instance {
             .get_physical_device_queue_family_properties = testFunction(
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
             ),
+            .get_physical_device_queue_family_properties2 = null,
             .enumerate_device_extension_properties = testFunction(
                 raw.PFN_vkEnumerateDeviceExtensionProperties,
             ),
@@ -5151,6 +5491,11 @@ fn testDevice() Device {
             .reset_descriptor_pool = testFunction(raw.PFN_vkResetDescriptorPool),
             .allocate_descriptor_sets = testFunction(raw.PFN_vkAllocateDescriptorSets),
             .free_descriptor_sets = testFunction(raw.PFN_vkFreeDescriptorSets),
+            .update_descriptor_sets = testFunction(raw.PFN_vkUpdateDescriptorSets),
+            .get_descriptor_set_layout_support = null,
+            .create_descriptor_update_template = null,
+            .destroy_descriptor_update_template = null,
+            .update_descriptor_set_with_template = null,
             .create_pipeline_layout = testFunction(raw.PFN_vkCreatePipelineLayout),
             .destroy_pipeline_layout = testFunction(raw.PFN_vkDestroyPipelineLayout),
             .create_graphics_pipelines = testFunction(raw.PFN_vkCreateGraphicsPipelines),
@@ -5244,6 +5589,7 @@ fn testDevice() Device {
             .cmd_resolve_image2 = null,
             .cmd_bind_pipeline = testFunction(raw.PFN_vkCmdBindPipeline),
             .cmd_bind_descriptor_sets = testFunction(raw.PFN_vkCmdBindDescriptorSets),
+            .cmd_push_descriptor_set = null,
             .cmd_bind_vertex_buffers = testFunction(raw.PFN_vkCmdBindVertexBuffers),
             .cmd_bind_index_buffer = testFunction(raw.PFN_vkCmdBindIndexBuffer),
             .cmd_set_viewport = testFunction(raw.PFN_vkCmdSetViewport),
@@ -6658,6 +7004,61 @@ test "surface and object-name wrappers normalize fake dispatch results" {
         error.MissingCommand,
         device.setObjectName(&device, "test-device"),
     );
+}
+
+test "typed headless surface creation handles commands and rollback" {
+    var instance = testInstance();
+    defer instance.deinit();
+    test_missing_command = .create_surface;
+    try std.testing.expectError(error.MissingCommand, instance.createHeadlessSurface(.{}));
+
+    test_missing_command = .none;
+    test_destroy_surface_count = 0;
+    test_surface_result = raw.VK_ERROR_INITIALIZATION_FAILED;
+    try std.testing.expectError(error.InitializationFailed, instance.createHeadlessSurface(.{}));
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_surface_count);
+
+    test_surface_result = raw.VK_SUCCESS;
+    var surface = try instance.createHeadlessSurface(.{});
+    surface.deinit();
+    try std.testing.expectEqual(@as(usize, 2), test_destroy_surface_count);
+}
+
+test "surface adapters validate parent ownership and roll back mismatches" {
+    var instance = testInstance();
+    defer instance.deinit();
+    test_missing_command = .none;
+    test_destroy_surface_count = 0;
+    var surface = try instance.createSurfaceWithAdapter(.{ .create = testSurfaceAdapterCreate });
+    surface.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_surface_count);
+
+    try std.testing.expectError(error.InvalidHandle, instance.createSurfaceWithAdapter(.{
+        .context = @ptrFromInt(1),
+        .create = testSurfaceAdapterCreate,
+    }));
+    try std.testing.expectEqual(@as(usize, 2), test_destroy_surface_count);
+}
+
+test "extended queue family discovery fills typed caller storage" {
+    const instance = testInstance();
+    var physical_device: PhysicalDevice = .{
+        ._handle = testHandle(raw.VkPhysicalDevice, 0x1100),
+        ._instance_handle = testHandle(raw.VkInstance, 0x1000),
+        .dispatch = instance.dispatch,
+    };
+    physical_device.dispatch.get_physical_device_queue_family_properties2 = testGetQueueFamilyProperties2;
+    try std.testing.expectEqual(@as(u32, 1), try physical_device.queueFamilyCount());
+    var families: [1]QueueFamily = undefined;
+    const written = try physical_device.queueFamiliesInto(&families);
+    try std.testing.expectEqual(@as(usize, 1), written.len);
+    try std.testing.expect(written[0].supports(.graphics));
+    try std.testing.expect(written[0].supports(.video_decode));
+    try std.testing.expect(written[0].video_codec_operations.contains(.decode_h264));
+    try std.testing.expect(written[0].query_result_status_support);
+    try std.testing.expectEqual(@as(u32, 48), written[0].timestamp_valid_bits);
+    try std.testing.expectEqual(@as(usize, 2), written[0].global_priorities.values().len);
+    try std.testing.expectError(error.BufferTooSmall, physical_device.queueFamiliesInto(&.{}));
 }
 
 test "physical device memory queries produce validated owned snapshots" {

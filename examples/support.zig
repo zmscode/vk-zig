@@ -17,6 +17,6 @@ pub fn deviceTypeName(device_type: vk.PhysicalDeviceType) []const u8 {
     return "other";
 }
 
-pub fn boolName(value: vk.raw.VkBool32) []const u8 {
-    return if (value == vk.raw.VK_TRUE) "yes" else "no";
+pub fn boolName(value: bool) []const u8 {
+    return if (value) "yes" else "no";
 }

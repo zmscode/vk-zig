@@ -39,6 +39,33 @@ pub const Portability = struct {
     }
 };
 
+const metal_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_EXT_metal_surface" };
+const win32_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_win32_surface" };
+const xlib_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_xlib_surface" };
+const xcb_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_xcb_surface" };
+const wayland_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_wayland_surface" };
+const android_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_KHR_android_surface" };
+const headless_surface_extensions = [_][:0]const u8{ "VK_KHR_surface", "VK_EXT_headless_surface" };
+
+/// Instance extensions needed by the surface constructor selected at build time.
+pub const SurfaceConfiguration = struct {
+    pub fn instanceExtensions() []const [:0]const u8 {
+        return switch (platform) {
+            .metal => &metal_surface_extensions,
+            .win32 => &win32_surface_extensions,
+            .xlib => &xlib_surface_extensions,
+            .xcb => &xcb_surface_extensions,
+            .wayland => &wayland_surface_extensions,
+            .android => &android_surface_extensions,
+            .none => &.{},
+        };
+    }
+
+    pub fn headlessInstanceExtensions() []const [:0]const u8 {
+        return &headless_surface_extensions;
+    }
+};
+
 pub const diagnostics = struct {
     pub const Requests = struct {
         validation: bool = false,

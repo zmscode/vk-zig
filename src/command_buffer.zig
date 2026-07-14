@@ -254,6 +254,7 @@ pub const Buffer = struct {
     cmd_resolve_image2: ?CommandFunction(raw.PFN_vkCmdResolveImage2),
     cmd_bind_pipeline: CommandFunction(raw.PFN_vkCmdBindPipeline),
     cmd_bind_descriptor_sets: CommandFunction(raw.PFN_vkCmdBindDescriptorSets),
+    cmd_push_descriptor_set: ?CommandFunction(raw.PFN_vkCmdPushDescriptorSet),
     cmd_bind_vertex_buffers: CommandFunction(raw.PFN_vkCmdBindVertexBuffers),
     cmd_bind_index_buffer: CommandFunction(raw.PFN_vkCmdBindIndexBuffer),
     cmd_set_viewport: CommandFunction(raw.PFN_vkCmdSetViewport),
@@ -938,6 +939,34 @@ pub const Buffer = struct {
         command_buffer.cmd_bind_descriptor_sets(handle, bind_point.toRaw(), try layout.rawHandle(), first_set, @intCast(sets.len), set_handles[0..sets.len].ptr, @intCast(dynamic_offsets.len), if (dynamic_offsets.len == 0) null else dynamic_offsets.ptr);
     }
 
+    pub fn pushDescriptorSet(
+        command_buffer: *Buffer,
+        bind_point: pipeline.BindPoint,
+        layout: *const pipeline.Layout,
+        set_index: u32,
+        set_layout: *const descriptor.SetLayout,
+        writes: []const descriptor.PushWrite,
+    ) core.Error!void {
+        const push_descriptors = command_buffer.cmd_push_descriptor_set orelse return error.MissingCommand;
+        if (command_buffer.state != .recording or layout._device_handle != command_buffer._device_handle or
+            set_layout._device_handle != command_buffer._device_handle)
+        {
+            return error.InvalidHandle;
+        }
+        const set_layout_handle = try set_layout.rawHandle();
+        if (!layout.supportsDescriptorSet(set_index, set_layout_handle)) return error.InvalidOptions;
+        return descriptor.push(
+            command_buffer._device_handle,
+            push_descriptors,
+            try command_buffer.liveHandle(),
+            bind_point.toRaw(),
+            try layout.rawHandle(),
+            set_index,
+            set_layout,
+            writes,
+        );
+    }
+
     pub fn bindVertexBuffers(command_buffer: *Buffer, first_binding: u32, bindings: []const VertexBufferBinding) core.Error!void {
         const handle = try command_buffer.liveHandle();
         if (command_buffer.state != .recording or bindings.len == 0 or bindings.len > 32) return error.InvalidOptions;
@@ -1276,6 +1305,7 @@ pub const Pool = struct {
     cmd_resolve_image2: ?CommandFunction(raw.PFN_vkCmdResolveImage2),
     cmd_bind_pipeline: CommandFunction(raw.PFN_vkCmdBindPipeline),
     cmd_bind_descriptor_sets: CommandFunction(raw.PFN_vkCmdBindDescriptorSets),
+    cmd_push_descriptor_set: ?CommandFunction(raw.PFN_vkCmdPushDescriptorSet),
     cmd_bind_vertex_buffers: CommandFunction(raw.PFN_vkCmdBindVertexBuffers),
     cmd_bind_index_buffer: CommandFunction(raw.PFN_vkCmdBindIndexBuffer),
     cmd_set_viewport: CommandFunction(raw.PFN_vkCmdSetViewport),
@@ -1369,6 +1399,7 @@ pub const Pool = struct {
             .cmd_resolve_image2 = pool.cmd_resolve_image2,
             .cmd_bind_pipeline = pool.cmd_bind_pipeline,
             .cmd_bind_descriptor_sets = pool.cmd_bind_descriptor_sets,
+            .cmd_push_descriptor_set = pool.cmd_push_descriptor_set,
             .cmd_bind_vertex_buffers = pool.cmd_bind_vertex_buffers,
             .cmd_bind_index_buffer = pool.cmd_bind_index_buffer,
             .cmd_set_viewport = pool.cmd_set_viewport,

@@ -116,6 +116,7 @@ pub const ObjectType = enum(u32) {
     sampler = raw.VK_OBJECT_TYPE_SAMPLER,
     descriptor_pool = raw.VK_OBJECT_TYPE_DESCRIPTOR_POOL,
     descriptor_set = raw.VK_OBJECT_TYPE_DESCRIPTOR_SET,
+    descriptor_update_template = raw.VK_OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE,
     framebuffer = raw.VK_OBJECT_TYPE_FRAMEBUFFER,
     command_pool = raw.VK_OBJECT_TYPE_COMMAND_POOL,
     surface = raw.VK_OBJECT_TYPE_SURFACE_KHR,

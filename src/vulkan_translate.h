@@ -10,14 +10,22 @@
 #include <windows.h>
 #include <vulkan/vulkan_win32.h>
 #elif defined(VK_ZIG_PLATFORM_XLIB)
-#include <X11/Xlib.h>
+typedef struct _XDisplay Display;
+typedef unsigned long XID;
+typedef XID Window;
+typedef XID VisualID;
 #include <vulkan/vulkan_xlib.h>
 #elif defined(VK_ZIG_PLATFORM_XCB)
-#include <xcb/xcb.h>
+typedef struct xcb_connection_t xcb_connection_t;
+typedef uint32_t xcb_window_t;
+typedef uint32_t xcb_visualid_t;
 #include <vulkan/vulkan_xcb.h>
 #elif defined(VK_ZIG_PLATFORM_WAYLAND)
-#include <wayland-client.h>
+struct wl_display;
+struct wl_surface;
 #include <vulkan/vulkan_wayland.h>
+#elif defined(VK_ZIG_PLATFORM_ANDROID)
+#include <vulkan/vulkan_android.h>
 #endif
 
 #endif

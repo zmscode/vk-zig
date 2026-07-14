@@ -31,6 +31,11 @@ pub fn main() !void {
                 return error.WaylandDeclarationsMissing;
             }
         },
+        .android => {
+            if (!@hasDecl(vk.raw, "VkAndroidSurfaceCreateInfoKHR")) {
+                return error.AndroidDeclarationsMissing;
+            }
+        },
         .none => {},
     }
 }

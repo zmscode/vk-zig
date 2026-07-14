@@ -122,6 +122,7 @@ var extensions: vk.ExtensionSet(8) = .{};
 try extensions.append(vk.extension.khr_surface.name);
 try extensions.append(vk.extension.ext_debug_utils.name);
 try extensions.appendAll(vk.Portability.instanceExtensions());
+try extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
 
 var instance = try entry.createInstance(.{
     .extensions = extensions.slice(),
@@ -263,7 +264,7 @@ defer loader.deinit();
 
 The typed wrapper covers normal discovery, resource ownership, memory, pipelines, descriptors,
 synchronization, rendering, and command recording without hiding Vulkan's explicit model.
-Generated command descriptors remain available for platform integration and advanced extension
+Generated command descriptors remain available for advanced extension
 work; each descriptor binds the command's name, function-pointer type, and dispatch scope:
 
 ```zig
@@ -287,11 +288,26 @@ Do not use it for enumeration, wait, acquire, or presentation commands: status v
 
 ## Surfaces and debug utilities
 
-After a platform-specific command creates a raw `VkSurfaceKHR`, transfer ownership to the wrapper:
+The configured platform constructor owns the native create-info and uses the instance's allocation
+policy. Add its required extensions before creating the instance:
 
 ```zig
-var surface = try instance.adoptSurface(raw_surface, allocation_callbacks);
+try extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
+
+// Metal build (`-Dplatform=metal`): `layer` is a stable CAMetalLayer pointer.
+var surface = try instance.createMetalSurface(.{ .layer = layer });
 defer surface.deinit();
+```
+
+Equivalent typed constructors exist for Win32, Xlib, XCB, Wayland, and Android builds. Native
+display/window pointers must remain valid for the surface lifetime. For off-screen use, request
+`SurfaceConfiguration.headlessInstanceExtensions()` and call `createHeadlessSurface(.{})`.
+Window libraries can expose a checked `SurfaceAdapter`; `adoptSurface` is retained only for
+advanced foreign-handle interop.
+
+Surface discovery remains fully typed:
+
+```zig
 const can_present = try physical_device.surfaceSupport(&surface, graphics_family);
 const capabilities = try physical_device.surfaceCapabilities(&surface);
 const extent = capabilities.extent_current orelse chooseWindowExtent(capabilities);
@@ -393,6 +409,33 @@ if (status != .success) try recreateSwapchain();
 The frame-resource layer also owns image views, command pools, semaphores, and fences. Command
 buffers are borrowed from their pool, and swapchain images are borrowed from their swapchain.
 Normal clear/submit/present code does not need `vk.raw`:
+
+Descriptor layouts, pools, borrowed sets, variable counts, updates, copies, update templates, and
+push descriptors are typed as well. The wrapper validates layout metadata and assembles all
+temporary pointer/count graphs internally:
+
+```zig
+var layout = try device.createDescriptorSetLayout(.{ .bindings = &.{.{
+    .binding = 0,
+    .descriptor_type = .uniform_buffer,
+    .stages = .init(&.{.vertex}),
+}} });
+defer layout.deinit();
+var pool = try device.createDescriptorPool(.{
+    .max_sets = 1,
+    .sizes = &.{.{ .descriptor_type = .uniform_buffer, .count = 1 }},
+});
+defer pool.deinit();
+var set = try pool.allocate(&layout);
+try device.updateDescriptorSets(&.{.{
+    .destination = &set,
+    .binding = 0,
+    .data = .{ .uniform_buffer = &.{.{ .buffer = &uniform_buffer }} },
+}}, &.{});
+```
+
+Call `descriptorSetLayoutSupport` before creation when variable descriptor limits matter. A pool
+reset invalidates all borrowed sets; stale-set use returns `InactiveObject` in every build mode.
 
 ```zig
 var command_pool = try device.createCommandPool(.{

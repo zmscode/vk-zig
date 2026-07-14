@@ -284,6 +284,13 @@ const flag_specs = [_]FlagSpec{
         .raw_flags_name = "VkSparseImageFormatFlags",
         .constant_prefix = "VK_SPARSE_IMAGE_FORMAT_",
     },
+    .{
+        .registry_name = "VkDescriptorBindingFlagBits",
+        .bit_name = "DescriptorBindingBit",
+        .flags_name = "DescriptorBindingFlags",
+        .raw_flags_name = "VkDescriptorBindingFlags",
+        .constant_prefix = "VK_DESCRIPTOR_BINDING_",
+    },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -320,12 +327,201 @@ pub fn main(init: std.process.Init) !void {
     for (flag_specs) |spec| {
         try writeFlags(gpa, &output.writer, registry, &binding_constants, spec);
     }
+    try writeFeatures(gpa, &output.writer, bindings);
     try writeValueTypes(&output.writer);
 
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = args[3],
         .data = output.written(),
     });
+}
+
+const FeatureStruct = struct {
+    raw_name: []const u8,
+    method_name: []const u8,
+};
+
+const feature_structs = [_]FeatureStruct{
+    .{ .raw_name = "VkPhysicalDeviceFeatures", .method_name = "core10" },
+    .{ .raw_name = "VkPhysicalDeviceVulkan11Features", .method_name = "vulkan11" },
+    .{ .raw_name = "VkPhysicalDeviceVulkan12Features", .method_name = "vulkan12" },
+    .{ .raw_name = "VkPhysicalDeviceVulkan13Features", .method_name = "vulkan13" },
+    .{ .raw_name = "VkPhysicalDeviceVulkan14Features", .method_name = "vulkan14" },
+};
+
+const FeatureField = struct {
+    raw_name: []const u8,
+    zig_name: []const u8,
+    owner: usize,
+};
+
+fn writeFeatures(gpa: std.mem.Allocator, writer: *std.Io.Writer, bindings: []const u8) !void {
+    var fields: std.ArrayList(FeatureField) = .empty;
+    defer {
+        for (fields.items) |field| gpa.free(field.zig_name);
+        fields.deinit(gpa);
+    }
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    defer names.deinit(gpa);
+
+    for (feature_structs, 0..) |feature_struct, owner| {
+        var marker_buffer: [128]u8 = undefined;
+        const marker = try std.fmt.bufPrint(&marker_buffer, "pub const struct_{s} = extern struct {{", .{feature_struct.raw_name});
+        const start = std.mem.indexOf(u8, bindings, marker) orelse return error.MissingFeatureStruct;
+        const body_start = start + marker.len;
+        const end = std.mem.indexOfPos(u8, bindings, body_start, "\n};") orelse return error.InvalidBindings;
+        var lines = std.mem.splitScalar(u8, bindings[body_start..end], '\n');
+        while (lines.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, " \t\r");
+            const separator = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            const raw_name = line[0..separator];
+            if (std.mem.eql(u8, raw_name, "sType") or std.mem.eql(u8, raw_name, "pNext")) continue;
+            if (std.mem.indexOf(u8, line[separator + 1 ..], "VkBool32") == null) continue;
+            var name_buffer: [generated_name_size_max]u8 = undefined;
+            const zig_name = try camelToSnake(raw_name, &name_buffer);
+            if (names.contains(zig_name)) return error.DuplicateFeatureName;
+            try names.put(gpa, try gpa.dupe(u8, zig_name), {});
+            try fields.append(gpa, .{
+                .raw_name = raw_name,
+                .zig_name = try gpa.dupe(u8, zig_name),
+                .owner = owner,
+            });
+        }
+    }
+    defer {
+        var iterator = names.keyIterator();
+        while (iterator.next()) |name| gpa.free(name.*);
+    }
+
+    try writer.writeAll("\npub const Feature = enum {\n");
+    for (fields.items) |field| try writer.print("    {s},\n", .{field.zig_name});
+    try writer.writeAll(
+        \\};
+        \\
+        \\pub const FeatureSet = struct {
+        \\    bits: std.EnumSet(Feature) = .initEmpty(),
+        \\
+        \\    pub const empty: FeatureSet = .{};
+        \\
+        \\    pub fn init(features: []const Feature) FeatureSet {
+        \\        var set: FeatureSet = .empty;
+        \\        for (features) |feature| set.bits.insert(feature);
+        \\        return set;
+        \\    }
+        \\
+        \\    pub fn contains(set: FeatureSet, feature: Feature) bool {
+        \\        return set.bits.contains(feature);
+        \\    }
+        \\
+        \\    pub fn enable(set: *FeatureSet, feature: Feature) void {
+        \\        set.bits.insert(feature);
+        \\    }
+        \\
+        \\    pub fn containsAll(set: FeatureSet, required: FeatureSet) bool {
+        \\        return set.bits.supersetOf(required.bits);
+        \\    }
+        \\
+        \\    pub fn firstMissing(set: FeatureSet, required: FeatureSet) ?Feature {
+        \\        inline for (std.meta.tags(Feature)) |feature| {
+        \\            if (required.contains(feature) and !set.contains(feature)) return feature;
+        \\        }
+        \\        return null;
+        \\    }
+        \\
+    );
+    for (feature_structs, 0..) |feature_struct, owner| {
+        try writer.print("    pub fn {s}Raw(set: FeatureSet) raw.{s} {{\n", .{ feature_struct.method_name, feature_struct.raw_name });
+        if (owner == 0) {
+            try writer.writeAll("        var value: raw.VkPhysicalDeviceFeatures = .{};\n");
+        } else {
+            try writer.print("        var value: raw.{s} = .{{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_{d}_{d}_FEATURES }};\n", .{
+                feature_struct.raw_name,
+                1,
+                owner,
+            });
+        }
+        for (fields.items) |field| if (field.owner == owner) {
+            try writer.print("        if (set.contains(.{s})) value.{s} = raw.VK_TRUE;\n", .{ field.zig_name, field.raw_name });
+        };
+        try writer.writeAll("        return value;\n    }\n\n");
+    }
+    try writer.writeAll("    pub fn fromRaw(\n");
+    for (feature_structs) |feature_struct| {
+        try writer.print("        {s}: *const raw.{s},\n", .{ feature_struct.method_name, feature_struct.raw_name });
+    }
+    try writer.writeAll("    ) FeatureSet {\n        var set: FeatureSet = .empty;\n");
+    for (fields.items) |field| {
+        try writer.print("        if ({s}.{s} != raw.VK_FALSE) set.enable(.{s});\n", .{
+            feature_structs[field.owner].method_name,
+            field.raw_name,
+            field.zig_name,
+        });
+    }
+    try writer.writeAll(
+        \\        return set;
+        \\    }
+        \\
+        \\    pub fn coreRaw(set: FeatureSet) raw.VkPhysicalDeviceFeatures {
+        \\        return set.core10Raw();
+        \\    }
+        \\
+        \\    pub fn fromCoreRaw(value: *const raw.VkPhysicalDeviceFeatures) FeatureSet {
+        \\        var empty11: raw.VkPhysicalDeviceVulkan11Features = .{};
+        \\        var empty12: raw.VkPhysicalDeviceVulkan12Features = .{};
+        \\        var empty13: raw.VkPhysicalDeviceVulkan13Features = .{};
+        \\        var empty14: raw.VkPhysicalDeviceVulkan14Features = .{};
+        \\        return fromRaw(value, &empty11, &empty12, &empty13, &empty14);
+        \\    }
+        \\
+        \\    pub fn hasPromoted(set: FeatureSet) bool {
+        \\        inline for (std.meta.tags(Feature)) |feature| switch (feature) {
+        \\
+    );
+    for (fields.items) |field| if (field.owner != 0) {
+        try writer.print("            .{s},\n", .{field.zig_name});
+    };
+    try writer.writeAll(
+        \\            => if (set.contains(feature)) return true,
+        \\            else => {},
+        \\        };
+        \\        return false;
+        \\    }
+        \\};
+        \\
+    );
+}
+
+fn camelToSnake(source: []const u8, buffer: []u8) ![]const u8 {
+    const Override = struct { raw: []const u8, zig: []const u8 };
+    const overrides = [_]Override{
+        .{ .raw = "dualSrcBlend", .zig = "dual_source_blend" },
+        .{ .raw = "sparseResidencyImage2D", .zig = "sparse_residency_image_2d" },
+        .{ .raw = "sparseResidencyImage3D", .zig = "sparse_residency_image_3d" },
+        .{ .raw = "sparseResidency2Samples", .zig = "sparse_residency_2_samples" },
+        .{ .raw = "sparseResidency4Samples", .zig = "sparse_residency_4_samples" },
+        .{ .raw = "sparseResidency8Samples", .zig = "sparse_residency_8_samples" },
+        .{ .raw = "sparseResidency16Samples", .zig = "sparse_residency_16_samples" },
+    };
+    for (overrides) |override| if (std.mem.eql(u8, source, override.raw)) {
+        if (override.zig.len > buffer.len) return error.NameTooLong;
+        @memcpy(buffer[0..override.zig.len], override.zig);
+        return buffer[0..override.zig.len];
+    };
+    var length: usize = 0;
+    for (source, 0..) |character, index| {
+        const upper = std.ascii.isUpper(character);
+        const previous_lower_or_digit = index != 0 and (std.ascii.isLower(source[index - 1]) or std.ascii.isDigit(source[index - 1]));
+        const acronym_boundary = index != 0 and upper and index + 1 < source.len and std.ascii.isLower(source[index + 1]) and std.ascii.isUpper(source[index - 1]);
+        if (upper and (previous_lower_or_digit or acronym_boundary)) {
+            if (length == buffer.len) return error.NameTooLong;
+            buffer[length] = '_';
+            length += 1;
+        }
+        if (length == buffer.len) return error.NameTooLong;
+        buffer[length] = std.ascii.toLower(character);
+        length += 1;
+    }
+    return buffer[0..length];
 }
 
 fn collectBindingConstants(
