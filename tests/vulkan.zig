@@ -891,6 +891,9 @@ test "all public wrapper declarations compile" {
     _ = &vk.Device.createImageView;
     _ = &vk.Device.createSemaphore;
     _ = &vk.Device.createFence;
+    _ = &vk.Device.resetFences;
+    _ = &vk.Device.waitFences;
+    _ = &vk.Device.waitTimelineSemaphores;
     _ = &vk.Device.createCommandPool;
     _ = &vk.Device.createSwapchain;
     _ = &vk.Device.beginCommandBufferLabelRaw;
@@ -905,7 +908,11 @@ test "all public wrapper declarations compile" {
     _ = &vk.Swapchain.acquireNextImage;
     _ = &vk.ImageView.deinit;
     _ = &vk.Semaphore.deinit;
+    _ = &vk.Semaphore.counterValue;
+    _ = &vk.Semaphore.signal;
+    _ = &vk.Semaphore.wait;
     _ = &vk.Fence.deinit;
+    _ = &vk.Fence.status;
     _ = &vk.Fence.reset;
     _ = &vk.Fence.wait;
     _ = &vk.CommandPool.deinit;

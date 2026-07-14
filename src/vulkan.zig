@@ -1058,14 +1058,31 @@ pub const ImageView = struct {
     }
 };
 
-pub const SemaphoreOptions = struct {};
+pub const SemaphoreKind = enum {
+    binary,
+    timeline,
+};
 
-/// An owned binary semaphore.
+pub const SemaphoreOptions = struct {
+    kind: SemaphoreKind = .binary,
+    initial_value: u64 = 0,
+};
+
+pub const TimelineWaitStatus = enum {
+    success,
+    timeout,
+};
+
+/// An owned binary or timeline semaphore.
 pub const Semaphore = struct {
     _handle: ?SemaphoreHandle,
     _device_handle: DeviceHandle,
+    kind: SemaphoreKind,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_semaphore: CommandFunction(raw.PFN_vkDestroySemaphore),
+    get_counter_value: ?CommandFunction(raw.PFN_vkGetSemaphoreCounterValue),
+    wait_semaphores: ?CommandFunction(raw.PFN_vkWaitSemaphores),
+    signal_semaphore: ?CommandFunction(raw.PFN_vkSignalSemaphore),
 
     pub fn deinit(semaphore: *Semaphore) void {
         const handle = semaphore._handle orelse return;
@@ -1081,6 +1098,58 @@ pub const Semaphore = struct {
     pub fn rawHandle(semaphore: *const Semaphore) Error!raw.VkSemaphore {
         return semaphore._handle orelse error.InactiveObject;
     }
+
+    pub fn counterValue(semaphore: *const Semaphore) Error!u64 {
+        if (semaphore.kind != .timeline) return error.InvalidOptions;
+        const handle = semaphore._handle orelse return error.InactiveObject;
+        const get_counter_value = semaphore.get_counter_value orelse {
+            return error.MissingCommand;
+        };
+        var value: u64 = 0;
+        try checkSuccess(get_counter_value(semaphore._device_handle, handle, &value));
+        return value;
+    }
+
+    /// Host-signals a timeline semaphore. Values must increase monotonically.
+    pub fn signal(semaphore: *const Semaphore, value: u64) Error!void {
+        if (value <= try semaphore.counterValue()) return error.InvalidOptions;
+        const signal_semaphore = semaphore.signal_semaphore orelse {
+            return error.MissingCommand;
+        };
+        const signal_info: raw.VkSemaphoreSignalInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+            .semaphore = try semaphore.rawHandle(),
+            .value = value,
+        };
+        try checkSuccess(signal_semaphore(semaphore._device_handle, &signal_info));
+    }
+
+    pub fn wait(
+        semaphore: *const Semaphore,
+        value: u64,
+        timeout: Timeout,
+    ) Error!TimelineWaitStatus {
+        if (semaphore.kind != .timeline) return error.InvalidOptions;
+        const handle = semaphore._handle orelse return error.InactiveObject;
+        const wait_semaphores = semaphore.wait_semaphores orelse {
+            return error.MissingCommand;
+        };
+        const wait_info: raw.VkSemaphoreWaitInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            .semaphoreCount = 1,
+            .pSemaphores = @ptrCast(&handle),
+            .pValues = @ptrCast(&value),
+        };
+        const result = wait_semaphores(
+            semaphore._device_handle,
+            &wait_info,
+            timeout.toRaw(),
+        );
+        if (result == raw.VK_SUCCESS) return .success;
+        if (result == raw.VK_TIMEOUT) return .timeout;
+        try checkSuccess(result);
+        unreachable;
+    }
 };
 
 pub const FenceOptions = struct {
@@ -1092,12 +1161,28 @@ pub const FenceWaitStatus = enum {
     timeout,
 };
 
+pub const FenceStatus = enum {
+    signaled,
+    unsignaled,
+};
+
+pub const WaitMode = enum {
+    all,
+    any,
+};
+
+pub const TimelineSemaphoreWait = struct {
+    semaphore: *const Semaphore,
+    value: u64,
+};
+
 /// An owned fence with operation-specific wait and reset behavior.
 pub const Fence = struct {
     _handle: ?FenceHandle,
     _device_handle: DeviceHandle,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_fence: CommandFunction(raw.PFN_vkDestroyFence),
+    get_fence_status: CommandFunction(raw.PFN_vkGetFenceStatus),
     reset_fences: CommandFunction(raw.PFN_vkResetFences),
     wait_for_fences: CommandFunction(raw.PFN_vkWaitForFences),
 
@@ -1110,6 +1195,15 @@ pub const Fence = struct {
     pub fn reset(fence: *const Fence) Error!void {
         const handle = fence._handle orelse return error.InactiveObject;
         try checkSuccess(fence.reset_fences(fence._device_handle, 1, @ptrCast(&handle)));
+    }
+
+    pub fn status(fence: *const Fence) Error!FenceStatus {
+        const handle = fence._handle orelse return error.InactiveObject;
+        const result = fence.get_fence_status(fence._device_handle, handle);
+        if (result == raw.VK_SUCCESS) return .signaled;
+        if (result == raw.VK_NOT_READY) return .unsignaled;
+        try checkSuccess(result);
+        unreachable;
     }
 
     pub fn wait(fence: *const Fence, timeout: Timeout) Error!FenceWaitStatus {
@@ -1542,6 +1636,7 @@ pub const Swapchain = struct {
         if (options.semaphore == null and options.fence == null) return error.InvalidOptions;
         const semaphore = if (options.semaphore) |semaphore| blk: {
             if (semaphore._device_handle != swapchain._device_handle) return error.InvalidHandle;
+            if (semaphore.kind != .binary) return error.InvalidOptions;
             break :blk try semaphore.rawHandle();
         } else null;
         const fence = if (options.fence) |fence| blk: {
@@ -2537,11 +2632,23 @@ pub const Device = struct {
 
     pub fn createSemaphore(
         device: *const Device,
-        _: SemaphoreOptions,
+        options: SemaphoreOptions,
     ) Error!Semaphore {
         const device_handle = device._handle orelse return error.InactiveObject;
+        if (options.kind == .binary and options.initial_value != 0) {
+            return error.InvalidOptions;
+        }
+        var type_create_info: raw.VkSemaphoreTypeCreateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+            .semaphoreType = switch (options.kind) {
+                .binary => raw.VK_SEMAPHORE_TYPE_BINARY,
+                .timeline => raw.VK_SEMAPHORE_TYPE_TIMELINE,
+            },
+            .initialValue = options.initial_value,
+        };
         const create_info: raw.VkSemaphoreCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+            .pNext = if (options.kind == .timeline) &type_create_info else null,
         };
         var handle: raw.VkSemaphore = null;
         const result = device.dispatch.create_semaphore(
@@ -2564,8 +2671,12 @@ pub const Device = struct {
         return .{
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = device_handle,
+            .kind = options.kind,
             .allocation_callbacks = device.allocation_callbacks,
             .destroy_semaphore = device.dispatch.destroy_semaphore,
+            .get_counter_value = device.dispatch.get_semaphore_counter_value,
+            .wait_semaphores = device.dispatch.wait_semaphores,
+            .signal_semaphore = device.dispatch.signal_semaphore,
         };
     }
 
@@ -2602,9 +2713,87 @@ pub const Device = struct {
             ._device_handle = device_handle,
             .allocation_callbacks = device.allocation_callbacks,
             .destroy_fence = device.dispatch.destroy_fence,
+            .get_fence_status = device.dispatch.get_fence_status,
             .reset_fences = device.dispatch.reset_fences,
             .wait_for_fences = device.dispatch.wait_for_fences,
         };
+    }
+
+    pub fn resetFences(device: *const Device, fences: []const *const Fence) Error!void {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        if (fences.len == 0) return;
+        if (fences.len > submission_item_count_max) return error.CountOverflow;
+        var handles: [submission_item_count_max]raw.VkFence = undefined;
+        for (fences, handles[0..fences.len]) |fence, *handle| {
+            if (fence._device_handle != device_handle) return error.InvalidHandle;
+            handle.* = try fence.rawHandle();
+        }
+        try checkSuccess(device.dispatch.reset_fences(
+            device_handle,
+            @intCast(fences.len),
+            handles[0..fences.len].ptr,
+        ));
+    }
+
+    pub fn waitFences(
+        device: *const Device,
+        fences: []const *const Fence,
+        mode: WaitMode,
+        timeout: Timeout,
+    ) Error!FenceWaitStatus {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        if (fences.len == 0) return .success;
+        if (fences.len > submission_item_count_max) return error.CountOverflow;
+        var handles: [submission_item_count_max]raw.VkFence = undefined;
+        for (fences, handles[0..fences.len]) |fence, *handle| {
+            if (fence._device_handle != device_handle) return error.InvalidHandle;
+            handle.* = try fence.rawHandle();
+        }
+        const result = device.dispatch.wait_for_fences(
+            device_handle,
+            @intCast(fences.len),
+            handles[0..fences.len].ptr,
+            if (mode == .all) raw.VK_TRUE else raw.VK_FALSE,
+            timeout.toRaw(),
+        );
+        if (result == raw.VK_SUCCESS) return .success;
+        if (result == raw.VK_TIMEOUT) return .timeout;
+        try checkSuccess(result);
+        unreachable;
+    }
+
+    pub fn waitTimelineSemaphores(
+        device: *const Device,
+        waits: []const TimelineSemaphoreWait,
+        mode: WaitMode,
+        timeout: Timeout,
+    ) Error!TimelineWaitStatus {
+        const device_handle = device._handle orelse return error.InactiveObject;
+        if (waits.len == 0) return .success;
+        if (waits.len > submission_item_count_max) return error.CountOverflow;
+        const wait_semaphores = device.dispatch.wait_semaphores orelse {
+            return error.MissingCommand;
+        };
+        var handles: [submission_item_count_max]raw.VkSemaphore = undefined;
+        var values: [submission_item_count_max]u64 = undefined;
+        for (waits, handles[0..waits.len], values[0..waits.len]) |wait, *handle, *value| {
+            if (wait.semaphore._device_handle != device_handle) return error.InvalidHandle;
+            if (wait.semaphore.kind != .timeline) return error.InvalidOptions;
+            handle.* = try wait.semaphore.rawHandle();
+            value.* = wait.value;
+        }
+        const wait_info: raw.VkSemaphoreWaitInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            .flags = if (mode == .any) raw.VK_SEMAPHORE_WAIT_ANY_BIT else 0,
+            .semaphoreCount = @intCast(waits.len),
+            .pSemaphores = handles[0..waits.len].ptr,
+            .pValues = values[0..waits.len].ptr,
+        };
+        const result = wait_semaphores(device_handle, &wait_info, timeout.toRaw());
+        if (result == raw.VK_SUCCESS) return .success;
+        if (result == raw.VK_TIMEOUT) return .timeout;
+        try checkSuccess(result);
+        unreachable;
     }
 
     pub fn createCommandPool(
@@ -2832,6 +3021,7 @@ pub const Queue = struct {
         var wait_stages: [submission_item_count_max]raw.VkPipelineStageFlags = undefined;
         for (options.waits, wait_handles[0..options.waits.len], wait_stages[0..options.waits.len]) |wait, *handle, *stage| {
             if (wait.semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
+            if (wait.semaphore.kind != .binary) return error.InvalidOptions;
             handle.* = try wait.semaphore.rawHandle();
             stage.* = wait.stage.toRaw();
         }
@@ -2846,6 +3036,7 @@ pub const Queue = struct {
         var signal_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
         for (options.signals, signal_handles[0..options.signals.len]) |semaphore, *handle| {
             if (semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
+            if (semaphore.kind != .binary) return error.InvalidOptions;
             handle.* = try semaphore.rawHandle();
         }
 
@@ -2927,6 +3118,7 @@ pub const Queue = struct {
         var wait_handles: [submission_item_count_max]raw.VkSemaphore = undefined;
         for (options.wait_semaphores, wait_handles[0..options.wait_semaphores.len]) |semaphore, *handle| {
             if (semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
+            if (semaphore.kind != .binary) return error.InvalidOptions;
             handle.* = try semaphore.rawHandle();
         }
         const swapchain_handle = try options.swapchain.rawHandle();
@@ -3703,8 +3895,12 @@ const DeviceDispatch = struct {
     destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
     create_semaphore: CommandFunction(raw.PFN_vkCreateSemaphore),
     destroy_semaphore: CommandFunction(raw.PFN_vkDestroySemaphore),
+    get_semaphore_counter_value: ?CommandFunction(raw.PFN_vkGetSemaphoreCounterValue),
+    wait_semaphores: ?CommandFunction(raw.PFN_vkWaitSemaphores),
+    signal_semaphore: ?CommandFunction(raw.PFN_vkSignalSemaphore),
     create_fence: CommandFunction(raw.PFN_vkCreateFence),
     destroy_fence: CommandFunction(raw.PFN_vkDestroyFence),
+    get_fence_status: CommandFunction(raw.PFN_vkGetFenceStatus),
     reset_fences: CommandFunction(raw.PFN_vkResetFences),
     wait_for_fences: CommandFunction(raw.PFN_vkWaitForFences),
     create_command_pool: CommandFunction(raw.PFN_vkCreateCommandPool),
@@ -3788,6 +3984,39 @@ const DeviceDispatch = struct {
                 raw.PFN_vkDestroySemaphore,
                 "vkDestroySemaphore",
             ),
+            .get_semaphore_counter_value = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetSemaphoreCounterValue,
+                "vkGetSemaphoreCounterValue",
+            ) orelse loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetSemaphoreCounterValue,
+                "vkGetSemaphoreCounterValueKHR",
+            ),
+            .wait_semaphores = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkWaitSemaphores,
+                "vkWaitSemaphores",
+            ) orelse loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkWaitSemaphores,
+                "vkWaitSemaphoresKHR",
+            ),
+            .signal_semaphore = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkSignalSemaphore,
+                "vkSignalSemaphore",
+            ) orelse loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkSignalSemaphore,
+                "vkSignalSemaphoreKHR",
+            ),
             .create_fence = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
@@ -3799,6 +4028,12 @@ const DeviceDispatch = struct {
                 handle,
                 raw.PFN_vkDestroyFence,
                 "vkDestroyFence",
+            ),
+            .get_fence_status = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetFenceStatus,
+                "vkGetFenceStatus",
             ),
             .reset_fences = try loadDeviceRequired(
                 get_device_proc_addr,
@@ -4367,6 +4602,15 @@ var test_named_object_handle: u64 = 0;
 var test_resource_result: raw.VkResult = raw.VK_SUCCESS;
 var test_resource_null_handle = false;
 var test_wait_result: raw.VkResult = raw.VK_SUCCESS;
+var test_fence_status_result: raw.VkResult = raw.VK_SUCCESS;
+var test_fence_batch_count: u32 = 0;
+var test_fence_wait_all: raw.VkBool32 = raw.VK_FALSE;
+var test_timeline_counter: u64 = 0;
+var test_timeline_wait_count: u32 = 0;
+var test_timeline_wait_flags: raw.VkSemaphoreWaitFlags = 0;
+var test_timeline_signal_value: u64 = 0;
+var test_created_semaphore_kind: SemaphoreKind = .binary;
+var test_created_semaphore_initial_value: u64 = 0;
 var test_destroy_image_view_count: usize = 0;
 var test_destroy_semaphore_count: usize = 0;
 var test_destroy_fence_count: usize = 0;
@@ -4495,10 +4739,20 @@ fn testDestroyImageView(
 
 fn testCreateSemaphore(
     _: raw.VkDevice,
-    _: [*c]const raw.VkSemaphoreCreateInfo,
+    create_info: [*c]const raw.VkSemaphoreCreateInfo,
     _: [*c]const raw.VkAllocationCallbacks,
     handle: [*c]raw.VkSemaphore,
 ) callconv(.c) raw.VkResult {
+    test_created_semaphore_kind = .binary;
+    test_created_semaphore_initial_value = 0;
+    if (create_info.*.pNext) |next| {
+        const type_info: *const raw.VkSemaphoreTypeCreateInfo = @ptrCast(@alignCast(next));
+        test_created_semaphore_kind = if (type_info.semaphoreType == raw.VK_SEMAPHORE_TYPE_TIMELINE)
+            .timeline
+        else
+            .binary;
+        test_created_semaphore_initial_value = type_info.initialValue;
+    }
     handle.* = if (test_resource_null_handle) null else testHandle(raw.VkSemaphore, 0x5200);
     return test_resource_result;
 }
@@ -4531,20 +4785,60 @@ fn testDestroyFence(
 
 fn testResetFences(
     _: raw.VkDevice,
-    _: u32,
+    count: u32,
     _: [*c]const raw.VkFence,
 ) callconv(.c) raw.VkResult {
+    test_fence_batch_count = count;
     return test_resource_result;
 }
 
 fn testWaitForFences(
     _: raw.VkDevice,
-    _: u32,
+    count: u32,
     _: [*c]const raw.VkFence,
-    _: raw.VkBool32,
+    wait_all: raw.VkBool32,
     _: u64,
 ) callconv(.c) raw.VkResult {
+    test_fence_batch_count = count;
+    test_fence_wait_all = wait_all;
     return test_wait_result;
+}
+
+fn testGetFenceStatus(
+    _: raw.VkDevice,
+    _: raw.VkFence,
+) callconv(.c) raw.VkResult {
+    return test_fence_status_result;
+}
+
+fn testGetSemaphoreCounterValue(
+    _: raw.VkDevice,
+    _: raw.VkSemaphore,
+    value: [*c]u64,
+) callconv(.c) raw.VkResult {
+    value.* = test_timeline_counter;
+    return test_resource_result;
+}
+
+fn testWaitSemaphores(
+    _: raw.VkDevice,
+    wait_info: [*c]const raw.VkSemaphoreWaitInfo,
+    _: u64,
+) callconv(.c) raw.VkResult {
+    test_timeline_wait_count = wait_info.*.semaphoreCount;
+    test_timeline_wait_flags = wait_info.*.flags;
+    return test_wait_result;
+}
+
+fn testSignalSemaphore(
+    _: raw.VkDevice,
+    signal_info: [*c]const raw.VkSemaphoreSignalInfo,
+) callconv(.c) raw.VkResult {
+    test_timeline_signal_value = signal_info.*.value;
+    if (test_resource_result == raw.VK_SUCCESS) {
+        test_timeline_counter = signal_info.*.value;
+    }
+    return test_resource_result;
 }
 
 fn testCreateCommandPool(
@@ -4846,8 +5140,12 @@ fn testDevice() Device {
             .destroy_image_view = testDestroyImageView,
             .create_semaphore = testCreateSemaphore,
             .destroy_semaphore = testDestroySemaphore,
+            .get_semaphore_counter_value = testGetSemaphoreCounterValue,
+            .wait_semaphores = testWaitSemaphores,
+            .signal_semaphore = testSignalSemaphore,
             .create_fence = testCreateFence,
             .destroy_fence = testDestroyFence,
+            .get_fence_status = testGetFenceStatus,
             .reset_fences = testResetFences,
             .wait_for_fences = testWaitForFences,
             .create_command_pool = testCreateCommandPool,
@@ -5178,6 +5476,175 @@ test "typed command recording and fence results avoid raw Vulkan at call sites" 
     test_wait_result = raw.VK_ERROR_DEVICE_LOST;
     try std.testing.expectError(error.DeviceLost, fence.wait(.infinite));
     test_wait_result = raw.VK_SUCCESS;
+}
+
+test "fence status and batches preserve typed outcomes and validate parents" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_wait_result = raw.VK_SUCCESS;
+    test_fence_status_result = raw.VK_SUCCESS;
+    test_fence_batch_count = 99;
+
+    var device = testDevice();
+    defer device.deinit();
+    var first = try device.createFence(.{});
+    defer first.deinit();
+    var second = try device.createFence(.{ .signaled = true });
+    defer second.deinit();
+
+    try std.testing.expectEqual(FenceStatus.signaled, try first.status());
+    test_fence_status_result = raw.VK_NOT_READY;
+    try std.testing.expectEqual(FenceStatus.unsignaled, try first.status());
+    test_fence_status_result = raw.VK_ERROR_DEVICE_LOST;
+    try std.testing.expectError(error.DeviceLost, first.status());
+    test_fence_status_result = raw.VK_SUCCESS;
+
+    try std.testing.expectEqual(
+        FenceWaitStatus.success,
+        try device.waitFences(&.{}, .all, .infinite),
+    );
+    try std.testing.expectEqual(@as(u32, 99), test_fence_batch_count);
+    try std.testing.expectEqual(
+        FenceWaitStatus.success,
+        try device.waitFences(&.{ &first, &second }, .all, .infinite),
+    );
+    try std.testing.expectEqual(@as(u32, 2), test_fence_batch_count);
+    try std.testing.expectEqual(raw.VK_TRUE, test_fence_wait_all);
+    test_wait_result = raw.VK_TIMEOUT;
+    try std.testing.expectEqual(
+        FenceWaitStatus.timeout,
+        try device.waitFences(&.{ &first, &second }, .any, .{ .nanoseconds = 1 }),
+    );
+    try std.testing.expectEqual(raw.VK_FALSE, test_fence_wait_all);
+    test_wait_result = raw.VK_SUCCESS;
+
+    test_fence_batch_count = 99;
+    try device.resetFences(&.{});
+    try std.testing.expectEqual(@as(u32, 99), test_fence_batch_count);
+    try device.resetFences(&.{ &first, &second });
+    try std.testing.expectEqual(@as(u32, 2), test_fence_batch_count);
+
+    var foreign = first;
+    foreign._device_handle = testHandle(raw.VkDevice, 0x9000);
+    try std.testing.expectError(
+        error.InvalidHandle,
+        device.waitFences(&.{&foreign}, .all, .infinite),
+    );
+    try std.testing.expectError(error.InvalidHandle, device.resetFences(&.{&foreign}));
+}
+
+test "timeline semaphore host operations are typed and kind checked" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_wait_result = raw.VK_SUCCESS;
+    test_timeline_counter = 5;
+    test_timeline_wait_count = 0;
+    test_timeline_wait_flags = 0;
+    test_timeline_signal_value = 0;
+
+    var device = testDevice();
+    defer device.deinit();
+    try std.testing.expectError(
+        error.InvalidOptions,
+        device.createSemaphore(.{ .kind = .binary, .initial_value = 1 }),
+    );
+    var binary = try device.createSemaphore(.{});
+    defer binary.deinit();
+    try std.testing.expectEqual(SemaphoreKind.binary, test_created_semaphore_kind);
+    try std.testing.expectError(error.InvalidOptions, binary.counterValue());
+    try std.testing.expectError(error.InvalidOptions, binary.wait(1, .infinite));
+
+    var timeline = try device.createSemaphore(.{
+        .kind = .timeline,
+        .initial_value = 5,
+    });
+    defer timeline.deinit();
+    try std.testing.expectEqual(SemaphoreKind.timeline, timeline.kind);
+    try std.testing.expectEqual(SemaphoreKind.timeline, test_created_semaphore_kind);
+    try std.testing.expectEqual(@as(u64, 5), test_created_semaphore_initial_value);
+    try std.testing.expectEqual(@as(u64, 5), try timeline.counterValue());
+    try std.testing.expectError(error.InvalidOptions, timeline.signal(5));
+    try timeline.signal(6);
+    try std.testing.expectEqual(@as(u64, 6), test_timeline_signal_value);
+    try std.testing.expectEqual(@as(u64, 6), try timeline.counterValue());
+    try std.testing.expectEqual(
+        TimelineWaitStatus.success,
+        try timeline.wait(6, .infinite),
+    );
+
+    try std.testing.expectEqual(
+        TimelineWaitStatus.success,
+        try device.waitTimelineSemaphores(&.{}, .all, .infinite),
+    );
+    try std.testing.expectEqual(@as(u32, 1), test_timeline_wait_count);
+    try std.testing.expectEqual(
+        TimelineWaitStatus.success,
+        try device.waitTimelineSemaphores(
+            &.{.{ .semaphore = &timeline, .value = 6 }},
+            .any,
+            .infinite,
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 1), test_timeline_wait_count);
+    try std.testing.expectEqual(
+        @as(raw.VkSemaphoreWaitFlags, raw.VK_SEMAPHORE_WAIT_ANY_BIT),
+        test_timeline_wait_flags,
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        device.waitTimelineSemaphores(
+            &.{.{ .semaphore = &binary, .value = 1 }},
+            .all,
+            .infinite,
+        ),
+    );
+
+    var foreign = timeline;
+    foreign._device_handle = testHandle(raw.VkDevice, 0x9000);
+    try std.testing.expectError(
+        error.InvalidHandle,
+        device.waitTimelineSemaphores(
+            &.{.{ .semaphore = &foreign, .value = 7 }},
+            .all,
+            .infinite,
+        ),
+    );
+
+    test_timeline_counter = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.InvalidOptions,
+        timeline.signal(std.math.maxInt(u64)),
+    );
+    test_timeline_counter = 6;
+
+    timeline.wait_semaphores = null;
+    try std.testing.expectError(error.MissingCommand, timeline.wait(7, .infinite));
+    timeline.get_counter_value = null;
+    try std.testing.expectError(error.MissingCommand, timeline.counterValue());
+}
+
+test "legacy submission rejects timeline semaphores before dispatch" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_queue_submit_count = 0;
+    var device = testDevice();
+    defer device.deinit();
+    var timeline = try device.createSemaphore(.{ .kind = .timeline });
+    defer timeline.deinit();
+    const queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        .queue_submit = testQueueSubmit,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+    try std.testing.expectError(
+        error.InvalidOptions,
+        queue.submit(.{ .signals = &.{&timeline} }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), test_queue_submit_count);
 }
 
 test "debug label scopes end once" {
