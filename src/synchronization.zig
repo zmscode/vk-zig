@@ -176,11 +176,11 @@ pub const Event = struct {
     }
 
     pub fn set(event: *const Event) core.Error!void {
-        try core.checkSuccess(event.dispatch.set(event._device_handle, try event.rawHandle()));
+        try core.checkSuccessOptional(if (event._device_state) |*state| state else null, event.dispatch.set(event._device_handle, try event.rawHandle()));
     }
 
     pub fn reset(event: *const Event) core.Error!void {
-        try core.checkSuccess(event.dispatch.reset(event._device_handle, try event.rawHandle()));
+        try core.checkSuccessOptional(if (event._device_state) |*state| state else null, event.dispatch.reset(event._device_handle, try event.rawHandle()));
     }
 
     pub fn debugObject(event: *const Event) core.Error!debug_utils.Object {
@@ -241,7 +241,7 @@ pub const Semaphore = struct {
         const handle = (try semaphore.rawHandle()) orelse return error.InvalidHandle;
         const get_counter_value = semaphore.get_counter_value orelse return error.MissingCommand;
         var value: u64 = 0;
-        try core.checkSuccess(get_counter_value(semaphore._device_handle, handle, &value));
+        try core.checkSuccessOptional(if (semaphore._device_state) |*state| state else null, get_counter_value(semaphore._device_handle, handle, &value));
         return value;
     }
 
@@ -253,7 +253,7 @@ pub const Semaphore = struct {
             .semaphore = try semaphore.rawHandle(),
             .value = value,
         };
-        try core.checkSuccess(signal_semaphore(semaphore._device_handle, &signal_info));
+        try core.checkSuccessOptional(if (semaphore._device_state) |*state| state else null, signal_semaphore(semaphore._device_handle, &signal_info));
     }
 
     pub fn wait(
@@ -277,7 +277,7 @@ pub const Semaphore = struct {
         );
         if (result == raw.VK_SUCCESS) return .success;
         if (result == raw.VK_TIMEOUT) return .timeout;
-        try core.checkSuccess(result);
+        try core.checkSuccessOptional(if (semaphore._device_state) |*state| state else null, result);
         unreachable;
     }
 };
@@ -326,7 +326,7 @@ pub const Fence = struct {
 
     pub fn reset(fence: *const Fence) core.Error!void {
         const handle = (try fence.rawHandle()) orelse return error.InvalidHandle;
-        try core.checkSuccess(fence.reset_fences(fence._device_handle, 1, @ptrCast(&handle)));
+        try core.checkSuccessOptional(if (fence._device_state) |*state| state else null, fence.reset_fences(fence._device_handle, 1, @ptrCast(&handle)));
     }
 
     pub fn status(fence: *const Fence) core.Error!FenceStatus {
@@ -334,7 +334,7 @@ pub const Fence = struct {
         const result = fence.get_fence_status(fence._device_handle, handle);
         if (result == raw.VK_SUCCESS) return .signaled;
         if (result == raw.VK_NOT_READY) return .unsignaled;
-        try core.checkSuccess(result);
+        try core.checkSuccessOptional(if (fence._device_state) |*state| state else null, result);
         unreachable;
     }
 
@@ -349,7 +349,7 @@ pub const Fence = struct {
         );
         if (result == raw.VK_SUCCESS) return .success;
         if (result == raw.VK_TIMEOUT) return .timeout;
-        try core.checkSuccess(result);
+        try core.checkSuccessOptional(if (fence._device_state) |*state| state else null, result);
         unreachable;
     }
 

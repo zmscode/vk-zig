@@ -473,6 +473,13 @@ pub fn checkSuccessTracked(state: *DeviceState, result: raw.VkResult) Error!void
     return mapFatalResult(result);
 }
 
+/// Maps a success-only child operation, recording device loss when the wrapper belongs to a
+/// tracked `Device`. Standalone low-level wrappers may pass `null` and retain ordinary mapping.
+pub fn checkSuccessOptional(state: ?*const DeviceState, result: raw.VkResult) Error!void {
+    if (state) |tracked| return checkSuccessTracked(@constCast(tracked), result);
+    return checkSuccess(result);
+}
+
 /// Classifies a status-bearing command and records confirmed device loss.
 pub fn classifyResultTracked(state: *DeviceState, result: raw.VkResult) Error!ResultStatus {
     if (result == raw.VK_ERROR_DEVICE_LOST) state.markLost();

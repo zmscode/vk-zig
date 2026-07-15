@@ -167,9 +167,9 @@ pub const Allocation = struct {
                 .offset = resolved.offset,
                 .size = resolved.raw_size,
             };
-            try core.checkSuccess(map2(allocation._device_handle, &info, &pointer));
+            try core.checkSuccessOptional(if (allocation._device_state) |*state| state else null, map2(allocation._device_handle, &info, &pointer));
         } else {
-            try core.checkSuccess(allocation.dispatch.map(
+            try core.checkSuccessOptional(if (allocation._device_state) |*state| state else null, allocation.dispatch.map(
                 allocation._device_handle,
                 handle,
                 resolved.offset,
@@ -203,7 +203,7 @@ pub const Allocation = struct {
                 .sType = raw.VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
                 .memory = handle,
             };
-            try core.checkSuccess(unmap2(allocation._device_handle, &info));
+            try core.checkSuccessOptional(if (allocation._device_state) |*state| state else null, unmap2(allocation._device_handle, &info));
         } else {
             allocation.dispatch.unmap(allocation._device_handle, handle);
         }
@@ -233,7 +233,7 @@ pub const Allocation = struct {
             .offset = normalized.offset,
             .size = normalized.raw_size,
         };
-        try core.checkSuccess(operation(allocation._device_handle, 1, &range));
+        try core.checkSuccessOptional(if (allocation._device_state) |*state| state else null, operation(allocation._device_handle, 1, &range));
     }
 
     pub fn committedBytes(allocation: *const Allocation) core.Error!core.DeviceSize {

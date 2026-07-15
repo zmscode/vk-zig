@@ -205,9 +205,9 @@ pub const Buffer = struct {
                 .memory = allocation_handle,
                 .memoryOffset = offset_bytes,
             };
-            try core.checkSuccess(bind2(buffer._device_handle, 1, &info));
+            try core.checkSuccessOptional(if (buffer._device_state) |*state| state else null, bind2(buffer._device_handle, 1, &info));
         } else {
-            try core.checkSuccess(buffer.dispatch.bind_buffer_memory(
+            try core.checkSuccessOptional(if (buffer._device_state) |*state| state else null, buffer.dispatch.bind_buffer_memory(
                 buffer._device_handle,
                 buffer_handle,
                 allocation_handle,

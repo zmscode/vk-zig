@@ -2661,7 +2661,7 @@ pub const Device = struct {
     ) Error!buffers.View {
         const device_handle = try device.dispatchHandle();
         if (buffer._device_handle != device_handle) return error.InvalidHandle;
-        return withDeviceState(try buffers.createView(buffer, options), device._state);
+        return withDeviceState(buffers.createView(buffer, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn allocateMemory(
@@ -2704,10 +2704,10 @@ pub const Device = struct {
         }
         if ((options.address_u == .mirror_clamp_to_edge or options.address_v == .mirror_clamp_to_edge or options.address_w == .mirror_clamp_to_edge) and
             !device.supportsExtension(extension.khr_sampler_mirror_clamp_to_edge)) return error.ExtensionNotPresent;
-        return withDeviceState(try samplers.create(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(samplers.create(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_sampler,
             .destroy = device.dispatch.destroy_sampler,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createSamplerYcbcrConversion(
@@ -2718,10 +2718,10 @@ pub const Device = struct {
         if (!device.supportsFeature(.sampler_ycbcr_conversion)) return error.FeatureNotPresent;
         const create_conversion = device.dispatch.create_sampler_ycbcr_conversion orelse return error.MissingCommand;
         const destroy_conversion = device.dispatch.destroy_sampler_ycbcr_conversion orelse return error.MissingCommand;
-        return withDeviceState(try samplers.createYcbcrConversion(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(samplers.createYcbcrConversion(device_handle, device.allocation_callbacks, .{
             .create = create_conversion,
             .destroy = destroy_conversion,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createShaderModule(
@@ -2729,12 +2729,12 @@ pub const Device = struct {
         words: []const u32,
     ) Error!shaders.Module {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(try shaders.createWords(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(shaders.createWords(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_shader_module,
             .destroy = device.dispatch.destroy_shader_module,
             .get_identifier = device.dispatch.get_shader_module_identifier_ext,
             .get_create_info_identifier = device.dispatch.get_shader_module_create_info_identifier_ext,
-        }, words), device._state);
+        }, words) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createShaderModuleBytes(
@@ -2742,12 +2742,12 @@ pub const Device = struct {
         bytes: []align(4) const u8,
     ) Error!shaders.Module {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(try shaders.createBytes(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(shaders.createBytes(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_shader_module,
             .destroy = device.dispatch.destroy_shader_module,
             .get_identifier = device.dispatch.get_shader_module_identifier_ext,
             .get_create_info_identifier = device.dispatch.get_shader_module_create_info_identifier_ext,
-        }, bytes), device._state);
+        }, bytes) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn shaderModuleIdentifier(device: *const Device, words: []const u32) Error!shaders.Identifier {
@@ -2785,10 +2785,10 @@ pub const Device = struct {
                 if (!device.supportsFeature(feature)) return error.FeatureNotPresent;
             }
         }
-        return withDeviceState(try descriptors.createLayout(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(descriptors.createLayout(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_descriptor_set_layout,
             .destroy = device.dispatch.destroy_descriptor_set_layout,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn descriptorSetLayoutSupport(
@@ -2805,13 +2805,13 @@ pub const Device = struct {
         options: descriptors.PoolOptions,
     ) Error!descriptors.Pool {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(try descriptors.createPool(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(descriptors.createPool(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_descriptor_pool,
             .destroy = device.dispatch.destroy_descriptor_pool,
             .reset = device.dispatch.reset_descriptor_pool,
             .allocate = device.dispatch.allocate_descriptor_sets,
             .free = device.dispatch.free_descriptor_sets,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn updateDescriptorSets(
@@ -2828,11 +2828,11 @@ pub const Device = struct {
         options: descriptors.TemplateOptions,
     ) Error!descriptors.UpdateTemplate {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(try descriptors.createUpdateTemplate(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(descriptors.createUpdateTemplate(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_descriptor_update_template orelse return error.MissingCommand,
             .destroy = device.dispatch.destroy_descriptor_update_template orelse return error.MissingCommand,
             .update = device.dispatch.update_descriptor_set_with_template orelse return error.MissingCommand,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createPipelineLayout(
@@ -2840,10 +2840,10 @@ pub const Device = struct {
         options: pipelines.LayoutOptions,
     ) Error!pipelines.Layout {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(try pipelines.createLayout(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(pipelines.createLayout(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_pipeline_layout,
             .destroy = device.dispatch.destroy_pipeline_layout,
-        }, device._max_push_constant_size, options), device._state);
+        }, device._max_push_constant_size, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createGraphicsPipeline(
@@ -2851,11 +2851,11 @@ pub const Device = struct {
         options: pipelines.GraphicsOptions,
     ) Error!pipelines.CreateResult {
         const device_handle = try device.dispatchHandle();
-        return withPipelineDeviceState(try pipelines.createGraphics(device_handle, device.allocation_callbacks, .{
+        return withPipelineDeviceState(pipelines.createGraphics(device_handle, device.allocation_callbacks, .{
             .create_graphics = device.dispatch.create_graphics_pipelines,
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createComputePipeline(
@@ -2863,11 +2863,11 @@ pub const Device = struct {
         options: pipelines.ComputeOptions,
     ) Error!pipelines.CreateResult {
         const device_handle = try device.dispatchHandle();
-        return withPipelineDeviceState(try pipelines.createCompute(device_handle, device.allocation_callbacks, .{
+        return withPipelineDeviceState(pipelines.createCompute(device_handle, device.allocation_callbacks, .{
             .create_graphics = device.dispatch.create_graphics_pipelines,
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createComputePipelines(
@@ -2876,11 +2876,11 @@ pub const Device = struct {
         output: []pipelines.CreateResult,
     ) Error![]pipelines.CreateResult {
         const device_handle = try device.dispatchHandle();
-        const results = try pipelines.createComputeBatch(device_handle, device.allocation_callbacks, .{
+        const results = pipelines.createComputeBatch(device_handle, device.allocation_callbacks, .{
             .create_graphics = device.dispatch.create_graphics_pipelines,
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
-        }, options, output);
+        }, options, output) catch |err| return device.recordError(err);
         for (results) |*result| switch (result.*) {
             .success => |*pipeline| pipeline._device_state = device._state,
             .compile_required => {},
@@ -2894,11 +2894,11 @@ pub const Device = struct {
         output: []pipelines.CreateResult,
     ) Error![]pipelines.CreateResult {
         const device_handle = try device.dispatchHandle();
-        const results = try pipelines.createGraphicsBatch(device_handle, device.allocation_callbacks, .{
+        const results = pipelines.createGraphicsBatch(device_handle, device.allocation_callbacks, .{
             .create_graphics = device.dispatch.create_graphics_pipelines,
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
-        }, options, output);
+        }, options, output) catch |err| return device.recordError(err);
         for (results) |*result| switch (result.*) {
             .success => |*pipeline| pipeline._device_state = device._state,
             .compile_required => {},
@@ -2917,12 +2917,12 @@ pub const Device = struct {
             if (dependency.view_offset != 0) break true;
         } else false;
         if (uses_multiview and !device.supportsFeature(.multiview)) return error.FeatureNotPresent;
-        return withDeviceState(try render_passes.create(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(render_passes.create(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_render_pass,
             .create2 = device.dispatch.create_render_pass2,
             .destroy = device.dispatch.destroy_render_pass,
             .get_granularity = device.dispatch.get_render_area_granularity,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createFramebuffer(
@@ -2931,10 +2931,10 @@ pub const Device = struct {
     ) Error!render_passes.Framebuffer {
         const device_handle = try device.dispatchHandle();
         if (options.attachments == .imageless and !device.supportsFeature(.imageless_framebuffer)) return error.FeatureNotPresent;
-        return withDeviceState(try render_passes.createFramebuffer(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(render_passes.createFramebuffer(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_framebuffer,
             .destroy = device.dispatch.destroy_framebuffer,
-        }, options), device._state);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createAllocatedBuffer(
@@ -2983,13 +2983,13 @@ pub const Device = struct {
         options: ImageViewOptions,
     ) Error!ImageView {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(try images.createView(
+        return withDeviceState(images.createView(
             device_handle,
             device.allocation_callbacks,
             device.dispatch.create_image_view,
             device.dispatch.destroy_image_view,
             options,
-        ), device._state);
+        ) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createImage(device: *const Device, options: images.Options) Error!images.Image {
@@ -3106,13 +3106,13 @@ pub const Device = struct {
 
     pub fn createEvent(device: *const Device) Error!sync.Event {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(try sync.createEvent(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(sync.createEvent(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_event,
             .destroy = device.dispatch.destroy_event,
             .status = device.dispatch.get_event_status,
             .set = device.dispatch.set_event,
             .reset = device.dispatch.reset_event,
-        }), device._state);
+        }) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createQueryPool(device: *const Device, options: QueryPoolOptions) Error!QueryPool {
@@ -7220,10 +7220,6 @@ test "fence status and batches preserve typed outcomes and validate parents" {
     try std.testing.expectEqual(FenceStatus.signaled, try first.status());
     test_fence_status_result = raw.VK_NOT_READY;
     try std.testing.expectEqual(FenceStatus.unsignaled, try first.status());
-    test_fence_status_result = raw.VK_ERROR_DEVICE_LOST;
-    try std.testing.expectError(error.DeviceLost, first.status());
-    test_fence_status_result = raw.VK_SUCCESS;
-
     try std.testing.expectEqual(
         FenceWaitStatus.success,
         try device.waitFences(&.{}, .all, .infinite),
@@ -7256,6 +7252,12 @@ test "fence status and batches preserve typed outcomes and validate parents" {
         device.waitFences(&.{&foreign}, .all, .infinite),
     );
     try std.testing.expectError(error.InvalidHandle, device.resetFences(&.{&foreign}));
+
+    test_fence_status_result = raw.VK_ERROR_DEVICE_LOST;
+    try std.testing.expectError(error.DeviceLost, first.status());
+    test_fence_status_result = raw.VK_SUCCESS;
+    try std.testing.expectEqual(core.DeviceState.Status.lost, device.status());
+    try std.testing.expectError(error.DeviceLost, device.waitFences(&.{ &first, &second }, .all, .infinite));
 }
 
 test "timeline semaphore host operations are typed and kind checked" {

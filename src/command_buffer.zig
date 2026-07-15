@@ -369,7 +369,7 @@ pub const Buffer = struct {
             .flags = options.flags.toRaw(),
             .pInheritanceInfo = if (options.inheritance != null) &inheritance_info else null,
         };
-        try core.checkSuccess(buffer.begin_command_buffer(handle, &begin_info));
+        try core.checkSuccessOptional(if (buffer._pool._device_state) |*state| state else null, buffer.begin_command_buffer(handle, &begin_info));
         buffer.state = .recording;
         buffer.simultaneous_use = options.flags.contains(.simultaneous_use);
         buffer.rendering_active = false;
@@ -385,7 +385,7 @@ pub const Buffer = struct {
     pub fn end(buffer: *Buffer) core.Error!void {
         const handle = try buffer.liveHandle();
         if (buffer.state != .recording or buffer.rendering_active or buffer.render_pass_active) return error.InvalidOptions;
-        try core.checkSuccess(buffer.end_command_buffer(handle));
+        try core.checkSuccessOptional(if (buffer._pool._device_state) |*state| state else null, buffer.end_command_buffer(handle));
         buffer.state = .executable;
     }
 
@@ -397,7 +397,7 @@ pub const Buffer = struct {
             @intCast(raw.VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT)
         else
             0;
-        try core.checkSuccess(buffer.reset_command_buffer(handle, flags));
+        try core.checkSuccessOptional(if (buffer._pool._device_state) |*state| state else null, buffer.reset_command_buffer(handle, flags));
         buffer.state = .initial;
         buffer.simultaneous_use = false;
         buffer.pending_submissions = 0;
@@ -1372,7 +1372,7 @@ pub const Pool = struct {
             .commandBufferCount = 1,
         };
         var handle: raw.VkCommandBuffer = null;
-        try core.checkSuccess(pool.allocate_command_buffers(
+        try core.checkSuccessOptional(if (pool._device_state) |*state| state else null, pool.allocate_command_buffers(
             pool._device_handle,
             &allocate_info,
             &handle,
@@ -1471,7 +1471,7 @@ pub const Pool = struct {
             @intCast(raw.VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT)
         else
             0;
-        try core.checkSuccess(pool.reset_command_pool(pool._device_handle, handle, flags));
+        try core.checkSuccessOptional(if (pool._device_state) |*state| state else null, pool.reset_command_pool(pool._device_handle, handle, flags));
         pool.generation +%= 1;
     }
 

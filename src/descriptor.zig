@@ -262,7 +262,7 @@ pub const Pool = struct {
 
     pub fn reset(pool: *Pool) core.Error!void {
         const handle = (try pool.rawHandle()) orelse return error.InactiveObject;
-        try core.checkSuccess(pool.dispatch.reset(pool._device_handle, handle, 0));
+        try core.checkSuccessOptional(if (pool._device_state) |*state| state else null, pool.dispatch.reset(pool._device_handle, handle, 0));
         pool.generation +%= 1;
     }
 
@@ -295,7 +295,7 @@ pub const Pool = struct {
             .pSetLayouts = @ptrCast(&layout_handle),
         };
         var handle: raw.VkDescriptorSet = null;
-        try core.checkSuccess(pool.dispatch.allocate(pool._device_handle, &info, &handle));
+        try core.checkSuccessOptional(if (pool._device_state) |*state| state else null, pool.dispatch.allocate(pool._device_handle, &info, &handle));
         return .{
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = pool._device_handle,
@@ -345,7 +345,7 @@ pub const Pool = struct {
             .descriptorSetCount = @intCast(requests.len),
             .pSetLayouts = layouts[0..requests.len].ptr,
         };
-        try core.checkSuccess(pool.dispatch.allocate(pool._device_handle, &info, handles[0..requests.len].ptr));
+        try core.checkSuccessOptional(if (pool._device_state) |*state| state else null, pool.dispatch.allocate(pool._device_handle, &info, handles[0..requests.len].ptr));
         for (requests, handles[0..requests.len], 0..) |request, handle, index| {
             output[index] = .{
                 ._handle = handle orelse return error.InvalidHandle,
@@ -418,7 +418,7 @@ pub const Set = struct {
         const handle = try set.rawHandle();
         if (!set._pool.free_individual_sets) return error.InvalidOptions;
         const pool_handle = set._pool._handle orelse return error.InactiveObject;
-        try core.checkSuccess(set._pool.dispatch.free(set._device_handle, pool_handle, 1, @ptrCast(&handle)));
+        try core.checkSuccessOptional(if (set._pool._device_state) |*state| state else null, set._pool.dispatch.free(set._device_handle, pool_handle, 1, @ptrCast(&handle)));
         set._handle = null;
     }
 

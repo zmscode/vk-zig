@@ -219,7 +219,7 @@ pub const Image = struct {
             raw_regions[index] = .{ .sType = raw.VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY, .pHostPointer = region.bytes.ptr, .memoryRowLength = region.row_length, .memoryImageHeight = region.image_height, .imageSubresource = region.subresource.toRaw(), .imageOffset = region.offset.toRaw(), .imageExtent = region.extent.toRaw() };
         }
         const info: raw.VkCopyMemoryToImageInfo = .{ .sType = raw.VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO, .dstImage = try image.rawHandle(), .dstImageLayout = layout.toRaw(), .regionCount = @intCast(regions.len), .pRegions = raw_regions[0..regions.len].ptr };
-        try core.checkSuccess(copy(image._device_handle, &info));
+        try core.checkSuccessOptional(if (image._device_state) |*state| state else null, copy(image._device_handle, &info));
     }
 
     pub fn copyToHost(image: *const Image, layout: types.ImageLayout, regions: []const HostReadRegion) core.Error!void {
@@ -231,7 +231,7 @@ pub const Image = struct {
             raw_regions[index] = .{ .sType = raw.VK_STRUCTURE_TYPE_IMAGE_TO_MEMORY_COPY, .pHostPointer = region.bytes.ptr, .memoryRowLength = region.row_length, .memoryImageHeight = region.image_height, .imageSubresource = region.subresource.toRaw(), .imageOffset = region.offset.toRaw(), .imageExtent = region.extent.toRaw() };
         }
         const info: raw.VkCopyImageToMemoryInfo = .{ .sType = raw.VK_STRUCTURE_TYPE_COPY_IMAGE_TO_MEMORY_INFO, .srcImage = try image.rawHandle(), .srcImageLayout = layout.toRaw(), .regionCount = @intCast(regions.len), .pRegions = raw_regions[0..regions.len].ptr };
-        try core.checkSuccess(copy(image._device_handle, &info));
+        try core.checkSuccessOptional(if (image._device_state) |*state| state else null, copy(image._device_handle, &info));
     }
 
     pub fn copyHostToImage(image: *const Image, destination: *const Image, source_layout: types.ImageLayout, destination_layout: types.ImageLayout, regions: []const HostImageCopyRegion) core.Error!void {
@@ -241,13 +241,13 @@ pub const Image = struct {
         var raw_regions: [host_copy_region_count_max]raw.VkImageCopy2 = undefined;
         for (regions, 0..) |region, index| raw_regions[index] = .{ .sType = raw.VK_STRUCTURE_TYPE_IMAGE_COPY_2, .srcSubresource = region.source_subresource.toRaw(), .srcOffset = region.source_offset.toRaw(), .dstSubresource = region.destination_subresource.toRaw(), .dstOffset = region.destination_offset.toRaw(), .extent = region.extent.toRaw() };
         const info: raw.VkCopyImageToImageInfo = .{ .sType = raw.VK_STRUCTURE_TYPE_COPY_IMAGE_TO_IMAGE_INFO, .srcImage = try image.rawHandle(), .srcImageLayout = source_layout.toRaw(), .dstImage = try destination.rawHandle(), .dstImageLayout = destination_layout.toRaw(), .regionCount = @intCast(regions.len), .pRegions = raw_regions[0..regions.len].ptr };
-        try core.checkSuccess(copy(image._device_handle, &info));
+        try core.checkSuccessOptional(if (image._device_state) |*state| state else null, copy(image._device_handle, &info));
     }
 
     pub fn transitionHostLayout(image: *const Image, old_layout: types.ImageLayout, new_layout: types.ImageLayout, range: types.ImageSubresourceRange) core.Error!void {
         const transition = image.dispatch.transition_layout orelse return error.MissingCommand;
         const info: raw.VkHostImageLayoutTransitionInfo = .{ .sType = raw.VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO, .image = try image.rawHandle(), .oldLayout = old_layout.toRaw(), .newLayout = new_layout.toRaw(), .subresourceRange = range.toRaw() };
-        try core.checkSuccess(transition(image._device_handle, 1, &info));
+        try core.checkSuccessOptional(if (image._device_state) |*state| state else null, transition(image._device_handle, 1, &info));
     }
 
     pub fn bindMemory(
@@ -277,9 +277,9 @@ pub const Image = struct {
                 .memory = allocation_handle,
                 .memoryOffset = offset_bytes,
             };
-            try core.checkSuccess(bind2(image._device_handle, 1, &info));
+            try core.checkSuccessOptional(if (image._device_state) |*state| state else null, bind2(image._device_handle, 1, &info));
         } else {
-            try core.checkSuccess(image.dispatch.bind_image_memory(
+            try core.checkSuccessOptional(if (image._device_state) |*state| state else null, image.dispatch.bind_image_memory(
                 image._device_handle,
                 image_handle,
                 allocation_handle,
