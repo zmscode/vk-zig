@@ -1209,6 +1209,10 @@ pub const StencilFaces = commands.StencilFaces;
 pub const CommandBuffer = commands.Buffer;
 pub const CommandBufferLabelScope = commands.LabelScope;
 pub const CommandBufferRenderPassScope = commands.RenderPassScope;
+pub const ConditionalRenderingOptions = commands.ConditionalRenderingOptions;
+pub const ConditionalRenderingScope = commands.ConditionalRenderingScope;
+pub const TransformFeedbackCounter = commands.TransformFeedbackCounter;
+pub const TransformFeedbackScope = commands.TransformFeedbackScope;
 pub const CommandPool = commands.Pool;
 
 pub const SwapchainOptions = presentation.Options;
@@ -3370,6 +3374,10 @@ pub const Device = struct {
             .cmd_begin_debug_utils_label_ext = device.dispatch.cmd_begin_debug_utils_label_ext,
             .cmd_end_debug_utils_label_ext = device.dispatch.cmd_end_debug_utils_label_ext,
             .cmd_insert_debug_utils_label_ext = device.dispatch.cmd_insert_debug_utils_label_ext,
+            .cmd_begin_conditional_rendering_ext = device.dispatch.cmd_begin_conditional_rendering_ext,
+            .cmd_end_conditional_rendering_ext = device.dispatch.cmd_end_conditional_rendering_ext,
+            .cmd_begin_transform_feedback_ext = device.dispatch.cmd_begin_transform_feedback_ext,
+            .cmd_end_transform_feedback_ext = device.dispatch.cmd_end_transform_feedback_ext,
         };
     }
 
@@ -3936,6 +3944,10 @@ const DeviceDispatch = struct {
     cmd_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdBeginDebugUtilsLabelEXT),
     cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
     cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
+    cmd_begin_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdBeginConditionalRenderingEXT),
+    cmd_end_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdEndConditionalRenderingEXT),
+    cmd_begin_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdBeginTransformFeedbackEXT),
+    cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
 
     fn init(
         get_device_proc_addr: CommandFunction(raw.PFN_vkGetDeviceProcAddr),
@@ -4654,6 +4666,30 @@ const DeviceDispatch = struct {
                 raw.PFN_vkCmdInsertDebugUtilsLabelEXT,
                 "vkCmdInsertDebugUtilsLabelEXT",
             ),
+            .cmd_begin_conditional_rendering_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdBeginConditionalRenderingEXT,
+                "vkCmdBeginConditionalRenderingEXT",
+            ),
+            .cmd_end_conditional_rendering_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdEndConditionalRenderingEXT,
+                "vkCmdEndConditionalRenderingEXT",
+            ),
+            .cmd_begin_transform_feedback_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdBeginTransformFeedbackEXT,
+                "vkCmdBeginTransformFeedbackEXT",
+            ),
+            .cmd_end_transform_feedback_ext = loadDevice(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCmdEndTransformFeedbackEXT,
+                "vkCmdEndTransformFeedbackEXT",
+            ),
         };
     }
 };
@@ -5264,6 +5300,10 @@ var test_push_constant_count: usize = 0;
 var test_push_constant_offset: u32 = 0;
 var test_push_constant_size: u32 = 0;
 var test_end_command_label_count: usize = 0;
+var test_begin_conditional_count: usize = 0;
+var test_end_conditional_count: usize = 0;
+var test_begin_transform_feedback_count: usize = 0;
+var test_end_transform_feedback_count: usize = 0;
 var test_acquire_result: raw.VkResult = raw.VK_SUCCESS;
 var test_acquire_image_index: u32 = 0;
 var test_present_result: raw.VkResult = raw.VK_SUCCESS;
@@ -6124,6 +6164,37 @@ fn testCmdEndLabel(_: raw.VkCommandBuffer) callconv(.c) void {
     test_end_command_label_count += 1;
 }
 
+fn testCmdBeginConditionalRendering(
+    _: raw.VkCommandBuffer,
+    _: [*c]const raw.VkConditionalRenderingBeginInfoEXT,
+) callconv(.c) void {
+    test_begin_conditional_count += 1;
+}
+
+fn testCmdEndConditionalRendering(_: raw.VkCommandBuffer) callconv(.c) void {
+    test_end_conditional_count += 1;
+}
+
+fn testCmdBeginTransformFeedback(
+    _: raw.VkCommandBuffer,
+    _: u32,
+    _: u32,
+    _: [*c]const raw.VkBuffer,
+    _: [*c]const raw.VkDeviceSize,
+) callconv(.c) void {
+    test_begin_transform_feedback_count += 1;
+}
+
+fn testCmdEndTransformFeedback(
+    _: raw.VkCommandBuffer,
+    _: u32,
+    _: u32,
+    _: [*c]const raw.VkBuffer,
+    _: [*c]const raw.VkDeviceSize,
+) callconv(.c) void {
+    test_end_transform_feedback_count += 1;
+}
+
 fn testDestroySwapchain(
     _: raw.VkDevice,
     _: raw.VkSwapchainKHR,
@@ -6675,6 +6746,10 @@ fn testDevice() Device {
             .cmd_begin_debug_utils_label_ext = null,
             .cmd_end_debug_utils_label_ext = null,
             .cmd_insert_debug_utils_label_ext = null,
+            .cmd_begin_conditional_rendering_ext = null,
+            .cmd_end_conditional_rendering_ext = null,
+            .cmd_begin_transform_feedback_ext = null,
+            .cmd_end_transform_feedback_ext = null,
         },
     };
 }
@@ -7989,6 +8064,87 @@ test "debug label scopes end once" {
     scope.deinit();
     copied_scope.deinit();
     try std.testing.expectEqual(@as(usize, 1), test_end_command_label_count);
+}
+
+test "every wrapped Vulkan object implements typed debug naming" {
+    inline for ([_]type{
+        Instance,
+        PhysicalDevice,
+        Device,
+        Queue,
+        presentation.Surface,
+        presentation.Swapchain,
+        images.Image,
+        images.SwapchainImage,
+        images.View,
+        buffers.Buffer,
+        buffers.View,
+        memory.Allocation,
+        samplers.Sampler,
+        samplers.YcbcrConversion,
+        shaders.Module,
+        descriptors.SetLayout,
+        descriptors.Pool,
+        descriptors.Set,
+        descriptors.UpdateTemplate,
+        pipelines.Layout,
+        pipelines.Pipeline,
+        render_passes.RenderPass,
+        render_passes.Framebuffer,
+        synchronization.Event,
+        synchronization.Semaphore,
+        synchronization.Fence,
+        commands.Buffer,
+        commands.Pool,
+        queries.Pool,
+        debug_utils.Messenger,
+        optical_flow.Session,
+    }) |ObjectType| {
+        try std.testing.expect(@hasDecl(ObjectType, "debugObject"));
+    }
+}
+
+test "conditional rendering and transform feedback scopes end once" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_begin_conditional_count = 0;
+    test_end_conditional_count = 0;
+    test_begin_transform_feedback_count = 0;
+    test_end_transform_feedback_count = 0;
+    var device = testDevice();
+    defer device.deinit();
+    device.dispatch.cmd_begin_conditional_rendering_ext = testCmdBeginConditionalRendering;
+    device.dispatch.cmd_end_conditional_rendering_ext = testCmdEndConditionalRendering;
+    device.dispatch.cmd_begin_transform_feedback_ext = testCmdBeginTransformFeedback;
+    device.dispatch.cmd_end_transform_feedback_ext = testCmdEndTransformFeedback;
+    var counter = try device.createBuffer(.{
+        .size = .fromBytes(64),
+        .usage = .init(&.{.transfer_src}),
+    });
+    defer counter.deinit();
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var command_buffer = try pool.allocateCommandBuffer(.{});
+    defer command_buffer.deinit();
+    try command_buffer.begin(.{});
+
+    var conditional = try command_buffer.beginConditionalRendering(.{ .buffer = &counter });
+    var conditional_copy = conditional;
+    try conditional_copy.end();
+    conditional.deinit();
+    conditional_copy.deinit();
+
+    var transform_feedback = try command_buffer.beginTransformFeedback(0, &.{.{ .buffer = &counter }});
+    var transform_feedback_copy = transform_feedback;
+    try transform_feedback_copy.end();
+    transform_feedback.deinit();
+    transform_feedback_copy.deinit();
+    try command_buffer.end();
+
+    try std.testing.expectEqual(@as(usize, 1), test_begin_conditional_count);
+    try std.testing.expectEqual(@as(usize, 1), test_end_conditional_count);
+    try std.testing.expectEqual(@as(usize, 1), test_begin_transform_feedback_count);
+    try std.testing.expectEqual(@as(usize, 1), test_end_transform_feedback_count);
 }
 
 test "swapchain acquisition and presentation preserve operation statuses" {

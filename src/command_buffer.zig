@@ -83,6 +83,16 @@ pub const IndexType = enum {
 pub const DrawOptions = struct { vertex_count: u32, instance_count: u32 = 1, first_vertex: u32 = 0, first_instance: u32 = 0 };
 pub const DrawIndexedOptions = struct { index_count: u32, instance_count: u32 = 1, first_index: u32 = 0, vertex_offset: i32 = 0, first_instance: u32 = 0 };
 pub const DispatchOptions = struct { x: u32, y: u32 = 1, z: u32 = 1 };
+pub const ConditionalRenderingOptions = struct {
+    buffer: *const buffers.Buffer,
+    offset: core.DeviceOffset = .zero,
+    inverted: bool = false,
+};
+pub const TransformFeedbackCounter = struct {
+    buffer: *const buffers.Buffer,
+    offset: core.DeviceOffset = .zero,
+};
+pub const transform_feedback_counter_max = 8;
 pub const DrawIndirectCommand = extern struct { vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32 };
 pub const DrawIndexedIndirectCommand = extern struct { index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32 };
 pub const DispatchIndirectCommand = extern struct { x: u32, y: u32, z: u32 };
@@ -218,6 +228,8 @@ pub const Buffer = struct {
     active_subpass_count: u32 = 0,
     graphics_pipeline_bound: bool = false,
     compute_pipeline_bound: bool = false,
+    conditional_rendering_active: bool = false,
+    transform_feedback_active: bool = false,
     begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
     end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
@@ -283,6 +295,10 @@ pub const Buffer = struct {
     cmd_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdBeginDebugUtilsLabelEXT),
     cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
     cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
+    cmd_begin_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdBeginConditionalRenderingEXT),
+    cmd_end_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdEndConditionalRenderingEXT),
+    cmd_begin_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdBeginTransformFeedbackEXT),
+    cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
 
     fn liveHandle(buffer: *Buffer) core.Error!CommandBufferHandle {
         try buffer._pool_owner.validate();
@@ -301,6 +317,8 @@ pub const Buffer = struct {
             buffer.active_subpass_count = 0;
             buffer.graphics_pipeline_bound = false;
             buffer.compute_pipeline_bound = false;
+            buffer.conditional_rendering_active = false;
+            buffer.transform_feedback_active = false;
         }
         return handle;
     }
@@ -328,6 +346,8 @@ pub const Buffer = struct {
             buffer.active_subpass_count = 0;
             buffer.graphics_pipeline_bound = false;
             buffer.compute_pipeline_bound = false;
+            buffer.conditional_rendering_active = false;
+            buffer.transform_feedback_active = false;
         }
         if (buffer.state == .pending) return;
         buffer._pool.free_command_buffers(
@@ -380,6 +400,8 @@ pub const Buffer = struct {
         buffer.active_subpass_count = 0;
         buffer.graphics_pipeline_bound = false;
         buffer.compute_pipeline_bound = false;
+        buffer.conditional_rendering_active = false;
+        buffer.transform_feedback_active = false;
     }
 
     pub fn end(buffer: *Buffer) core.Error!void {
@@ -409,6 +431,8 @@ pub const Buffer = struct {
         buffer.active_subpass_count = 0;
         buffer.graphics_pipeline_bound = false;
         buffer.compute_pipeline_bound = false;
+        buffer.conditional_rendering_active = false;
+        buffer.transform_feedback_active = false;
     }
 
     pub fn markComplete(buffer: *Buffer) core.Error!void {
@@ -1210,6 +1234,76 @@ pub const Buffer = struct {
         insert_label(handle, &label);
     }
 
+    pub fn beginConditionalRendering(
+        buffer: *Buffer,
+        options: ConditionalRenderingOptions,
+    ) core.Error!ConditionalRenderingScope {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or buffer.conditional_rendering_active) return error.InvalidOptions;
+        if (options.buffer._device_handle != buffer._device_handle or options.offset.bytes() >= options.buffer.size.bytes() or options.offset.bytes() % 4 != 0) return error.InvalidOptions;
+        const begin_command = buffer.cmd_begin_conditional_rendering_ext orelse return error.MissingCommand;
+        _ = buffer.cmd_end_conditional_rendering_ext orelse return error.MissingCommand;
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
+        const info: raw.VkConditionalRenderingBeginInfoEXT = .{
+            .sType = raw.VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT,
+            .buffer = try options.buffer.rawHandle(),
+            .offset = options.offset.bytes(),
+            .flags = if (options.inverted) raw.VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT else 0,
+        };
+        begin_command(handle, &info);
+        buffer.conditional_rendering_active = true;
+        return .{ ._owner = owner, .buffer = buffer };
+    }
+
+    pub fn endConditionalRendering(buffer: *Buffer) core.Error!void {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or !buffer.conditional_rendering_active) return error.InvalidOptions;
+        const end_command = buffer.cmd_end_conditional_rendering_ext orelse return error.MissingCommand;
+        end_command(handle);
+        buffer.conditional_rendering_active = false;
+    }
+
+    pub fn beginTransformFeedback(
+        buffer: *Buffer,
+        first_counter_buffer: u32,
+        counters: []const TransformFeedbackCounter,
+    ) core.Error!TransformFeedbackScope {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or buffer.transform_feedback_active) return error.InvalidOptions;
+        if (counters.len > transform_feedback_counter_max) return error.CountOverflow;
+        const begin_command = buffer.cmd_begin_transform_feedback_ext orelse return error.MissingCommand;
+        _ = buffer.cmd_end_transform_feedback_ext orelse return error.MissingCommand;
+        var handles: [transform_feedback_counter_max]raw.VkBuffer = undefined;
+        var offsets: [transform_feedback_counter_max]raw.VkDeviceSize = undefined;
+        for (counters, 0..) |counter, index| {
+            if (counter.buffer._device_handle != buffer._device_handle or counter.offset.bytes() >= counter.buffer.size.bytes() or counter.offset.bytes() % 4 != 0) return error.InvalidOptions;
+            handles[index] = try counter.buffer.rawHandle();
+            offsets[index] = counter.offset.bytes();
+        }
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
+        begin_command(handle, first_counter_buffer, @intCast(counters.len), if (counters.len == 0) null else handles[0..counters.len].ptr, if (counters.len == 0) null else offsets[0..counters.len].ptr);
+        buffer.transform_feedback_active = true;
+        var scope: TransformFeedbackScope = .{
+            ._owner = owner,
+            .buffer = buffer,
+            .first_counter_buffer = first_counter_buffer,
+            .counter_count = counters.len,
+        };
+        for (handles[0..counters.len], 0..) |item, index| scope.handles[index] = item;
+        for (offsets[0..counters.len], 0..) |item, index| scope.offsets[index] = item;
+        return scope;
+    }
+
+    fn endTransformFeedback(buffer: *Buffer, scope: *const TransformFeedbackScope) core.Error!void {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or !buffer.transform_feedback_active) return error.InvalidOptions;
+        const end_command = buffer.cmd_end_transform_feedback_ext orelse return error.MissingCommand;
+        end_command(handle, scope.first_counter_buffer, @intCast(scope.counter_count), if (scope.counter_count == 0) null else scope.handles[0..scope.counter_count].ptr, if (scope.counter_count == 0) null else scope.offsets[0..scope.counter_count].ptr);
+        buffer.transform_feedback_active = false;
+    }
+
     pub fn rawHandle(buffer: *Buffer) core.Error!raw.VkCommandBuffer {
         return try buffer.liveHandle();
     }
@@ -1274,6 +1368,44 @@ pub const LabelScope = struct {
 
     pub fn deinit(scope: *LabelScope) void {
         scope.end();
+    }
+};
+
+pub const ConditionalRenderingScope = struct {
+    _owner: core.Owner,
+    buffer: *Buffer,
+    active: bool = true,
+
+    pub fn end(scope: *ConditionalRenderingScope) core.Error!void {
+        if (!(try scope._owner.release(scope))) return;
+        if (!scope.active) return;
+        try scope.buffer.endConditionalRendering();
+        scope.active = false;
+    }
+
+    pub fn deinit(scope: *ConditionalRenderingScope) void {
+        scope.end() catch {};
+    }
+};
+
+pub const TransformFeedbackScope = struct {
+    _owner: core.Owner,
+    buffer: *Buffer,
+    first_counter_buffer: u32,
+    counter_count: usize,
+    handles: [transform_feedback_counter_max]raw.VkBuffer = undefined,
+    offsets: [transform_feedback_counter_max]raw.VkDeviceSize = undefined,
+    active: bool = true,
+
+    pub fn end(scope: *TransformFeedbackScope) core.Error!void {
+        if (!(try scope._owner.release(scope))) return;
+        if (!scope.active) return;
+        try scope.buffer.endTransformFeedback(scope);
+        scope.active = false;
+    }
+
+    pub fn deinit(scope: *TransformFeedbackScope) void {
+        scope.end() catch {};
     }
 };
 
@@ -1354,6 +1486,10 @@ pub const Pool = struct {
     cmd_begin_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdBeginDebugUtilsLabelEXT),
     cmd_end_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
     cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
+    cmd_begin_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdBeginConditionalRenderingEXT),
+    cmd_end_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdEndConditionalRenderingEXT),
+    cmd_begin_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdBeginTransformFeedbackEXT),
+    cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
 
     pub fn deinit(pool: *Pool) void {
         if (!(pool._owner.release(pool) catch return)) return;
@@ -1450,6 +1586,10 @@ pub const Pool = struct {
             .cmd_begin_debug_utils_label_ext = pool.cmd_begin_debug_utils_label_ext,
             .cmd_end_debug_utils_label_ext = pool.cmd_end_debug_utils_label_ext,
             .cmd_insert_debug_utils_label_ext = pool.cmd_insert_debug_utils_label_ext,
+            .cmd_begin_conditional_rendering_ext = pool.cmd_begin_conditional_rendering_ext,
+            .cmd_end_conditional_rendering_ext = pool.cmd_end_conditional_rendering_ext,
+            .cmd_begin_transform_feedback_ext = pool.cmd_begin_transform_feedback_ext,
+            .cmd_end_transform_feedback_ext = pool.cmd_end_transform_feedback_ext,
         };
     }
 
