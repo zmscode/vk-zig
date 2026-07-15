@@ -11,6 +11,7 @@ pub const device_groups = @import("device_group.zig");
 pub const sparse = @import("sparse.zig");
 pub const formats = @import("format.zig");
 pub const memory = @import("memory.zig");
+pub const external = @import("external.zig");
 pub const buffers = @import("buffer.zig");
 pub const images = @import("image.zig");
 pub const samplers = @import("sampler.zig");
@@ -116,6 +117,13 @@ pub const ExternalMemoryHandleTypeBit = types.ExternalMemoryHandleTypeBit;
 pub const ExternalMemoryHandleTypeFlags = types.ExternalMemoryHandleTypeFlags;
 pub const ExternalMemoryFeatureBit = types.ExternalMemoryFeatureBit;
 pub const ExternalMemoryFeatureFlags = types.ExternalMemoryFeatureFlags;
+pub const ExternalSemaphoreHandleType = external.SemaphoreHandleType;
+pub const ExternalSemaphoreHandleTypes = external.SemaphoreHandleTypes;
+pub const ExternalSemaphoreProperties = external.SemaphoreProperties;
+pub const ExternalFenceHandleType = external.FenceHandleType;
+pub const ExternalFenceHandleTypes = external.FenceHandleTypes;
+pub const ExternalFenceProperties = external.FenceProperties;
+pub const ExternalFileDescriptor = external.FileDescriptor;
 pub const CommandBufferUsageBit = types.CommandBufferUsageBit;
 pub const CommandBufferUsageFlags = types.CommandBufferUsageFlags;
 pub const ImageAspectBit = types.ImageAspectBit;
@@ -1604,6 +1612,38 @@ pub const PhysicalDevice = struct {
         return .fromRaw(output.externalMemoryProperties);
     }
 
+    pub fn externalSemaphoreProperties(
+        device: *const PhysicalDevice,
+        handle_type: external.SemaphoreHandleType,
+    ) Error!external.SemaphoreProperties {
+        const get_properties = device.dispatch.get_physical_device_external_semaphore_properties orelse return error.MissingCommand;
+        const info: raw.VkPhysicalDeviceExternalSemaphoreInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+            .handleType = handle_type.toRaw(),
+        };
+        var output: raw.VkExternalSemaphoreProperties = .{
+            .sType = raw.VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+        };
+        get_properties(device._handle, &info, &output);
+        return .fromRaw(output);
+    }
+
+    pub fn externalFenceProperties(
+        device: *const PhysicalDevice,
+        handle_type: external.FenceHandleType,
+    ) Error!external.FenceProperties {
+        const get_properties = device.dispatch.get_physical_device_external_fence_properties orelse return error.MissingCommand;
+        const info: raw.VkPhysicalDeviceExternalFenceInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO,
+            .handleType = handle_type.toRaw(),
+        };
+        var output: raw.VkExternalFenceProperties = .{
+            .sType = raw.VK_STRUCTURE_TYPE_EXTERNAL_FENCE_PROPERTIES,
+        };
+        get_properties(device._handle, &info, &output);
+        return .fromRaw(output);
+    }
+
     /// Uses the Vulkan 1.1/KHR promoted query. Unsupported combinations return null.
     pub fn imageFormatProperties2(
         device: *const PhysicalDevice,
@@ -2930,6 +2970,15 @@ pub const Device = struct {
         return (try device.load(descriptor)) orelse error.MissingCommand;
     }
 
+    /// Returns the typed external-handle interop surface for this device.
+    pub fn externalInterop(device: *const Device) Error!external.Context {
+        return .{
+            ._device = try device.dispatchHandle(),
+            ._state = &device._state,
+            ._get_device_proc_addr = device.dispatch.get_device_proc_addr,
+        };
+    }
+
     /// Loads a dynamic command name without verifying that it matches the PFN type.
     pub fn loadUnchecked(
         device: *const Device,
@@ -3570,9 +3619,21 @@ pub const Device = struct {
             },
             .initialValue = options.initial_value,
         };
+        var export_info: raw.VkExportSemaphoreCreateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+            .handleTypes = options.export_handle_types.toRaw(),
+        };
+        if (!options.export_handle_types.isEmpty() and options.kind == .timeline) {
+            export_info.pNext = &type_create_info;
+        }
         const create_info: raw.VkSemaphoreCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-            .pNext = if (options.kind == .timeline) &type_create_info else null,
+            .pNext = if (!options.export_handle_types.isEmpty())
+                &export_info
+            else if (options.kind == .timeline)
+                &type_create_info
+            else
+                null,
         };
         var handle: raw.VkSemaphore = null;
         const result = device.dispatch.create_semaphore(
@@ -3612,8 +3673,13 @@ pub const Device = struct {
             FenceCreateFlags.init(&.{.signaled})
         else
             FenceCreateFlags.empty;
+        var export_info: raw.VkExportFenceCreateInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_EXPORT_FENCE_CREATE_INFO,
+            .handleTypes = options.export_handle_types.toRaw(),
+        };
         const create_info: raw.VkFenceCreateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .pNext = if (options.export_handle_types.isEmpty()) null else &export_info,
             .flags = flags.toRaw(),
         };
         var handle: raw.VkFence = null;
@@ -4122,6 +4188,12 @@ const InstanceDispatch = struct {
     get_physical_device_external_buffer_properties: ?CommandFunction(
         raw.PFN_vkGetPhysicalDeviceExternalBufferProperties,
     ),
+    get_physical_device_external_semaphore_properties: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceExternalSemaphoreProperties,
+    ),
+    get_physical_device_external_fence_properties: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceExternalFenceProperties,
+    ),
     get_physical_device_queue_family_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
     ),
@@ -4271,6 +4343,18 @@ const InstanceDispatch = struct {
                 get_instance_proc_addr,
                 handle,
                 command.get_physical_device_external_buffer_properties,
+                .instance,
+            ),
+            .get_physical_device_external_semaphore_properties = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_external_semaphore_properties,
+                .instance,
+            ),
+            .get_physical_device_external_fence_properties = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_external_fence_properties,
                 .instance,
             ),
             .get_physical_device_queue_family_properties = try loadInstanceRequired(
@@ -5901,6 +5985,8 @@ var test_timeline_wait_flags: raw.VkSemaphoreWaitFlags = 0;
 var test_timeline_signal_value: u64 = 0;
 var test_created_semaphore_kind: SemaphoreKind = .binary;
 var test_created_semaphore_initial_value: u64 = 0;
+var test_created_semaphore_export_handles: raw.VkExternalSemaphoreHandleTypeFlags = 0;
+var test_created_fence_export_handles: raw.VkExternalFenceHandleTypeFlags = 0;
 var test_destroy_image_view_count: usize = 0;
 var test_create_image_view_count: usize = 0;
 var test_create_image_view_fail_at: ?usize = null;
@@ -5922,6 +6008,7 @@ var test_buffer_view_range: u64 = 0;
 var test_bound_memory_offset: u64 = 0;
 var test_allocated_memory_size: u64 = 0;
 var test_allocated_memory_type: u32 = 0;
+var test_allocated_memory_export_handles: raw.VkExternalMemoryHandleTypeFlags = 0;
 var test_map_result: raw.VkResult = raw.VK_SUCCESS;
 var test_unmap_result: raw.VkResult = raw.VK_SUCCESS;
 var test_map_count: usize = 0;
@@ -6118,9 +6205,98 @@ fn testGetDeviceProcAddr(
         return @ptrCast(&testQueueSubmit2);
     }
     if (testNameEquals(name, "vkQueueSubmit2KHR")) return @ptrCast(&testQueueSubmit2);
+    if (testNameEquals(name, "vkGetMemoryFdKHR")) return @ptrCast(&testGetMemoryFd);
+    if (testNameEquals(name, "vkGetMemoryFdPropertiesKHR")) return @ptrCast(&testGetMemoryFdProperties);
+    if (testNameEquals(name, "vkImportSemaphoreFdKHR")) return @ptrCast(&testImportSemaphoreFd);
+    if (testNameEquals(name, "vkGetSemaphoreFdKHR")) return @ptrCast(&testGetSemaphoreFd);
+    if (testNameEquals(name, "vkImportFenceFdKHR")) return @ptrCast(&testImportFenceFd);
+    if (testNameEquals(name, "vkGetFenceFdKHR")) return @ptrCast(&testGetFenceFd);
+    if (testNameEquals(name, "vkGetMemoryHostPointerPropertiesEXT")) return @ptrCast(&testGetMemoryHostPointerProperties);
+    if (testNameEquals(name, "vkGetMemoryMetalHandleEXT")) return @ptrCast(&testGetMemoryMetalHandle);
+    if (testNameEquals(name, "vkGetMemoryMetalHandlePropertiesEXT")) return @ptrCast(&testGetMemoryMetalHandleProperties);
     if (!testNameEquals(name, "vkSetDebugUtilsObjectNameEXT")) return null;
     if (test_missing_command == .set_object_name) return null;
     return @ptrCast(&testSetObjectName);
+}
+
+fn testGetMemoryFd(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkMemoryGetFdInfoKHR,
+    descriptor: [*c]c_int,
+) callconv(.c) raw.VkResult {
+    descriptor.* = 41;
+    return test_resource_result;
+}
+
+fn testGetMemoryFdProperties(
+    _: raw.VkDevice,
+    _: raw.VkExternalMemoryHandleTypeFlagBits,
+    _: c_int,
+    properties: [*c]raw.VkMemoryFdPropertiesKHR,
+) callconv(.c) raw.VkResult {
+    properties.*.memoryTypeBits = 0x12;
+    return test_resource_result;
+}
+
+fn testImportSemaphoreFd(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkImportSemaphoreFdInfoKHR,
+) callconv(.c) raw.VkResult {
+    return test_resource_result;
+}
+
+fn testGetSemaphoreFd(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkSemaphoreGetFdInfoKHR,
+    descriptor: [*c]c_int,
+) callconv(.c) raw.VkResult {
+    descriptor.* = 42;
+    return test_resource_result;
+}
+
+fn testImportFenceFd(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkImportFenceFdInfoKHR,
+) callconv(.c) raw.VkResult {
+    return test_resource_result;
+}
+
+fn testGetFenceFd(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkFenceGetFdInfoKHR,
+    descriptor: [*c]c_int,
+) callconv(.c) raw.VkResult {
+    descriptor.* = 43;
+    return test_resource_result;
+}
+
+fn testGetMemoryHostPointerProperties(
+    _: raw.VkDevice,
+    _: raw.VkExternalMemoryHandleTypeFlagBits,
+    _: ?*const anyopaque,
+    properties: [*c]raw.VkMemoryHostPointerPropertiesEXT,
+) callconv(.c) raw.VkResult {
+    properties.*.memoryTypeBits = 0x24;
+    return test_resource_result;
+}
+
+fn testGetMemoryMetalHandle(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkMemoryGetMetalHandleInfoEXT,
+    handle: [*c]?*anyopaque,
+) callconv(.c) raw.VkResult {
+    handle.* = @ptrFromInt(0x4700);
+    return test_resource_result;
+}
+
+fn testGetMemoryMetalHandleProperties(
+    _: raw.VkDevice,
+    _: raw.VkExternalMemoryHandleTypeFlagBits,
+    _: ?*const anyopaque,
+    properties: [*c]raw.VkMemoryMetalHandlePropertiesEXT,
+) callconv(.c) raw.VkResult {
+    properties.*.memoryTypeBits = 0x48;
+    return test_resource_result;
 }
 
 fn testDestroyInstance(
@@ -6167,6 +6343,26 @@ fn testExternalBufferProperties(
         .externalMemoryFeatures = raw.VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT,
         .compatibleHandleTypes = @intCast(info.*.handleType),
     };
+}
+
+fn testExternalSemaphoreProperties(
+    _: raw.VkPhysicalDevice,
+    info: [*c]const raw.VkPhysicalDeviceExternalSemaphoreInfo,
+    properties: [*c]raw.VkExternalSemaphoreProperties,
+) callconv(.c) void {
+    properties.*.externalSemaphoreFeatures = raw.VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
+        raw.VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
+    properties.*.compatibleHandleTypes = @intCast(info.*.handleType);
+}
+
+fn testExternalFenceProperties(
+    _: raw.VkPhysicalDevice,
+    info: [*c]const raw.VkPhysicalDeviceExternalFenceInfo,
+    properties: [*c]raw.VkExternalFenceProperties,
+) callconv(.c) void {
+    properties.*.externalFenceFeatures = raw.VK_EXTERNAL_FENCE_FEATURE_EXPORTABLE_BIT |
+        raw.VK_EXTERNAL_FENCE_FEATURE_IMPORTABLE_BIT;
+    properties.*.compatibleHandleTypes = @intCast(info.*.handleType);
 }
 
 fn testGetPhysicalDeviceFormatProperties(
@@ -6218,9 +6414,9 @@ fn testGetPhysicalDeviceImageFormatProperties2(
     var next: [*c]const raw.VkBaseInStructure = @ptrCast(@alignCast(info.*.pNext));
     while (next != null) : (next = next.*.pNext) {
         if (next.*.sType == raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO) {
-            const external: *const raw.VkPhysicalDeviceExternalImageFormatInfo =
+            const external_info: *const raw.VkPhysicalDeviceExternalImageFormatInfo =
                 @ptrCast(@alignCast(next));
-            test_external_memory_handle_type = external.handleType;
+            test_external_memory_handle_type = external_info.handleType;
         } else if (next.*.sType == raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT) {
             const drm: *const raw.VkPhysicalDeviceImageDrmFormatModifierInfoEXT =
                 @ptrCast(@alignCast(next));
@@ -6231,8 +6427,8 @@ fn testGetPhysicalDeviceImageFormatProperties2(
     }
     properties.*.imageFormatProperties = test_image_format_properties;
     if (properties.*.pNext) |next_output| {
-        const external: *raw.VkExternalImageFormatProperties = @ptrCast(@alignCast(next_output));
-        external.externalMemoryProperties = test_external_memory_properties;
+        const external_output: *raw.VkExternalImageFormatProperties = @ptrCast(@alignCast(next_output));
+        external_output.externalMemoryProperties = test_external_memory_properties;
     }
     return test_image_format_result;
 }
@@ -6439,6 +6635,16 @@ fn testAllocateMemory(
 ) callconv(.c) raw.VkResult {
     test_allocated_memory_size = info.*.allocationSize;
     test_allocated_memory_type = info.*.memoryTypeIndex;
+    test_allocated_memory_export_handles = 0;
+    var next = info.*.pNext;
+    while (next) |pointer| {
+        const base: *const raw.VkBaseInStructure = @ptrCast(@alignCast(pointer));
+        if (base.sType == raw.VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO) {
+            const export_info: *const raw.VkExportMemoryAllocateInfo = @ptrCast(@alignCast(pointer));
+            test_allocated_memory_export_handles = export_info.handleTypes;
+        }
+        next = if (base.pNext == null) null else @ptrCast(base.pNext);
+    }
     handle.* = if (test_resource_null_handle) null else testHandle(raw.VkDeviceMemory, 0x5800);
     return test_resource_result;
 }
@@ -6525,13 +6731,22 @@ fn testCreateSemaphore(
 ) callconv(.c) raw.VkResult {
     test_created_semaphore_kind = .binary;
     test_created_semaphore_initial_value = 0;
-    if (create_info.*.pNext) |next| {
-        const type_info: *const raw.VkSemaphoreTypeCreateInfo = @ptrCast(@alignCast(next));
-        test_created_semaphore_kind = if (type_info.semaphoreType == raw.VK_SEMAPHORE_TYPE_TIMELINE)
-            .timeline
-        else
-            .binary;
-        test_created_semaphore_initial_value = type_info.initialValue;
+    test_created_semaphore_export_handles = 0;
+    var next = create_info.*.pNext;
+    while (next) |pointer| {
+        const base: *const raw.VkBaseInStructure = @ptrCast(@alignCast(pointer));
+        if (base.sType == raw.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO) {
+            const type_info: *const raw.VkSemaphoreTypeCreateInfo = @ptrCast(@alignCast(pointer));
+            test_created_semaphore_kind = if (type_info.semaphoreType == raw.VK_SEMAPHORE_TYPE_TIMELINE)
+                .timeline
+            else
+                .binary;
+            test_created_semaphore_initial_value = type_info.initialValue;
+        } else if (base.sType == raw.VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO) {
+            const export_info: *const raw.VkExportSemaphoreCreateInfo = @ptrCast(@alignCast(pointer));
+            test_created_semaphore_export_handles = export_info.handleTypes;
+        }
+        next = if (base.pNext == null) null else @ptrCast(base.pNext);
     }
     handle.* = if (test_resource_null_handle) null else testHandle(raw.VkSemaphore, 0x5200);
     return test_resource_result;
@@ -6547,10 +6762,15 @@ fn testDestroySemaphore(
 
 fn testCreateFence(
     _: raw.VkDevice,
-    _: [*c]const raw.VkFenceCreateInfo,
+    create_info: [*c]const raw.VkFenceCreateInfo,
     _: [*c]const raw.VkAllocationCallbacks,
     handle: [*c]raw.VkFence,
 ) callconv(.c) raw.VkResult {
+    test_created_fence_export_handles = 0;
+    if (create_info.*.pNext) |next| {
+        const export_info: *const raw.VkExportFenceCreateInfo = @ptrCast(@alignCast(next));
+        test_created_fence_export_handles = export_info.handleTypes;
+    }
     handle.* = if (test_resource_null_handle) null else testHandle(raw.VkFence, 0x5300);
     return test_resource_result;
 }
@@ -7419,6 +7639,8 @@ fn testInstance() Instance {
             .get_physical_device_memory_properties = testGetPhysicalDeviceMemoryProperties,
             .get_physical_device_memory_properties2 = null,
             .get_physical_device_external_buffer_properties = null,
+            .get_physical_device_external_semaphore_properties = null,
+            .get_physical_device_external_fence_properties = null,
             .get_physical_device_queue_family_properties = testFunction(
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
             ),
@@ -9631,6 +9853,8 @@ test "memory budgets and external buffer capabilities are typed and command chec
     defer instance.deinit();
     instance.dispatch.get_physical_device_memory_properties2 = testGetPhysicalDeviceMemoryProperties2;
     instance.dispatch.get_physical_device_external_buffer_properties = testExternalBufferProperties;
+    instance.dispatch.get_physical_device_external_semaphore_properties = testExternalSemaphoreProperties;
+    instance.dispatch.get_physical_device_external_fence_properties = testExternalFenceProperties;
     var physical_device: PhysicalDevice = .{
         ._handle = testHandle(raw.VkPhysicalDevice, 0x1100),
         ._instance_handle = testHandle(raw.VkInstance, 0x1000),
@@ -9642,20 +9866,32 @@ test "memory budgets and external buffer capabilities are typed and command chec
     try std.testing.expectEqual(@as(u64, 768), budget.heaps()[0].available().bytes());
     try std.testing.expectEqual(@as(u64, 1536), budget.heaps()[1].available().bytes());
 
-    const external = try physical_device.externalBufferProperties(.{
+    const external_properties = try physical_device.externalBufferProperties(.{
         .usage = .init(&.{.storage_buffer}),
         .handle_type = .opaque_fd,
     });
-    try std.testing.expect(external.features.contains(.exportable));
-    try std.testing.expect(external.compatible_handle_types.contains(.opaque_fd));
+    try std.testing.expect(external_properties.features.contains(.exportable));
+    try std.testing.expect(external_properties.compatible_handle_types.contains(.opaque_fd));
+    const external_semaphore = try physical_device.externalSemaphoreProperties(.opaque_fd);
+    try std.testing.expect(external_semaphore.exportable);
+    try std.testing.expect(external_semaphore.importable);
+    try std.testing.expect(external_semaphore.compatible_handle_types.contains(.opaque_fd));
+    const external_fence = try physical_device.externalFenceProperties(.sync_fd);
+    try std.testing.expect(external_fence.exportable);
+    try std.testing.expect(external_fence.importable);
+    try std.testing.expect(external_fence.compatible_handle_types.contains(.sync_fd));
 
     physical_device.dispatch.get_physical_device_memory_properties2 = null;
     physical_device.dispatch.get_physical_device_external_buffer_properties = null;
+    physical_device.dispatch.get_physical_device_external_semaphore_properties = null;
+    physical_device.dispatch.get_physical_device_external_fence_properties = null;
     try std.testing.expectError(error.MissingCommand, physical_device.memoryBudget());
     try std.testing.expectError(error.MissingCommand, physical_device.externalBufferProperties(.{
         .usage = .init(&.{.storage_buffer}),
         .handle_type = .opaque_fd,
     }));
+    try std.testing.expectError(error.MissingCommand, physical_device.externalSemaphoreProperties(.opaque_fd));
+    try std.testing.expectError(error.MissingCommand, physical_device.externalFenceProperties(.opaque_fd));
 }
 
 test "buffer wrappers cover creation views addresses sharing and checked binding" {
@@ -10386,4 +10622,68 @@ test "workflow helpers expose explicit fence and timeline completion" {
     test_timeline_counter = 6;
     try std.testing.expectEqual(@as(u32, 1), try retirements.retireCompleted(&context, Context.retire));
     try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, retired.items);
+}
+
+test "external interop stays raw-free across memory and synchronization handles" {
+    test_resource_result = raw.VK_SUCCESS;
+    var device = testDevice();
+    defer device.deinit();
+
+    var allocation = try device.allocateMemory(.{
+        .size = .fromBytes(4096),
+        .memory_type_index = .fromRaw(0),
+        .external = .{ .export_handles = .{
+            .handle_types = .init(&.{.opaque_fd}),
+        } },
+    });
+    defer allocation.deinit();
+    var semaphore = try device.createSemaphore(.{
+        .export_handle_types = .init(&.{.opaque_fd}),
+    });
+    defer semaphore.deinit();
+    var fence = try device.createFence(.{
+        .export_handle_types = .init(&.{.opaque_fd}),
+    });
+    defer fence.deinit();
+    try std.testing.expectEqual(
+        ExternalMemoryHandleTypeBit.opaque_fd.toRaw(),
+        test_allocated_memory_export_handles,
+    );
+    try std.testing.expectEqual(
+        ExternalSemaphoreHandleType.opaque_fd.toRaw(),
+        test_created_semaphore_export_handles,
+    );
+    try std.testing.expectEqual(
+        ExternalFenceHandleType.opaque_fd.toRaw(),
+        test_created_fence_export_handles,
+    );
+
+    const interop = try device.externalInterop();
+    try std.testing.expectEqual(@as(c_int, 41), (try interop.exportMemoryFd(&allocation, .opaque_fd)).native());
+    try std.testing.expectEqual(@as(u32, 0x12), (try interop.memoryFdProperties(
+        .opaque_fd,
+        .fromNative(9),
+    )).memory_type_bits);
+    try interop.importSemaphoreFd(&semaphore, .opaque_fd, .fromNative(10), .temporary);
+    try std.testing.expectEqual(@as(c_int, 42), (try interop.exportSemaphoreFd(&semaphore, .opaque_fd)).native());
+    try interop.importFenceFd(&fence, .opaque_fd, .fromNative(11), .permanent);
+    try std.testing.expectEqual(@as(c_int, 43), (try interop.exportFenceFd(&fence, .opaque_fd)).native());
+
+    var host_byte: u8 = 0;
+    try std.testing.expectEqual(@as(u32, 0x24), (try interop.hostPointerProperties(
+        .host_allocation_ext,
+        &host_byte,
+    )).memory_type_bits);
+    const metal = try interop.exportMemoryMetalHandle(&allocation, .mtlbuffer_ext);
+    try std.testing.expectEqual(@as(usize, 0x4700), @intFromPtr(metal));
+    try std.testing.expectEqual(@as(u32, 0x48), (try interop.memoryMetalHandleProperties(
+        .mtlbuffer_ext,
+        metal,
+    )).memory_type_bits);
+    if (comptime !@hasDecl(raw, "PFN_vkGetMemoryWin32HandleKHR")) {
+        try std.testing.expectError(
+            error.UnsupportedOperation,
+            interop.exportMemoryWin32Handle(&allocation, .opaque_win32),
+        );
+    }
 }

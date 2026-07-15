@@ -250,8 +250,48 @@ fn addPlatformDeclarationTestStep(
             "pub const VkWaylandSurfaceCreateInfoKHR =",
         },
     });
+    const windows = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .windows,
+        .abi = .gnu,
+    });
+    const windows_translate = addTranslateC(
+        b,
+        windows,
+        optimize,
+        b.path("vendor/include"),
+        .{ .win32 = true },
+    );
+    const windows_check = b.addCheckFile(windows_translate.getOutput(), .{
+        .expected_matches = &.{
+            "pub const VkImportMemoryWin32HandleInfoKHR =",
+            "pub const VkImportSemaphoreWin32HandleInfoKHR =",
+            "pub const VkImportFenceWin32HandleInfoKHR =",
+        },
+    });
+    const android = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .linux,
+        .abi = .android,
+    });
+    const android_translate = addTranslateC(
+        b,
+        android,
+        optimize,
+        b.path("vendor/include"),
+        .{ .android = true },
+    );
+    const android_check = b.addCheckFile(android_translate.getOutput(), .{
+        .expected_matches = &.{
+            "pub const VkImportAndroidHardwareBufferInfoANDROID =",
+            "pub const VkAndroidHardwareBufferPropertiesANDROID =",
+            "pub const PFN_vkGetMemoryAndroidHardwareBufferANDROID =",
+        },
+    });
     const step = b.step("test-platforms", "Cross-target composable platform declaration test");
     step.dependOn(&check.step);
+    step.dependOn(&windows_check.step);
+    step.dependOn(&android_check.step);
 }
 
 fn addCommandGenerator(b: *std.Build) *std.Build.Step.Compile {

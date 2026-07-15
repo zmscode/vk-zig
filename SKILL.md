@@ -90,6 +90,17 @@ External-memory and DRM-modifier image queries belong in `ImageFormatQueryOption
 `pNext` chains in application code. Enumerate DRM modifiers with the typed count/`Into`/allocating
 methods and preserve unknown feature bits by retaining the returned flag sets.
 
+Use `device.externalInterop()` for all native-handle workflows. Declare memory exports with
+`MemoryAllocationOptions.external`, and semaphore/fence exports with `export_handle_types`; never
+build `VkExport*`, `VkImport*`, or `Vk*Get*HandleInfo` structures in application code. Prefer
+`exportMemoryFd`, `memoryFdProperties`, `importSemaphoreFd`, `exportSemaphoreFd`,
+`importFenceFd`, and `exportFenceFd` on POSIX targets. DMA-BUF is the `.dma_buf_ext` memory handle
+type and uses the same fd operations. Use the explicitly named Win32, Zircon, Android, Metal, and
+host-pointer methods for those families. Exported fds and Zircon handles are caller-owned; Vulkan
+consumes imported fds/Zircon handles only on success. Win32 imports retain caller ownership.
+Treat `error.UnsupportedOperation` as target-inapplicable and `error.MissingCommand` as an enabled
+target/extension whose runtime entry point is unavailable.
+
 Deinitialize children before parents: swapchains, then devices, surfaces, instances, and finally
 the loader. An instance configured with a typed debug messenger owns and destroys that messenger
 before destroying itself. Queues and swapchain images are non-owning and need no deinit.

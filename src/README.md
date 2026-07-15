@@ -11,6 +11,7 @@ modules so changes do not accumulate in one file:
 - `physical_device.zig`: typed properties, limits, and queue-family selection.
 - `format.zig`: format, image-format, external-memory, DRM, and sparse queries.
 - `memory.zig`: memory properties, memory-type selection, and owned allocations.
+- `external.zig` / `external_types.zig`: external memory, semaphore, fence, and native-handle interop.
 - `buffer.zig`: buffers, buffer views, requirements, and device addresses.
 - `image.zig`: image and image-view ownership and creation.
 - `sparse.zig`: sparse buffer/image residency descriptors and queue binding batches.

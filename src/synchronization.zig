@@ -5,6 +5,7 @@ const debug_utils = @import("debug_utils.zig");
 const types = @import("vulkan_types");
 const buffers = @import("buffer.zig");
 const images = @import("image.zig");
+const external_types = @import("external_types.zig");
 
 const CommandFunction = command.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -196,6 +197,7 @@ pub const SemaphoreKind = enum {
 pub const SemaphoreOptions = struct {
     kind: SemaphoreKind = .binary,
     initial_value: u64 = 0,
+    export_handle_types: external_types.SemaphoreHandleTypes = .empty,
 };
 
 pub const TimelineWaitStatus = enum {
@@ -284,6 +286,7 @@ pub const Semaphore = struct {
 
 pub const FenceOptions = struct {
     signaled: bool = false,
+    export_handle_types: external_types.FenceHandleTypes = .empty,
 };
 
 pub const FenceWaitStatus = enum {

@@ -5,6 +5,7 @@ const core = @import("core.zig");
 const command = @import("vulkan_commands");
 const debug_utils = @import("debug_utils.zig");
 const device_group = @import("device_group.zig");
+const external_types = @import("external_types.zig");
 
 const CommandFunction = command.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -37,6 +38,9 @@ pub const AllocationOptions = struct {
     priority: ?f32 = null,
     /// Devices that may access a subset allocation in a logical device group.
     device_mask: ?device_group.Mask = null,
+    /// Optional external-memory import or export declaration. Import ownership
+    /// is documented by `external.MemoryImport`.
+    external: ?external_types.ExternalMemoryAllocation = null,
 };
 
 pub const Requirements = struct {
@@ -397,9 +401,100 @@ pub fn allocate(
     if (options.priority != null) {
         priority_info.pNext = if (flags != 0) &flags_info else null;
     }
+    var chain_head: ?*const anyopaque = if (options.priority != null)
+        &priority_info
+    else if (flags != 0)
+        &flags_info
+    else
+        null;
+    var export_info: raw.VkExportMemoryAllocateInfo = .{
+        .sType = raw.VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+    };
+    var import_fd_info: raw.VkImportMemoryFdInfoKHR = .{
+        .sType = raw.VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+    };
+    var import_host_info: raw.VkImportMemoryHostPointerInfoEXT = .{
+        .sType = raw.VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+    };
+    var import_metal_info: raw.VkImportMemoryMetalHandleInfoEXT = .{
+        .sType = raw.VK_STRUCTURE_TYPE_IMPORT_MEMORY_METAL_HANDLE_INFO_EXT,
+    };
+    const PlatformInfoFallback = extern struct {
+        sType: raw.VkStructureType = 0,
+        pNext: ?*const anyopaque = null,
+    };
+    const Win32Info = if (@hasDecl(raw, "VkImportMemoryWin32HandleInfoKHR"))
+        @field(raw, "VkImportMemoryWin32HandleInfoKHR")
+    else
+        PlatformInfoFallback;
+    const ZirconInfo = if (@hasDecl(raw, "VkImportMemoryZirconHandleInfoFUCHSIA"))
+        @field(raw, "VkImportMemoryZirconHandleInfoFUCHSIA")
+    else
+        PlatformInfoFallback;
+    const AndroidInfo = if (@hasDecl(raw, "VkImportAndroidHardwareBufferInfoANDROID"))
+        @field(raw, "VkImportAndroidHardwareBufferInfoANDROID")
+    else
+        PlatformInfoFallback;
+    var import_win32_info: Win32Info = .{};
+    var import_zircon_info: ZirconInfo = .{};
+    var import_android_info: AndroidInfo = .{};
+    if (options.external) |external| switch (external) {
+        .export_handles => |value| {
+            if (value.handle_types.isEmpty()) return error.InvalidOptions;
+            export_info.pNext = chain_head;
+            export_info.handleTypes = value.handle_types.toRaw();
+            chain_head = &export_info;
+        },
+        .import_handle => |imported| switch (imported) {
+            .file_descriptor => |value| {
+                import_fd_info.pNext = chain_head;
+                import_fd_info.handleType = value.handle_type.toRaw();
+                import_fd_info.fd = value.descriptor.native();
+                chain_head = &import_fd_info;
+            },
+            .host_pointer => |value| {
+                import_host_info.pNext = chain_head;
+                import_host_info.handleType = value.handle_type.toRaw();
+                import_host_info.pHostPointer = value.pointer;
+                chain_head = &import_host_info;
+            },
+            .metal_handle => |value| {
+                import_metal_info.pNext = chain_head;
+                import_metal_info.handleType = value.handle_type.toRaw();
+                import_metal_info.handle = value.handle;
+                chain_head = &import_metal_info;
+            },
+            .win32_handle => |value| {
+                if (comptime @hasDecl(raw, "VkImportMemoryWin32HandleInfoKHR")) {
+                    import_win32_info.sType = raw.VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+                    import_win32_info.pNext = chain_head;
+                    import_win32_info.handleType = value.handle_type.toRaw();
+                    import_win32_info.handle = @ptrCast(value.handle);
+                    chain_head = &import_win32_info;
+                } else return error.UnsupportedOperation;
+            },
+            .zircon_vmo => |value| {
+                if (comptime @hasDecl(raw, "VkImportMemoryZirconHandleInfoFUCHSIA")) {
+                    import_zircon_info.sType = raw.VK_STRUCTURE_TYPE_IMPORT_MEMORY_ZIRCON_HANDLE_INFO_FUCHSIA;
+                    import_zircon_info.pNext = chain_head;
+                    import_zircon_info.handleType = value.handle_type.toRaw();
+                    import_zircon_info.handle = value.handle;
+                    chain_head = &import_zircon_info;
+                } else return error.UnsupportedOperation;
+            },
+            .android_hardware_buffer => |buffer| {
+                if (comptime @hasDecl(raw, "VkImportAndroidHardwareBufferInfoANDROID")) {
+                    import_android_info.sType = raw.VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+                    import_android_info.pNext = chain_head;
+                    import_android_info.buffer = @ptrCast(buffer);
+                    chain_head = &import_android_info;
+                } else return error.UnsupportedOperation;
+            },
+        },
+    };
     const info: raw.VkMemoryAllocateInfo = .{
         .sType = raw.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .pNext = if (options.priority != null) &priority_info else if (flags != 0) &flags_info else null,
+        .pNext = chain_head,
         .allocationSize = options.size.bytes(),
         .memoryTypeIndex = options.memory_type_index.toRaw(),
     };

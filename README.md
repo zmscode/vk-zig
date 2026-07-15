@@ -435,6 +435,32 @@ allocating `drmFormatModifierProperties` convenience to enumerate modifiers. Spa
 properties follow the same count/`Into`/allocating pattern. See `examples/format_queries.zig` for
 a depth-format selection example without `vk.raw`.
 
+External memory and synchronization handles are available through `device.externalInterop()`.
+Declare exportability when creating the object, then use the dedicated namespace without raw
+create structures, command loading, or result mapping:
+
+```zig
+var allocation = try device.allocateMemory(.{
+    .size = .fromBytes(4096),
+    .memory_type_index = memory_type,
+    .external = .{ .export_handles = .{
+        .handle_types = .init(&.{.opaque_fd}),
+    } },
+});
+defer allocation.deinit();
+
+const interop = try device.externalInterop();
+const fd = try interop.exportMemoryFd(&allocation, .opaque_fd);
+defer std.posix.close(fd.native()); // exported fds belong to the caller
+```
+
+The same context imports and exports semaphore and fence fds, Win32 and Zircon handles, Android
+hardware buffers, Metal objects, and host pointers where the target ABI supports them. FD and
+Zircon imports transfer ownership only on success. Win32 imports retain caller ownership. Methods
+for an inapplicable target return `error.UnsupportedOperation`; an enabled extension whose command
+is unavailable returns `error.MissingCommand`. DMA-BUF uses `.dma_buf_ext` with the fd methods,
+while DRM modifier compatibility remains in the typed format/image queries.
+
 `deviceExtensions` enumerates per-device support. Once `VK_KHR_swapchain` is enabled on the
 logical device, create and own a swapchain without manually loading its commands:
 
