@@ -13,6 +13,7 @@ const buffers = @import("buffer.zig");
 const sampler = @import("sampler.zig");
 const pipeline = @import("pipeline.zig");
 const descriptor = @import("descriptor.zig");
+const video = @import("video.zig");
 
 const CommandFunction = commands.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -230,6 +231,7 @@ pub const Buffer = struct {
     compute_pipeline_bound: bool = false,
     conditional_rendering_active: bool = false,
     transform_feedback_active: bool = false,
+    video_coding_active: bool = false,
     begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
     end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
@@ -299,6 +301,8 @@ pub const Buffer = struct {
     cmd_end_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdEndConditionalRenderingEXT),
     cmd_begin_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdBeginTransformFeedbackEXT),
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
+    cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
+    cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
 
     fn liveHandle(buffer: *Buffer) core.Error!CommandBufferHandle {
         try buffer._pool_owner.validate();
@@ -319,6 +323,7 @@ pub const Buffer = struct {
             buffer.compute_pipeline_bound = false;
             buffer.conditional_rendering_active = false;
             buffer.transform_feedback_active = false;
+            buffer.video_coding_active = false;
         }
         return handle;
     }
@@ -348,6 +353,7 @@ pub const Buffer = struct {
             buffer.compute_pipeline_bound = false;
             buffer.conditional_rendering_active = false;
             buffer.transform_feedback_active = false;
+            buffer.video_coding_active = false;
         }
         if (buffer.state == .pending) return;
         buffer._pool.free_command_buffers(
@@ -402,11 +408,12 @@ pub const Buffer = struct {
         buffer.compute_pipeline_bound = false;
         buffer.conditional_rendering_active = false;
         buffer.transform_feedback_active = false;
+        buffer.video_coding_active = false;
     }
 
     pub fn end(buffer: *Buffer) core.Error!void {
         const handle = try buffer.liveHandle();
-        if (buffer.state != .recording or buffer.rendering_active or buffer.render_pass_active) return error.InvalidOptions;
+        if (buffer.state != .recording or buffer.rendering_active or buffer.render_pass_active or buffer.video_coding_active) return error.InvalidOptions;
         try core.checkSuccessOptional(if (buffer._pool._device_state) |*state| state else null, buffer.end_command_buffer(handle));
         buffer.state = .executable;
     }
@@ -433,6 +440,7 @@ pub const Buffer = struct {
         buffer.compute_pipeline_bound = false;
         buffer.conditional_rendering_active = false;
         buffer.transform_feedback_active = false;
+        buffer.video_coding_active = false;
     }
 
     pub fn markComplete(buffer: *Buffer) core.Error!void {
@@ -1304,6 +1312,39 @@ pub const Buffer = struct {
         buffer.transform_feedback_active = false;
     }
 
+    pub fn beginVideoCoding(buffer: *Buffer, options: video.CodingOptions) core.Error!VideoCodingScope {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or buffer.video_coding_active or buffer.rendering_active or buffer.render_pass_active) return error.InvalidOptions;
+        if (options.session._device_handle != buffer._device_handle) return error.InvalidHandle;
+        const begin_command = buffer.cmd_begin_video_coding_khr orelse return error.MissingCommand;
+        _ = buffer.cmd_end_video_coding_khr orelse return error.MissingCommand;
+        const parameters_handle = if (options.parameters) |parameters| blk: {
+            if (parameters._device_handle != buffer._device_handle) return error.InvalidHandle;
+            break :blk try parameters.rawHandle();
+        } else null;
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
+        const info: raw.VkVideoBeginCodingInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR,
+            .videoSession = try options.session.rawHandle(),
+            .videoSessionParameters = parameters_handle,
+        };
+        begin_command(handle, &info);
+        buffer.video_coding_active = true;
+        return .{ ._owner = owner, .buffer = buffer };
+    }
+
+    fn endVideoCoding(buffer: *Buffer) core.Error!void {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording or !buffer.video_coding_active) return error.InvalidOptions;
+        const end_command = buffer.cmd_end_video_coding_khr orelse return error.MissingCommand;
+        const info: raw.VkVideoEndCodingInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR,
+        };
+        end_command(handle, &info);
+        buffer.video_coding_active = false;
+    }
+
     pub fn rawHandle(buffer: *Buffer) core.Error!raw.VkCommandBuffer {
         return try buffer.liveHandle();
     }
@@ -1409,6 +1450,23 @@ pub const TransformFeedbackScope = struct {
     }
 };
 
+pub const VideoCodingScope = struct {
+    _owner: core.Owner,
+    buffer: *Buffer,
+    active: bool = true,
+
+    pub fn end(scope: *VideoCodingScope) core.Error!void {
+        if (!(try scope._owner.release(scope))) return;
+        if (!scope.active) return;
+        try scope.buffer.endVideoCoding();
+        scope.active = false;
+    }
+
+    pub fn deinit(scope: *VideoCodingScope) void {
+        scope.end() catch {};
+    }
+};
+
 pub const Pool = struct {
     _handle: ?CommandPoolHandle,
     _owner: core.Owner,
@@ -1490,6 +1548,8 @@ pub const Pool = struct {
     cmd_end_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdEndConditionalRenderingEXT),
     cmd_begin_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdBeginTransformFeedbackEXT),
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
+    cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
+    cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
 
     pub fn deinit(pool: *Pool) void {
         if (!(pool._owner.release(pool) catch return)) return;
@@ -1590,6 +1650,8 @@ pub const Pool = struct {
             .cmd_end_conditional_rendering_ext = pool.cmd_end_conditional_rendering_ext,
             .cmd_begin_transform_feedback_ext = pool.cmd_begin_transform_feedback_ext,
             .cmd_end_transform_feedback_ext = pool.cmd_end_transform_feedback_ext,
+            .cmd_begin_video_coding_khr = pool.cmd_begin_video_coding_khr,
+            .cmd_end_video_coding_khr = pool.cmd_end_video_coding_khr,
         };
     }
 

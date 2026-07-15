@@ -28,6 +28,7 @@ pub const debug_utils = @import("debug_utils.zig");
 pub const tooling = @import("diagnostics.zig");
 pub const workflows = @import("workflows.zig");
 pub const optical_flow = @import("optical_flow.zig");
+pub const video = @import("video.zig");
 
 /// Deprecated short name retained while applications migrate to `synchronization`.
 pub const sync = synchronization;
@@ -1833,7 +1834,7 @@ pub const PhysicalDevice = struct {
         var written: u32 = @intCast(storage.len);
         if (device.dispatch.get_physical_device_queue_family_properties2) |get_properties2| {
             var raw_properties: [device_queue_count_max]raw.VkQueueFamilyProperties2 = undefined;
-            var video: [device_queue_count_max]raw.VkQueueFamilyVideoPropertiesKHR = undefined;
+            var video_properties: [device_queue_count_max]raw.VkQueueFamilyVideoPropertiesKHR = undefined;
             var query_status: [device_queue_count_max]raw.VkQueueFamilyQueryResultStatusPropertiesKHR = undefined;
             var priorities: [device_queue_count_max]raw.VkQueueFamilyGlobalPriorityProperties = undefined;
             for (0..storage.len) |index| {
@@ -1842,13 +1843,13 @@ pub const PhysicalDevice = struct {
                     .sType = raw.VK_STRUCTURE_TYPE_QUEUE_FAMILY_QUERY_RESULT_STATUS_PROPERTIES_KHR,
                     .pNext = &priorities[index],
                 };
-                video[index] = .{
+                video_properties[index] = .{
                     .sType = raw.VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR,
                     .pNext = &query_status[index],
                 };
                 raw_properties[index] = .{
                     .sType = raw.VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2,
-                    .pNext = &video[index],
+                    .pNext = &video_properties[index],
                 };
             }
             get_properties2(
@@ -1857,7 +1858,7 @@ pub const PhysicalDevice = struct {
                 if (storage.len == 0) null else raw_properties[0..storage.len].ptr,
             );
             if (written > storage.len) return error.BufferTooSmall;
-            for (storage[0..written], raw_properties[0..written], video[0..written], query_status[0..written], priorities[0..written], 0..) |*family, property, video_property, query_property, priority_property, index| {
+            for (storage[0..written], raw_properties[0..written], video_properties[0..written], query_status[0..written], priorities[0..written], 0..) |*family, property, video_property, query_property, priority_property, index| {
                 if (priority_property.priorityCount > raw.VK_MAX_GLOBAL_PRIORITY_SIZE) return error.InvalidProperties;
                 var global_priorities: physical_devices.GlobalPriorityProperties = .{};
                 global_priorities.count = priority_property.priorityCount;
@@ -2496,6 +2497,10 @@ pub const DeviceVendorFault = tooling.VendorFault;
 pub const PrivateDataSlot = tooling.PrivateDataSlot;
 pub const ValidationCache = tooling.ValidationCache;
 pub const ValidationCacheOptions = tooling.ValidationCacheOptions;
+pub const VideoSession = video.Session;
+pub const VideoSessionParameters = video.Parameters;
+pub const VideoCodingOptions = video.CodingOptions;
+pub const VideoCodingScope = commands.VideoCodingScope;
 pub const PipelineCreateResult = pipelines.CreateResult;
 pub const GraphicsPipelineOptions = pipelines.GraphicsOptions;
 pub const ComputePipelineOptions = pipelines.ComputeOptions;
@@ -3640,6 +3645,8 @@ pub const Device = struct {
             .cmd_end_conditional_rendering_ext = device.dispatch.cmd_end_conditional_rendering_ext,
             .cmd_begin_transform_feedback_ext = device.dispatch.cmd_begin_transform_feedback_ext,
             .cmd_end_transform_feedback_ext = device.dispatch.cmd_end_transform_feedback_ext,
+            .cmd_begin_video_coding_khr = device.dispatch.cmd_begin_video_coding_khr,
+            .cmd_end_video_coding_khr = device.dispatch.cmd_end_video_coding_khr,
         };
     }
 
@@ -4242,6 +4249,8 @@ const DeviceDispatch = struct {
     cmd_end_conditional_rendering_ext: ?CommandFunction(raw.PFN_vkCmdEndConditionalRenderingEXT),
     cmd_begin_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdBeginTransformFeedbackEXT),
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
+    cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
+    cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
 
     fn init(
         get_device_proc_addr: CommandFunction(raw.PFN_vkGetDeviceProcAddr),
@@ -5029,6 +5038,8 @@ const DeviceDispatch = struct {
                 raw.PFN_vkCmdEndTransformFeedbackEXT,
                 "vkCmdEndTransformFeedbackEXT",
             ),
+            .cmd_begin_video_coding_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_begin_video_coding_khr),
+            .cmd_end_video_coding_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_end_video_coding_khr),
         };
     }
 };
@@ -5643,6 +5654,8 @@ var test_begin_conditional_count: usize = 0;
 var test_end_conditional_count: usize = 0;
 var test_begin_transform_feedback_count: usize = 0;
 var test_end_transform_feedback_count: usize = 0;
+var test_begin_video_coding_count: usize = 0;
+var test_end_video_coding_count: usize = 0;
 var test_acquire_result: raw.VkResult = raw.VK_SUCCESS;
 var test_acquire_image_index: u32 = 0;
 var test_present_result: raw.VkResult = raw.VK_SUCCESS;
@@ -6534,6 +6547,32 @@ fn testCmdEndTransformFeedback(
     test_end_transform_feedback_count += 1;
 }
 
+fn testCmdBeginVideoCoding(
+    _: raw.VkCommandBuffer,
+    _: [*c]const raw.VkVideoBeginCodingInfoKHR,
+) callconv(.c) void {
+    test_begin_video_coding_count += 1;
+}
+
+fn testCmdEndVideoCoding(
+    _: raw.VkCommandBuffer,
+    _: [*c]const raw.VkVideoEndCodingInfoKHR,
+) callconv(.c) void {
+    test_end_video_coding_count += 1;
+}
+
+fn testDestroyVideoSession(
+    _: raw.VkDevice,
+    _: raw.VkVideoSessionKHR,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+fn testDestroyVideoParameters(
+    _: raw.VkDevice,
+    _: raw.VkVideoSessionParametersKHR,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
 fn testDeviceFaultInfo(
     _: raw.VkDevice,
     counts: [*c]raw.VkDeviceFaultCountsEXT,
@@ -6714,9 +6753,9 @@ fn testGetQueueFamilyProperties2(
         .timestampValidBits = 48,
         .minImageTransferGranularity = .{ .width = 2, .height = 4, .depth = 1 },
     };
-    const video: *raw.VkQueueFamilyVideoPropertiesKHR = @ptrCast(@alignCast(properties[0].pNext.?));
-    video.videoCodecOperations = raw.VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
-    const query: *raw.VkQueueFamilyQueryResultStatusPropertiesKHR = @ptrCast(@alignCast(video.pNext.?));
+    const video_properties: *raw.VkQueueFamilyVideoPropertiesKHR = @ptrCast(@alignCast(properties[0].pNext.?));
+    video_properties.videoCodecOperations = raw.VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+    const query: *raw.VkQueueFamilyQueryResultStatusPropertiesKHR = @ptrCast(@alignCast(video_properties.pNext.?));
     query.queryResultStatusSupport = raw.VK_TRUE;
     const priorities: *raw.VkQueueFamilyGlobalPriorityProperties = @ptrCast(@alignCast(query.pNext.?));
     priorities.priorityCount = 2;
@@ -7127,6 +7166,8 @@ fn testDevice() Device {
             .cmd_end_conditional_rendering_ext = null,
             .cmd_begin_transform_feedback_ext = null,
             .cmd_end_transform_feedback_ext = null,
+            .cmd_begin_video_coding_khr = null,
+            .cmd_end_video_coding_khr = null,
         },
     };
 }
@@ -8471,6 +8512,8 @@ test "every wrapped Vulkan object implements typed debug naming" {
         pipeline_tools.Binary,
         tooling.PrivateDataSlot,
         tooling.ValidationCache,
+        video.Session,
+        video.Parameters,
         render_passes.RenderPass,
         render_passes.Framebuffer,
         synchronization.Event,
@@ -8486,19 +8529,23 @@ test "every wrapped Vulkan object implements typed debug naming" {
     }
 }
 
-test "conditional rendering and transform feedback scopes end once" {
+test "conditional rendering transform feedback and video scopes end once" {
     test_resource_result = raw.VK_SUCCESS;
     test_resource_null_handle = false;
     test_begin_conditional_count = 0;
     test_end_conditional_count = 0;
     test_begin_transform_feedback_count = 0;
     test_end_transform_feedback_count = 0;
+    test_begin_video_coding_count = 0;
+    test_end_video_coding_count = 0;
     var device = testDevice();
     defer device.deinit();
     device.dispatch.cmd_begin_conditional_rendering_ext = testCmdBeginConditionalRendering;
     device.dispatch.cmd_end_conditional_rendering_ext = testCmdEndConditionalRendering;
     device.dispatch.cmd_begin_transform_feedback_ext = testCmdBeginTransformFeedback;
     device.dispatch.cmd_end_transform_feedback_ext = testCmdEndTransformFeedback;
+    device.dispatch.cmd_begin_video_coding_khr = testCmdBeginVideoCoding;
+    device.dispatch.cmd_end_video_coding_khr = testCmdEndVideoCoding;
     var counter = try device.createBuffer(.{
         .size = .fromBytes(64),
         .usage = .init(&.{.transfer_src}),
@@ -8521,12 +8568,41 @@ test "conditional rendering and transform feedback scopes end once" {
     try transform_feedback_copy.end();
     transform_feedback.deinit();
     transform_feedback_copy.deinit();
+
+    var session: video.Session = .{
+        ._handle = @ptrFromInt(0x7000),
+        ._owner = try core.Owner.init({}),
+        ._device_handle = device._handle.?,
+        ._device_state = device._state,
+        .allocation_callbacks = null,
+        .destroy = testDestroyVideoSession,
+    };
+    defer session.deinit();
+    var parameters: video.Parameters = .{
+        ._handle = @ptrFromInt(0x7100),
+        ._owner = try core.Owner.init({}),
+        ._device_handle = device._handle.?,
+        ._device_state = device._state,
+        .allocation_callbacks = null,
+        .destroy = testDestroyVideoParameters,
+    };
+    defer parameters.deinit();
+    var video_scope = try command_buffer.beginVideoCoding(.{
+        .session = &session,
+        .parameters = &parameters,
+    });
+    var video_scope_copy = video_scope;
+    try video_scope_copy.end();
+    video_scope.deinit();
+    video_scope_copy.deinit();
     try command_buffer.end();
 
     try std.testing.expectEqual(@as(usize, 1), test_begin_conditional_count);
     try std.testing.expectEqual(@as(usize, 1), test_end_conditional_count);
     try std.testing.expectEqual(@as(usize, 1), test_begin_transform_feedback_count);
     try std.testing.expectEqual(@as(usize, 1), test_end_transform_feedback_count);
+    try std.testing.expectEqual(@as(usize, 1), test_begin_video_coding_count);
+    try std.testing.expectEqual(@as(usize, 1), test_end_video_coding_count);
 }
 
 test "device fault reports remain available after tracked device loss" {

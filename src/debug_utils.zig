@@ -126,6 +126,8 @@ pub const ObjectType = enum(u32) {
     validation_cache = raw.VK_OBJECT_TYPE_VALIDATION_CACHE_EXT,
     private_data_slot = raw.VK_OBJECT_TYPE_PRIVATE_DATA_SLOT,
     pipeline_binary = raw.VK_OBJECT_TYPE_PIPELINE_BINARY_KHR,
+    video_session = raw.VK_OBJECT_TYPE_VIDEO_SESSION_KHR,
+    video_session_parameters = raw.VK_OBJECT_TYPE_VIDEO_SESSION_PARAMETERS_KHR,
     optical_flow_session = raw.VK_OBJECT_TYPE_OPTICAL_FLOW_SESSION_NV,
     _,
 
