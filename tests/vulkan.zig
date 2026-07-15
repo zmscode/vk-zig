@@ -1033,6 +1033,10 @@ test "all public wrapper declarations compile" {
     _ = &vk.PhysicalDevice.sparseImageFormatPropertyCount;
     _ = &vk.PhysicalDevice.sparseImageFormatPropertiesInto;
     _ = &vk.PhysicalDevice.sparseImageFormatProperties;
+    _ = &vk.Queue.bindSparse;
+    _ = vk.sparse.MemoryBind;
+    _ = vk.sparse.ImageMemoryBind;
+    _ = vk.sparse.BindOptions;
     _ = &vk.PhysicalDevice.features;
     _ = &vk.PhysicalDevice.features2;
     _ = &vk.PhysicalDevice.extensionFeatures;

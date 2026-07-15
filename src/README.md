@@ -13,6 +13,7 @@ modules so changes do not accumulate in one file:
 - `memory.zig`: memory properties, memory-type selection, and owned allocations.
 - `buffer.zig`: buffers, buffer views, requirements, and device addresses.
 - `image.zig`: image and image-view ownership and creation.
+- `sparse.zig`: sparse buffer/image residency descriptors and queue binding batches.
 - `synchronization.zig`: semaphores, timelines, fences, and waits.
 - `command_buffer.zig`: command pools, command buffers, recording, and labels.
 - `queue.zig`: submission, synchronization handoff, presentation, and labels.

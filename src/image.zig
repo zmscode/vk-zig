@@ -20,7 +20,7 @@ pub const Subresource = struct {
     mip_level: u32 = 0,
     array_layer: u32 = 0,
 
-    fn toRaw(value: Subresource) raw.VkImageSubresource {
+    pub fn toRaw(value: Subresource) raw.VkImageSubresource {
         return .{ .aspectMask = @intCast(value.aspect.toRaw()), .mipLevel = value.mip_level, .arrayLayer = value.array_layer };
     }
 };

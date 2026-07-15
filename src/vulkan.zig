@@ -8,6 +8,7 @@ pub const physical_devices = @import("physical_device.zig");
 pub const feature_chains = @import("feature_chain.zig");
 pub const device_configuration = @import("device.zig");
 pub const device_groups = @import("device_group.zig");
+pub const sparse = @import("sparse.zig");
 pub const formats = @import("format.zig");
 pub const memory = @import("memory.zig");
 pub const buffers = @import("buffer.zig");
@@ -2898,8 +2899,10 @@ pub const Device = struct {
             ._device_handle = device_handle,
             ._device_state = @constCast(&device._state),
             ._device_group_size = device._device_group_size,
+            ._sparse_binding_enabled = device.supportsFeature(.sparse_binding),
             .queue_submit = device.dispatch.queue_submit,
             .queue_submit2 = device.dispatch.queue_submit2,
+            .queue_bind_sparse = device.dispatch.queue_bind_sparse,
             .queue_wait_idle = device.dispatch.queue_wait_idle,
             .queue_present_khr = device.dispatch.queue_present_khr,
             .queue_begin_debug_utils_label_ext = device.dispatch.queue_begin_debug_utils_label_ext,
@@ -4334,6 +4337,7 @@ const DeviceDispatch = struct {
     get_device_queue: CommandFunction(raw.PFN_vkGetDeviceQueue),
     queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
     queue_submit2: ?CommandFunction(raw.PFN_vkQueueSubmit2),
+    queue_bind_sparse: CommandFunction(raw.PFN_vkQueueBindSparse),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
     device_wait_idle: CommandFunction(raw.PFN_vkDeviceWaitIdle),
     allocate_memory: CommandFunction(raw.PFN_vkAllocateMemory),
@@ -4570,6 +4574,12 @@ const DeviceDispatch = struct {
                 handle,
                 raw.PFN_vkQueueSubmit,
                 "vkQueueSubmit",
+            ),
+            .queue_bind_sparse = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkQueueBindSparse,
+                "vkQueueBindSparse",
             ),
             .queue_submit2 = loadDeviceDescriptor(
                 get_device_proc_addr,
@@ -5976,6 +5986,15 @@ var test_image_format_properties: raw.VkImageFormatProperties = .{};
 var test_image_format_result: raw.VkResult = raw.VK_SUCCESS;
 var test_sparse_image_format_properties: [2]raw.VkSparseImageFormatProperties = .{ .{}, .{} };
 var test_sparse_image_format_property_count: u32 = 0;
+var test_sparse_bind_result: raw.VkResult = raw.VK_SUCCESS;
+var test_sparse_bind_batch_count: u32 = 0;
+var test_sparse_buffer_bind_count: u32 = 0;
+var test_sparse_opaque_bind_count: u32 = 0;
+var test_sparse_image_bind_count: u32 = 0;
+var test_sparse_wait_count: u32 = 0;
+var test_sparse_signal_count: u32 = 0;
+var test_sparse_saw_unbind = false;
+var test_sparse_saw_metadata = false;
 var test_drm_format_modifier_properties: [2]raw.VkDrmFormatModifierPropertiesEXT = .{ .{}, .{} };
 var test_drm_format_modifier_property_count: u32 = 0;
 var test_external_memory_properties: raw.VkExternalMemoryProperties = .{};
@@ -6271,6 +6290,95 @@ fn testCreateBuffer(
     }
     handle.* = if (test_resource_null_handle) null else testHandle(raw.VkBuffer, 0x5600);
     return test_resource_result;
+}
+
+fn testCreateImage(
+    _: raw.VkDevice,
+    _: [*c]const raw.VkImageCreateInfo,
+    _: [*c]const raw.VkAllocationCallbacks,
+    handle: [*c]raw.VkImage,
+) callconv(.c) raw.VkResult {
+    handle.* = if (test_resource_null_handle) null else testHandle(raw.VkImage, 0x5650);
+    return test_resource_result;
+}
+
+fn testDestroyImage(
+    _: raw.VkDevice,
+    _: raw.VkImage,
+    _: [*c]const raw.VkAllocationCallbacks,
+) callconv(.c) void {}
+
+fn testGetImageMemoryRequirements(
+    _: raw.VkDevice,
+    _: raw.VkImage,
+    requirements: [*c]raw.VkMemoryRequirements,
+) callconv(.c) void {
+    requirements.* = .{ .size = 1024, .alignment = 256, .memoryTypeBits = 1 };
+}
+
+fn testGetImageSparseMemoryRequirements(
+    _: raw.VkDevice,
+    _: raw.VkImage,
+    count: [*c]u32,
+    requirements: [*c]raw.VkSparseImageMemoryRequirements,
+) callconv(.c) void {
+    if (requirements == null) {
+        count.* = 2;
+        return;
+    }
+    requirements[0] = .{
+        .formatProperties = .{
+            .aspectMask = @intCast(raw.VK_IMAGE_ASPECT_COLOR_BIT),
+            .imageGranularity = .{ .width = 64, .height = 64, .depth = 1 },
+        },
+    };
+    requirements[1] = .{
+        .formatProperties = .{
+            .aspectMask = @intCast(raw.VK_IMAGE_ASPECT_METADATA_BIT),
+            .imageGranularity = .{ .width = 1, .height = 1, .depth = 1 },
+            .flags = @intCast(raw.VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT),
+        },
+        .imageMipTailSize = 256,
+        .imageMipTailOffset = 768,
+    };
+    count.* = 2;
+}
+
+fn testQueueBindSparse(
+    _: raw.VkQueue,
+    count: u32,
+    infos: [*c]const raw.VkBindSparseInfo,
+    _: raw.VkFence,
+) callconv(.c) raw.VkResult {
+    test_sparse_bind_batch_count = count;
+    test_sparse_buffer_bind_count = 0;
+    test_sparse_opaque_bind_count = 0;
+    test_sparse_image_bind_count = 0;
+    test_sparse_wait_count = 0;
+    test_sparse_signal_count = 0;
+    test_sparse_saw_unbind = false;
+    test_sparse_saw_metadata = false;
+    for (0..count) |index| {
+        const info = infos[index];
+        test_sparse_buffer_bind_count += info.bufferBindCount;
+        test_sparse_opaque_bind_count += info.imageOpaqueBindCount;
+        test_sparse_image_bind_count += info.imageBindCount;
+        test_sparse_wait_count += info.waitSemaphoreCount;
+        test_sparse_signal_count += info.signalSemaphoreCount;
+        for (0..info.bufferBindCount) |resource_index| {
+            const resource = info.pBufferBinds[resource_index];
+            for (0..resource.bindCount) |bind_index| {
+                if (resource.pBinds[bind_index].memory == null) test_sparse_saw_unbind = true;
+            }
+        }
+        for (0..info.imageOpaqueBindCount) |resource_index| {
+            const resource = info.pImageOpaqueBinds[resource_index];
+            for (0..resource.bindCount) |bind_index| {
+                if (resource.pBinds[bind_index].flags & raw.VK_SPARSE_MEMORY_BIND_METADATA_BIT != 0) test_sparse_saw_metadata = true;
+            }
+        }
+    }
+    return test_sparse_bind_result;
 }
 
 fn testDestroyBuffer(
@@ -7350,6 +7458,7 @@ fn testDevice() Device {
             .get_device_queue = testGetNullQueue,
             .queue_submit = testFunction(raw.PFN_vkQueueSubmit),
             .queue_submit2 = testQueueSubmit2,
+            .queue_bind_sparse = testFunction(raw.PFN_vkQueueBindSparse),
             .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
             .device_wait_idle = testFunction(raw.PFN_vkDeviceWaitIdle),
             .allocate_memory = testAllocateMemory,
@@ -7428,14 +7537,14 @@ fn testDevice() Device {
             .destroy_buffer_view = testDestroyBufferView,
             .bind_buffer_memory = testBindBufferMemory,
             .bind_buffer_memory2 = null,
-            .create_image = testFunction(raw.PFN_vkCreateImage),
-            .destroy_image = testFunction(raw.PFN_vkDestroyImage),
-            .get_image_memory_requirements = testFunction(raw.PFN_vkGetImageMemoryRequirements),
+            .create_image = testCreateImage,
+            .destroy_image = testDestroyImage,
+            .get_image_memory_requirements = testGetImageMemoryRequirements,
             .get_image_memory_requirements2 = null,
             .bind_image_memory = testFunction(raw.PFN_vkBindImageMemory),
             .bind_image_memory2 = null,
             .get_image_subresource_layout = testFunction(raw.PFN_vkGetImageSubresourceLayout),
-            .get_image_sparse_memory_requirements = testFunction(raw.PFN_vkGetImageSparseMemoryRequirements),
+            .get_image_sparse_memory_requirements = testGetImageSparseMemoryRequirements,
             .get_image_sparse_memory_requirements2 = null,
             .copy_memory_to_image = null,
             .copy_image_to_memory = null,
@@ -9974,14 +10083,14 @@ test "physical device format queries preserve support and typed capabilities" {
         try physical_device.sparseImageFormatPropertyCount(sparse_options),
     );
     var sparse_storage: [2]SparseImageFormatProperties = undefined;
-    const sparse = try physical_device.sparseImageFormatPropertiesInto(
+    const sparse_properties = try physical_device.sparseImageFormatPropertiesInto(
         sparse_options,
         &sparse_storage,
     );
-    try std.testing.expectEqual(@as(usize, 2), sparse.len);
-    try std.testing.expect(sparse[0].aspect_mask.contains(.color));
-    try std.testing.expect(sparse[0].flags.contains(.single_miptail));
-    try std.testing.expectEqual(@as(u32, 128), sparse[1].image_granularity.width);
+    try std.testing.expectEqual(@as(usize, 2), sparse_properties.len);
+    try std.testing.expect(sparse_properties[0].aspect_mask.contains(.color));
+    try std.testing.expect(sparse_properties[0].flags.contains(.single_miptail));
+    try std.testing.expectEqual(@as(u32, 128), sparse_properties[1].image_granularity.width);
     var short_sparse_storage: [1]SparseImageFormatProperties = undefined;
     try std.testing.expectError(
         error.BufferTooSmall,
@@ -10101,4 +10210,112 @@ test "device groups expose typed discovery peer memory and presentation" {
     try std.testing.expect(present_capabilities.modes.remote);
     const present_modes = try device.deviceGroupSurfacePresentModes(&surface);
     try std.testing.expect(present_modes.local_multi_device);
+}
+
+test "sparse queue binding validates resources and preserves bind semantics" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_sparse_bind_result = raw.VK_SUCCESS;
+    var device = testDevice();
+    defer device.deinit();
+    var buffer = try device.createBuffer(.{
+        .size = .fromBytes(1024),
+        .usage = .init(&.{.storage_buffer}),
+        .flags = .init(&.{ .sparse_binding, .sparse_residency }),
+    });
+    defer buffer.deinit();
+    var image = try device.createImage(.{
+        .format = .r8g8b8a8_unorm,
+        .extent = .{ .width = 128, .height = 64, .depth = 1 },
+        .usage = .init(&.{.sampled}),
+        .flags = .init(&.{ .sparse_binding, .sparse_residency }),
+    });
+    defer image.deinit();
+    var allocation = try device.allocateMemory(.{
+        .size = .fromBytes(2048),
+        .memory_type_index = .fromRaw(0),
+    });
+    defer allocation.deinit();
+    var wait_semaphore = try device.createSemaphore(.{});
+    defer wait_semaphore.deinit();
+    var signal_semaphore = try device.createSemaphore(.{});
+    defer signal_semaphore.deinit();
+    var fence = try device.createFence(.{});
+    defer fence.deinit();
+
+    const buffer_pages = [_]sparse.MemoryBind{
+        .{
+            .resource_offset = .zero,
+            .size = .fromBytes(256),
+            .allocation = &allocation,
+        },
+        .{
+            .resource_offset = .fromBytes(256),
+            .size = .fromBytes(256),
+            .allocation = null,
+        },
+    };
+    const opaque_tail = [_]sparse.MemoryBind{.{
+        .resource_offset = .fromBytes(768),
+        .size = .fromBytes(256),
+        .allocation = &allocation,
+        .memory_offset = .fromBytes(256),
+        .flags = .{ .metadata = true },
+    }};
+    const image_tiles = [_]sparse.ImageMemoryBind{.{
+        .subresource = .{ .aspect = .color },
+        .offset = .{ .x = 0, .y = 0, .z = 0 },
+        .extent = .{ .width = 64, .height = 64, .depth = 1 },
+        .allocation = &allocation,
+        .memory_offset = .fromBytes(512),
+    }};
+    const batches = [_]sparse.Batch{.{
+        .waits = &.{&wait_semaphore},
+        .buffer_binds = &.{.{ .buffer = &buffer, .binds = &buffer_pages }},
+        .opaque_image_binds = &.{.{ .image = &image, .binds = &opaque_tail }},
+        .image_binds = &.{.{ .image = &image, .binds = &image_tiles }},
+        .signals = &.{&signal_semaphore},
+    }};
+    const queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        ._device_state = &device._state,
+        .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
+        .queue_bind_sparse = testQueueBindSparse,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+    try queue.bindSparse(.{ .batches = &batches, .fence = &fence });
+    try std.testing.expectEqual(@as(u32, 1), test_sparse_bind_batch_count);
+    try std.testing.expectEqual(@as(u32, 1), test_sparse_buffer_bind_count);
+    try std.testing.expectEqual(@as(u32, 1), test_sparse_opaque_bind_count);
+    try std.testing.expectEqual(@as(u32, 1), test_sparse_image_bind_count);
+    try std.testing.expectEqual(@as(u32, 1), test_sparse_wait_count);
+    try std.testing.expectEqual(@as(u32, 1), test_sparse_signal_count);
+    try std.testing.expect(test_sparse_saw_unbind);
+    try std.testing.expect(test_sparse_saw_metadata);
+
+    var foreign_buffer = buffer;
+    foreign_buffer._device_handle = testHandle(raw.VkDevice, 0x9000);
+    const foreign_batches = [_]sparse.Batch{.{
+        .buffer_binds = &.{.{ .buffer = &foreign_buffer, .binds = &buffer_pages }},
+    }};
+    try std.testing.expectError(error.InvalidHandle, queue.bindSparse(.{ .batches = &foreign_batches }));
+
+    const misaligned_pages = [_]sparse.MemoryBind{.{
+        .resource_offset = .fromBytes(1),
+        .size = .fromBytes(256),
+        .allocation = &allocation,
+    }};
+    const misaligned_batches = [_]sparse.Batch{.{
+        .buffer_binds = &.{.{ .buffer = &buffer, .binds = &misaligned_pages }},
+    }};
+    try std.testing.expectError(error.InvalidOptions, queue.bindSparse(.{ .batches = &misaligned_batches }));
+
+    test_sparse_bind_result = raw.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    try std.testing.expectError(error.OutOfDeviceMemory, queue.bindSparse(.{ .batches = &batches }));
+    test_sparse_bind_result = raw.VK_SUCCESS;
 }
