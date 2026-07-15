@@ -98,6 +98,23 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
+For an actionable loader failure, opt into bounded caller-owned diagnostics (no allocator is used):
+
+```zig
+var loader_diagnostics: vk.LoaderDiagnostics = .{};
+var loader = vk.Loader.initWithDiagnostics(&loader_diagnostics) catch |err| {
+    for (loader_diagnostics.attempts()) |attempt| {
+        std.log.err("loader candidate {s}: {s}", .{ attempt.path(), @tagName(attempt.outcome) });
+    }
+    return err;
+};
+defer loader.deinit();
+std.log.info("Vulkan runtime: {s}", .{try loader.selectedPath()});
+```
+
+`initFromPathWithDiagnostics` provides the same record for an explicit runtime path. Paths are
+copied into fixed-capacity records; `path_truncated` and `overflowed` make any loss visible.
+
 Logical-device creation is a typed requirements contract. Extension dependencies, promoted
 extensions, requested features, and queue counts are checked before `vkCreateDevice`:
 

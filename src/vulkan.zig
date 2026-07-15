@@ -285,27 +285,121 @@ pub const supportsExtensionRaw = registry.supportsExtensionRaw;
 pub const supportsLayerRaw = registry.supportsLayerRaw;
 pub const diagnostics = configuration.diagnostics;
 
+pub const loader_attempt_count_max = 16;
+pub const loader_path_capacity = 512;
+
+pub const LoaderAttemptOutcome = enum {
+    opened,
+    open_failed,
+};
+
+pub const LoaderAttempt = struct {
+    path_buffer: [loader_path_capacity]u8 = @splat(0),
+    path_len: usize = 0,
+    path_truncated: bool = false,
+    outcome: LoaderAttemptOutcome,
+
+    pub fn path(attempt: *const LoaderAttempt) []const u8 {
+        return attempt.path_buffer[0..attempt.path_len];
+    }
+};
+
+pub const LoaderDiagnostics = struct {
+    storage: [loader_attempt_count_max]LoaderAttempt = undefined,
+    count: usize = 0,
+    overflowed: bool = false,
+
+    pub fn reset(value: *LoaderDiagnostics) void {
+        value.count = 0;
+        value.overflowed = false;
+    }
+
+    pub fn attempts(value: *const LoaderDiagnostics) []const LoaderAttempt {
+        return value.storage[0..value.count];
+    }
+
+    fn record(value: *LoaderDiagnostics, path: []const u8, outcome: LoaderAttemptOutcome) void {
+        if (value.count == value.storage.len) {
+            value.overflowed = true;
+            return;
+        }
+        var attempt: LoaderAttempt = .{ .outcome = outcome };
+        attempt.path_len = @min(path.len, attempt.path_buffer.len);
+        attempt.path_truncated = path.len > attempt.path_buffer.len;
+        @memcpy(attempt.path_buffer[0..attempt.path_len], path[0..attempt.path_len]);
+        value.storage[value.count] = attempt;
+        value.count += 1;
+    }
+};
+
 pub const Loader = struct {
     library: NativeLibrary,
     active: bool = true,
     _owner: core.Owner,
+    selected_path_buffer: [loader_path_capacity]u8 = @splat(0),
+    selected_path_len: usize = 0,
+    selected_path_truncated: bool = false,
 
     pub fn init() LoaderError!Loader {
-        var library = try NativeLibrary.open();
+        var ignored: LoaderDiagnostics = .{};
+        return initWithDiagnostics(&ignored);
+    }
+
+    pub fn initWithDiagnostics(diagnostics_value: *LoaderDiagnostics) LoaderError!Loader {
+        diagnostics_value.reset();
+        const opened = try NativeLibrary.openWithDiagnostics(diagnostics_value);
+        var library = opened.library;
         errdefer library.close();
-        return .{ .library = library, ._owner = core.Owner.init(&library) catch |err| switch (err) {
+        var loader: Loader = .{ .library = library, ._owner = core.Owner.init(&library) catch |err| switch (err) {
             error.CapacityExceeded => return error.CapacityExceeded,
             else => unreachable,
         } };
+        loader.recordSelectedPath(opened.path);
+        return loader;
     }
 
     pub fn initFromPath(path: [:0]const u8) LoaderError!Loader {
-        var library = try NativeLibrary.openPath(path);
+        var ignored: LoaderDiagnostics = .{};
+        return initFromPathWithDiagnostics(path, &ignored);
+    }
+
+    pub fn initFromPathWithDiagnostics(
+        path: [:0]const u8,
+        diagnostics_value: *LoaderDiagnostics,
+    ) LoaderError!Loader {
+        diagnostics_value.reset();
+        var library = NativeLibrary.openPath(path) catch |err| {
+            diagnostics_value.record(path, .open_failed);
+            return err;
+        };
+        diagnostics_value.record(path, .opened);
         errdefer library.close();
-        return .{ .library = library, ._owner = core.Owner.init(&library) catch |err| switch (err) {
+        var loader: Loader = .{ .library = library, ._owner = core.Owner.init(&library) catch |err| switch (err) {
             error.CapacityExceeded => return error.CapacityExceeded,
             else => unreachable,
         } };
+        loader.recordSelectedPath(path);
+        return loader;
+    }
+
+    fn recordSelectedPath(loader: *Loader, path: []const u8) void {
+        loader.selected_path_len = @min(path.len, loader.selected_path_buffer.len);
+        loader.selected_path_truncated = path.len > loader.selected_path_buffer.len;
+        @memcpy(loader.selected_path_buffer[0..loader.selected_path_len], path[0..loader.selected_path_len]);
+    }
+
+    pub fn selectedPath(loader: *const Loader) LoaderError![]const u8 {
+        loader._owner.validate(loader) catch return error.VulkanLoaderNotFound;
+        if (!loader.active) return error.VulkanLoaderNotFound;
+        return loader.selected_path_buffer[0..loader.selected_path_len];
+    }
+
+    pub fn selectedPathWasTruncated(loader: *const Loader) bool {
+        return loader.selected_path_truncated;
+    }
+
+    pub fn candidatePaths() []const []const u8 {
+        return &loader_names;
     }
 
     pub fn deinit(loader: *Loader) void {
@@ -5448,14 +5542,19 @@ fn optionalCString(pointer: [*c]const u8) ?[]const u8 {
 }
 
 const NativeLibrary = if (builtin.os.tag == .windows) WindowsLibrary else PosixLibrary;
+const NativeOpenResult = struct { library: NativeLibrary, path: []const u8 };
 
 const PosixLibrary = struct {
     inner: std.DynLib,
 
-    fn open() LoaderError!PosixLibrary {
+    fn openWithDiagnostics(diagnostics_value: *LoaderDiagnostics) LoaderError!NativeOpenResult {
         for (loader_names) |name| {
-            const inner = std.DynLib.open(name) catch continue;
-            return .{ .inner = inner };
+            const inner = std.DynLib.open(name) catch {
+                diagnostics_value.record(name, .open_failed);
+                continue;
+            };
+            diagnostics_value.record(name, .opened);
+            return .{ .library = .{ .inner = inner }, .path = name };
         }
         return error.VulkanLoaderNotFound;
     }
@@ -5481,8 +5580,14 @@ const PosixLibrary = struct {
 const WindowsLibrary = struct {
     handle: std.os.windows.HMODULE,
 
-    fn open() LoaderError!WindowsLibrary {
-        return openPath("vulkan-1.dll");
+    fn openWithDiagnostics(diagnostics_value: *LoaderDiagnostics) LoaderError!NativeOpenResult {
+        const path = loader_names[0];
+        const library = openPath(path) catch |err| {
+            diagnostics_value.record(path, .open_failed);
+            return err;
+        };
+        diagnostics_value.record(path, .opened);
+        return .{ .library = library, .path = path };
     }
 
     fn openPath(path: [:0]const u8) LoaderError!WindowsLibrary {
@@ -5516,6 +5621,7 @@ const WindowsLibrary = struct {
 };
 
 const loader_names = switch (builtin.os.tag) {
+    .windows => [_][]const u8{"vulkan-1.dll"},
     .macos => [_][]const u8{
         "libvulkan.1.dylib",
         "libvulkan.dylib",
@@ -7188,6 +7294,45 @@ test "normal ownership options do not expose raw allocation callbacks" {
         try std.testing.expect(!@hasField(OptionsType, "allocation_callbacks"));
     }
     try std.testing.expect(@hasField(AdvancedInstanceOptions, "allocation_callbacks"));
+}
+
+test "loader diagnostics preserve candidate order failures and selected identity" {
+    var missing: LoaderDiagnostics = .{};
+    try std.testing.expectError(
+        error.VulkanLoaderNotFound,
+        Loader.initFromPathWithDiagnostics("/vk-zig/definitely-missing-loader", &missing),
+    );
+    try std.testing.expectEqual(@as(usize, 1), missing.attempts().len);
+    try std.testing.expectEqualStrings("/vk-zig/definitely-missing-loader", missing.attempts()[0].path());
+    try std.testing.expectEqual(LoaderAttemptOutcome.open_failed, missing.attempts()[0].outcome);
+
+    var diagnostics_value: LoaderDiagnostics = .{};
+    var loader = Loader.initWithDiagnostics(&diagnostics_value) catch |err| switch (err) {
+        error.VulkanLoaderNotFound => {
+            try std.testing.expectEqual(Loader.candidatePaths().len, diagnostics_value.attempts().len);
+            for (diagnostics_value.attempts(), Loader.candidatePaths()) |attempt, candidate| {
+                try std.testing.expectEqualStrings(candidate, attempt.path());
+                try std.testing.expectEqual(LoaderAttemptOutcome.open_failed, attempt.outcome);
+            }
+            return;
+        },
+        else => return err,
+    };
+    defer loader.deinit();
+    const attempts = diagnostics_value.attempts();
+    try std.testing.expect(attempts.len != 0);
+    for (attempts, Loader.candidatePaths()[0..attempts.len]) |attempt, candidate| {
+        try std.testing.expectEqualStrings(candidate, attempt.path());
+    }
+    try std.testing.expectEqual(LoaderAttemptOutcome.opened, attempts[attempts.len - 1].outcome);
+    try std.testing.expectEqualStrings(attempts[attempts.len - 1].path(), try loader.selectedPath());
+
+    var explicit_diagnostics: LoaderDiagnostics = .{};
+    const selected_path = try std.testing.allocator.dupeZ(u8, try loader.selectedPath());
+    defer std.testing.allocator.free(selected_path);
+    var explicit = try Loader.initFromPathWithDiagnostics(selected_path, &explicit_diagnostics);
+    defer explicit.deinit();
+    try std.testing.expectEqualStrings(try loader.selectedPath(), try explicit.selectedPath());
 }
 
 test "generated command descriptors resolve promoted aliases internally" {
