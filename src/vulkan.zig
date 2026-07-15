@@ -1244,6 +1244,8 @@ pub const ImageFormatQueryResult = format_support.ImageQueryResult;
 pub const DrmFormatModifierProperties = format_support.DrmModifierProperties;
 pub const SparseImageFormatOptions = format_support.SparseImageOptions;
 pub const SparseImageFormatProperties = format_support.SparseImageProperties;
+pub const Tool = tooling.Tool;
+pub const ToolPurposes = tooling.ToolPurposes;
 pub const sparse_image_format_property_count_max = format_support.sparse_image_property_count_max;
 pub const drm_format_modifier_property_count_max = format_support.drm_modifier_property_count_max;
 
@@ -1283,6 +1285,32 @@ pub const PhysicalDevice = struct {
         }
         const value = device.propertiesRaw();
         return .fromRaw(&value);
+    }
+
+    pub fn toolCount(device: *const PhysicalDevice) Error!u32 {
+        const enumerate = device.dispatch.get_physical_device_tool_properties orelse return error.MissingCommand;
+        return tooling.toolCount(try device.rawHandle(), enumerate);
+    }
+
+    pub fn toolsInto(device: *const PhysicalDevice, storage: []Tool) Error![]Tool {
+        const enumerate = device.dispatch.get_physical_device_tool_properties orelse return error.MissingCommand;
+        return tooling.toolsInto(try device.rawHandle(), enumerate, storage);
+    }
+
+    pub fn tools(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]Tool {
+        var values = try gpa.alloc(Tool, try device.toolCount());
+        errdefer gpa.free(values);
+        return device.toolsInto(values) catch |err| switch (err) {
+            error.BufferTooSmall => {
+                gpa.free(values);
+                values = try gpa.alloc(Tool, try device.toolCount());
+                return device.toolsInto(values);
+            },
+            else => return err,
+        };
     }
 
     pub fn performanceCounterCount(
@@ -2456,6 +2484,8 @@ pub const DeviceFaultReport = tooling.FaultReport;
 pub const DeviceFaultAddress = tooling.FaultAddress;
 pub const DeviceVendorFault = tooling.VendorFault;
 pub const PrivateDataSlot = tooling.PrivateDataSlot;
+pub const ValidationCache = tooling.ValidationCache;
+pub const ValidationCacheOptions = tooling.ValidationCacheOptions;
 pub const PipelineCreateResult = pipelines.CreateResult;
 pub const GraphicsPipelineOptions = pipelines.GraphicsOptions;
 pub const ComputePipelineOptions = pipelines.ComputeOptions;
@@ -2903,6 +2933,26 @@ pub const Device = struct {
                 .get = device.dispatch.get_private_data orelse return error.MissingCommand,
             },
             device.allocation_callbacks,
+        ) catch |err| return device.recordError(err);
+    }
+
+    pub fn createValidationCache(
+        device: *const Device,
+        options: ValidationCacheOptions,
+    ) Error!ValidationCache {
+        const device_handle = try device.dispatchHandle();
+        var resolved = options;
+        if (resolved.allocation_callbacks == null) resolved.allocation_callbacks = device.allocation_callbacks;
+        return tooling.createValidationCache(
+            device_handle,
+            device._state,
+            device.dispatch.create_validation_cache_ext orelse return error.MissingCommand,
+            .{
+                .destroy = device.dispatch.destroy_validation_cache_ext orelse return error.MissingCommand,
+                .merge = device.dispatch.merge_validation_caches_ext orelse return error.MissingCommand,
+                .get_data = device.dispatch.get_validation_cache_data_ext orelse return error.MissingCommand,
+            },
+            resolved,
         ) catch |err| return device.recordError(err);
     }
 
@@ -3637,6 +3687,7 @@ const InstanceDispatch = struct {
     enumerate_performance_counters: ?CommandFunction(
         raw.PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR,
     ),
+    get_physical_device_tool_properties: ?CommandFunction(raw.PFN_vkGetPhysicalDeviceToolProperties),
     get_performance_query_passes: ?CommandFunction(
         raw.PFN_vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR,
     ),
@@ -3728,6 +3779,12 @@ const InstanceDispatch = struct {
                 handle,
                 raw.PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR,
                 "vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR",
+            ),
+            .get_physical_device_tool_properties = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_tool_properties,
+                .instance,
             ),
             .get_performance_query_passes = loadInstance(
                 get_instance_proc_addr,
@@ -3873,6 +3930,10 @@ const DeviceDispatch = struct {
     destroy_private_data_slot: ?CommandFunction(raw.PFN_vkDestroyPrivateDataSlot),
     set_private_data: ?CommandFunction(raw.PFN_vkSetPrivateData),
     get_private_data: ?CommandFunction(raw.PFN_vkGetPrivateData),
+    create_validation_cache_ext: ?CommandFunction(raw.PFN_vkCreateValidationCacheEXT),
+    destroy_validation_cache_ext: ?CommandFunction(raw.PFN_vkDestroyValidationCacheEXT),
+    merge_validation_caches_ext: ?CommandFunction(raw.PFN_vkMergeValidationCachesEXT),
+    get_validation_cache_data_ext: ?CommandFunction(raw.PFN_vkGetValidationCacheDataEXT),
     create_graphics_pipelines: CommandFunction(raw.PFN_vkCreateGraphicsPipelines),
     create_compute_pipelines: CommandFunction(raw.PFN_vkCreateComputePipelines),
     destroy_pipeline: CommandFunction(raw.PFN_vkDestroyPipeline),
@@ -4270,6 +4331,10 @@ const DeviceDispatch = struct {
             .destroy_private_data_slot = loadDevice(get_device_proc_addr, handle, raw.PFN_vkDestroyPrivateDataSlot, "vkDestroyPrivateDataSlot"),
             .set_private_data = loadDevice(get_device_proc_addr, handle, raw.PFN_vkSetPrivateData, "vkSetPrivateData"),
             .get_private_data = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetPrivateData, "vkGetPrivateData"),
+            .create_validation_cache_ext = loadDeviceDescriptor(get_device_proc_addr, handle, command.create_validation_cache_ext),
+            .destroy_validation_cache_ext = loadDeviceDescriptor(get_device_proc_addr, handle, command.destroy_validation_cache_ext),
+            .merge_validation_caches_ext = loadDeviceDescriptor(get_device_proc_addr, handle, command.merge_validation_caches_ext),
+            .get_validation_cache_data_ext = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_validation_cache_data_ext),
             .create_graphics_pipelines = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
@@ -6655,6 +6720,7 @@ fn testInstance() Instance {
             ),
             .get_physical_device_queue_family_properties2 = null,
             .enumerate_performance_counters = null,
+            .get_physical_device_tool_properties = null,
             .get_performance_query_passes = null,
             .enumerate_device_extension_properties = testFunction(
                 raw.PFN_vkEnumerateDeviceExtensionProperties,
@@ -6735,6 +6801,10 @@ fn testDevice() Device {
             .destroy_private_data_slot = null,
             .set_private_data = null,
             .get_private_data = null,
+            .create_validation_cache_ext = null,
+            .destroy_validation_cache_ext = null,
+            .merge_validation_caches_ext = null,
+            .get_validation_cache_data_ext = null,
             .create_graphics_pipelines = testFunction(raw.PFN_vkCreateGraphicsPipelines),
             .create_compute_pipelines = testFunction(raw.PFN_vkCreateComputePipelines),
             .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
@@ -8222,6 +8292,7 @@ test "every wrapped Vulkan object implements typed debug naming" {
         pipeline_tools.Cache,
         pipeline_tools.DeferredOperation,
         tooling.PrivateDataSlot,
+        tooling.ValidationCache,
         render_passes.RenderPass,
         render_passes.Framebuffer,
         synchronization.Event,
@@ -8289,6 +8360,20 @@ test "device fault reports remain available after tracked device loss" {
     var report = try device.faultReport(std.testing.allocator);
     defer report.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("device lost", report.description());
+}
+
+test "tooling extensions report missing commands through typed facades" {
+    var instance = testInstance();
+    defer instance.deinit();
+    instance.dispatch.enumerate_physical_devices = testEnumeratePhysicalDevices;
+    test_enumerated_physical_device_count = 1;
+    var device_storage: [1]PhysicalDevice = undefined;
+    const devices = try instance.physicalDevicesInto(&device_storage);
+    try std.testing.expectError(error.MissingCommand, devices[0].toolCount());
+
+    var device = testDevice();
+    defer device.deinit();
+    try std.testing.expectError(error.MissingCommand, device.createValidationCache(.{}));
 }
 
 test "swapchain acquisition and presentation preserve operation statuses" {

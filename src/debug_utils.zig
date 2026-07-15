@@ -123,6 +123,8 @@ pub const ObjectType = enum(u32) {
     swapchain = raw.VK_OBJECT_TYPE_SWAPCHAIN_KHR,
     debug_messenger = raw.VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER_EXT,
     sampler_ycbcr_conversion = raw.VK_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION,
+    validation_cache = raw.VK_OBJECT_TYPE_VALIDATION_CACHE_EXT,
+    private_data_slot = raw.VK_OBJECT_TYPE_PRIVATE_DATA_SLOT,
     optical_flow_session = raw.VK_OBJECT_TYPE_OPTICAL_FLOW_SESSION_NV,
     _,
 
