@@ -2480,6 +2480,16 @@ pub const PipelineCacheOptions = pipeline_tools.CacheOptions;
 pub const DeferredOperation = pipeline_tools.DeferredOperation;
 pub const DeferredJoinStatus = pipeline_tools.JoinStatus;
 pub const DeferredCompletionStatus = pipeline_tools.CompletionStatus;
+pub const PipelineExecutable = pipeline_tools.Executable;
+pub const PipelineExecutableStatistic = pipeline_tools.Statistic;
+pub const PipelineExecutableStatisticValue = pipeline_tools.StatisticValue;
+pub const PipelineInternalRepresentation = pipeline_tools.InternalRepresentation;
+pub const PipelineBinary = pipeline_tools.Binary;
+pub const PipelineBinaryKey = pipeline_tools.BinaryKey;
+pub const PipelineBinaryPayload = pipeline_tools.BinaryPayload;
+pub const PipelineBinaryData = pipeline_tools.BinaryData;
+pub const PipelineBinaryCreateResult = pipeline_tools.BinaryCreateResult;
+pub const PipelineBinaryCreateStatus = pipeline_tools.BinaryCreateStatus;
 pub const DeviceFaultReport = tooling.FaultReport;
 pub const DeviceFaultAddress = tooling.FaultAddress;
 pub const DeviceVendorFault = tooling.VendorFault;
@@ -2912,6 +2922,152 @@ pub const Device = struct {
             .result = device.dispatch.get_deferred_operation_result_khr orelse return error.MissingCommand,
             .join = device.dispatch.deferred_operation_join_khr orelse return error.MissingCommand,
         }, device.allocation_callbacks) catch |err| return device.recordError(err);
+    }
+
+    fn pipelineHandle(device: *const Device, pipeline: *const Pipeline) Error!raw.VkPipeline {
+        const device_handle = try device.dispatchHandle();
+        if (pipeline._device_handle != device_handle) return error.InvalidHandle;
+        return pipeline.rawHandle();
+    }
+
+    pub fn pipelineExecutableCount(device: *const Device, pipeline: *const Pipeline) Error!u32 {
+        const get = device.dispatch.get_pipeline_executable_properties_khr orelse return error.MissingCommand;
+        return pipeline_tools.executableCount(
+            try device.dispatchHandle(),
+            try device.pipelineHandle(pipeline),
+            get,
+        );
+    }
+
+    pub fn pipelineExecutablesInto(
+        device: *const Device,
+        pipeline: *const Pipeline,
+        storage: []PipelineExecutable,
+    ) Error![]PipelineExecutable {
+        const get = device.dispatch.get_pipeline_executable_properties_khr orelse return error.MissingCommand;
+        return pipeline_tools.executablesInto(
+            try device.dispatchHandle(),
+            try device.pipelineHandle(pipeline),
+            get,
+            storage,
+        );
+    }
+
+    pub fn pipelineExecutableStatisticCount(
+        device: *const Device,
+        pipeline: *const Pipeline,
+        executable_index: u32,
+    ) Error!u32 {
+        const get = device.dispatch.get_pipeline_executable_statistics_khr orelse return error.MissingCommand;
+        return pipeline_tools.statisticCount(
+            try device.dispatchHandle(),
+            try device.pipelineHandle(pipeline),
+            executable_index,
+            get,
+        );
+    }
+
+    pub fn pipelineExecutableStatisticsInto(
+        device: *const Device,
+        pipeline: *const Pipeline,
+        executable_index: u32,
+        storage: []PipelineExecutableStatistic,
+    ) Error![]PipelineExecutableStatistic {
+        const get = device.dispatch.get_pipeline_executable_statistics_khr orelse return error.MissingCommand;
+        return pipeline_tools.statisticsInto(
+            try device.dispatchHandle(),
+            try device.pipelineHandle(pipeline),
+            executable_index,
+            get,
+            storage,
+        );
+    }
+
+    pub fn pipelineInternalRepresentationCount(
+        device: *const Device,
+        pipeline: *const Pipeline,
+        executable_index: u32,
+    ) Error!u32 {
+        const get = device.dispatch.get_pipeline_executable_internal_representations_khr orelse return error.MissingCommand;
+        return pipeline_tools.internalRepresentationCount(
+            try device.dispatchHandle(),
+            try device.pipelineHandle(pipeline),
+            executable_index,
+            get,
+        );
+    }
+
+    pub fn pipelineInternalRepresentationsInto(
+        device: *const Device,
+        pipeline: *const Pipeline,
+        executable_index: u32,
+        storage: []PipelineInternalRepresentation,
+    ) Error![]PipelineInternalRepresentation {
+        const get = device.dispatch.get_pipeline_executable_internal_representations_khr orelse return error.MissingCommand;
+        return pipeline_tools.internalRepresentationsInto(
+            try device.dispatchHandle(),
+            try device.pipelineHandle(pipeline),
+            executable_index,
+            get,
+            storage,
+        );
+    }
+
+    fn pipelineBinaryDispatch(device: *const Device) Error!pipeline_tools.BinaryCreateDispatch {
+        return .{
+            .create = device.dispatch.create_pipeline_binaries_khr orelse return error.MissingCommand,
+            .destroy = device.dispatch.destroy_pipeline_binary_khr orelse return error.MissingCommand,
+            .get_data = device.dispatch.get_pipeline_binary_data_khr orelse return error.MissingCommand,
+        };
+    }
+
+    pub fn pipelineBinaryCount(device: *const Device, pipeline: *const Pipeline) Error!u32 {
+        return pipeline_tools.binaryCountForPipeline(
+            try device.dispatchHandle(),
+            try device.pipelineHandle(pipeline),
+            device.dispatch.create_pipeline_binaries_khr orelse return error.MissingCommand,
+            device.allocation_callbacks,
+        );
+    }
+
+    pub fn pipelineBinariesInto(
+        device: *const Device,
+        pipeline: *const Pipeline,
+        output: []PipelineBinary,
+    ) Error!PipelineBinaryCreateResult {
+        return pipeline_tools.createBinariesForPipelineInto(
+            try device.dispatchHandle(),
+            device._state,
+            try device.pipelineBinaryDispatch(),
+            device.allocation_callbacks,
+            try device.pipelineHandle(pipeline),
+            output,
+        ) catch |err| return device.recordError(err);
+    }
+
+    pub fn createPipelineBinariesFromDataInto(
+        device: *const Device,
+        payloads: []const PipelineBinaryPayload,
+        output: []PipelineBinary,
+    ) Error!PipelineBinaryCreateResult {
+        return pipeline_tools.createBinariesFromDataInto(
+            try device.dispatchHandle(),
+            device._state,
+            try device.pipelineBinaryDispatch(),
+            device.allocation_callbacks,
+            payloads,
+            output,
+        ) catch |err| return device.recordError(err);
+    }
+
+    pub fn releaseCapturedPipelineData(device: *const Device, pipeline: *const Pipeline) Error!void {
+        return pipeline_tools.releaseCapturedPipelineData(
+            try device.dispatchHandle(),
+            device._state,
+            device.dispatch.release_captured_pipeline_data_khr orelse return error.MissingCommand,
+            device.allocation_callbacks,
+            try device.pipelineHandle(pipeline),
+        ) catch |err| return device.recordError(err);
     }
 
     /// Retrieves fault diagnostics even after this device has entered the lost state.
@@ -3925,6 +4081,13 @@ const DeviceDispatch = struct {
     get_deferred_operation_max_concurrency_khr: ?CommandFunction(raw.PFN_vkGetDeferredOperationMaxConcurrencyKHR),
     get_deferred_operation_result_khr: ?CommandFunction(raw.PFN_vkGetDeferredOperationResultKHR),
     deferred_operation_join_khr: ?CommandFunction(raw.PFN_vkDeferredOperationJoinKHR),
+    get_pipeline_executable_properties_khr: ?CommandFunction(raw.PFN_vkGetPipelineExecutablePropertiesKHR),
+    get_pipeline_executable_statistics_khr: ?CommandFunction(raw.PFN_vkGetPipelineExecutableStatisticsKHR),
+    get_pipeline_executable_internal_representations_khr: ?CommandFunction(raw.PFN_vkGetPipelineExecutableInternalRepresentationsKHR),
+    create_pipeline_binaries_khr: ?CommandFunction(raw.PFN_vkCreatePipelineBinariesKHR),
+    destroy_pipeline_binary_khr: ?CommandFunction(raw.PFN_vkDestroyPipelineBinaryKHR),
+    get_pipeline_binary_data_khr: ?CommandFunction(raw.PFN_vkGetPipelineBinaryDataKHR),
+    release_captured_pipeline_data_khr: ?CommandFunction(raw.PFN_vkReleaseCapturedPipelineDataKHR),
     get_device_fault_info_ext: ?CommandFunction(raw.PFN_vkGetDeviceFaultInfoEXT),
     create_private_data_slot: ?CommandFunction(raw.PFN_vkCreatePrivateDataSlot),
     destroy_private_data_slot: ?CommandFunction(raw.PFN_vkDestroyPrivateDataSlot),
@@ -4326,6 +4489,13 @@ const DeviceDispatch = struct {
             .get_deferred_operation_max_concurrency_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetDeferredOperationMaxConcurrencyKHR, "vkGetDeferredOperationMaxConcurrencyKHR"),
             .get_deferred_operation_result_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetDeferredOperationResultKHR, "vkGetDeferredOperationResultKHR"),
             .deferred_operation_join_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkDeferredOperationJoinKHR, "vkDeferredOperationJoinKHR"),
+            .get_pipeline_executable_properties_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_pipeline_executable_properties_khr),
+            .get_pipeline_executable_statistics_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_pipeline_executable_statistics_khr),
+            .get_pipeline_executable_internal_representations_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_pipeline_executable_internal_representations_khr),
+            .create_pipeline_binaries_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.create_pipeline_binaries_khr),
+            .destroy_pipeline_binary_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.destroy_pipeline_binary_khr),
+            .get_pipeline_binary_data_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_pipeline_binary_data_khr),
+            .release_captured_pipeline_data_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.release_captured_pipeline_data_khr),
             .get_device_fault_info_ext = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetDeviceFaultInfoEXT, "vkGetDeviceFaultInfoEXT"),
             .create_private_data_slot = loadDevice(get_device_proc_addr, handle, raw.PFN_vkCreatePrivateDataSlot, "vkCreatePrivateDataSlot"),
             .destroy_private_data_slot = loadDevice(get_device_proc_addr, handle, raw.PFN_vkDestroyPrivateDataSlot, "vkDestroyPrivateDataSlot"),
@@ -6796,6 +6966,13 @@ fn testDevice() Device {
             .get_deferred_operation_max_concurrency_khr = null,
             .get_deferred_operation_result_khr = null,
             .deferred_operation_join_khr = null,
+            .get_pipeline_executable_properties_khr = null,
+            .get_pipeline_executable_statistics_khr = null,
+            .get_pipeline_executable_internal_representations_khr = null,
+            .create_pipeline_binaries_khr = null,
+            .destroy_pipeline_binary_khr = null,
+            .get_pipeline_binary_data_khr = null,
+            .release_captured_pipeline_data_khr = null,
             .get_device_fault_info_ext = null,
             .create_private_data_slot = null,
             .destroy_private_data_slot = null,
@@ -8291,6 +8468,7 @@ test "every wrapped Vulkan object implements typed debug naming" {
         pipelines.Pipeline,
         pipeline_tools.Cache,
         pipeline_tools.DeferredOperation,
+        pipeline_tools.Binary,
         tooling.PrivateDataSlot,
         tooling.ValidationCache,
         render_passes.RenderPass,
@@ -8374,6 +8552,11 @@ test "tooling extensions report missing commands through typed facades" {
     var device = testDevice();
     defer device.deinit();
     try std.testing.expectError(error.MissingCommand, device.createValidationCache(.{}));
+    var binary_storage: [1]PipelineBinary = undefined;
+    try std.testing.expectError(error.MissingCommand, device.createPipelineBinariesFromDataInto(
+        &.{.{ .key = .{}, .data = "binary" }},
+        &binary_storage,
+    ));
 }
 
 test "swapchain acquisition and presentation preserve operation statuses" {
