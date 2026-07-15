@@ -39,6 +39,7 @@ pub const data_graph = @import("data_graph.zig");
 pub const video = @import("video.zig");
 pub const mesh_shader = @import("mesh_shader.zig");
 pub const fragment_shading_rate = @import("fragment_shading_rate.zig");
+pub const ray_tracing = @import("ray_tracing.zig");
 
 /// Deprecated short name retained while applications migrate to `synchronization`.
 pub const sync = synchronization;
@@ -1767,6 +1768,25 @@ pub const PhysicalDevice = struct {
         return .fromRaw(extension_properties);
     }
 
+    /// Queries the coupled acceleration-structure and ray-pipeline limits used
+    /// to validate builds, scratch addresses, shader binding tables, and traces.
+    pub fn rayTracingProperties(device: *const PhysicalDevice) Error!ray_tracing.Properties {
+        const get_properties = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var pipeline_properties: raw.VkPhysicalDeviceRayTracingPipelinePropertiesKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR,
+        };
+        var acceleration_properties: raw.VkPhysicalDeviceAccelerationStructurePropertiesKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
+            .pNext = &pipeline_properties,
+        };
+        var root: raw.VkPhysicalDeviceProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &acceleration_properties,
+        };
+        get_properties(device._handle, &root);
+        return .fromRaw(acceleration_properties, pipeline_properties);
+    }
+
     pub fn shadingRateImagePropertiesNv(device: *const PhysicalDevice) Error!fragment_shading_rate.ImagePropertiesNv {
         const get_properties = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
         var extension_properties: raw.VkPhysicalDeviceShadingRateImagePropertiesNV = .{
@@ -2940,6 +2960,17 @@ pub const PipelineCreateResult = pipelines.CreateResult;
 pub const GraphicsPipelineOptions = pipelines.GraphicsOptions;
 pub const ComputePipelineOptions = pipelines.ComputeOptions;
 pub const PipelineBindPoint = pipelines.BindPoint;
+pub const AccelerationStructure = ray_tracing.Structure;
+pub const AccelerationStructureType = ray_tracing.StructureType;
+pub const AccelerationStructureBuild = ray_tracing.Build;
+pub const AccelerationStructureGeometry = ray_tracing.Geometry;
+pub const AccelerationStructureBuildSizes = ray_tracing.BuildSizes;
+pub const RayTracingProperties = ray_tracing.Properties;
+pub const RayTracingPipelineOptions = ray_tracing.PipelineOptions;
+pub const RayTracingShaderGroup = ray_tracing.ShaderGroup;
+pub const ShaderBindingRegion = ray_tracing.ShaderBindingRegion;
+pub const ShaderBindingTables = ray_tracing.ShaderBindingTables;
+pub const RayTrace = ray_tracing.Trace;
 pub const PipelineVertexInputRate = pipelines.VertexInputRate;
 pub const PipelineVertexBinding = pipelines.VertexBinding;
 pub const PipelineVertexAttribute = pipelines.VertexAttribute;
@@ -3282,6 +3313,63 @@ pub const Device = struct {
             ._set_enum_nv = try device.load(command.cmd_set_fragment_shading_rate_enum_nv),
             ._bind_image_nv = try device.load(command.cmd_bind_shading_rate_image_nv),
             ._set_palettes_nv = try device.load(command.cmd_set_viewport_shading_rate_palette_nv),
+        };
+    }
+
+    /// Loads the KHR ray-tracing/acceleration-structure commands and the
+    /// isolated EXT opacity-micromap surface. Missing extension commands are
+    /// reported by the operation that needs them.
+    pub fn rayTracingContext(device: *const Device, options: ray_tracing.ContextOptions) Error!ray_tracing.Context {
+        const handle = try device.dispatchHandle();
+        const state = &device._state;
+        const callbacks = device.allocation_callbacks;
+        return .{
+            ._device = handle,
+            ._state = state,
+            ._allocation_callbacks = callbacks,
+            .properties = options.properties,
+            ._create_structure = try device.load(command.create_acceleration_structure_khr),
+            ._destroy_structure = try device.load(command.destroy_acceleration_structure_khr),
+            ._build_sizes = try device.load(command.get_acceleration_structure_build_sizes_khr),
+            ._build_host = try device.load(command.build_acceleration_structures_khr),
+            ._build_command = try device.load(command.cmd_build_acceleration_structures_khr),
+            ._copy_host = try device.load(command.copy_acceleration_structure_khr),
+            ._copy_command = try device.load(command.cmd_copy_acceleration_structure_khr),
+            ._serialize_host = try device.load(command.copy_acceleration_structure_to_memory_khr),
+            ._serialize_command = try device.load(command.cmd_copy_acceleration_structure_to_memory_khr),
+            ._deserialize_host = try device.load(command.copy_memory_to_acceleration_structure_khr),
+            ._deserialize_command = try device.load(command.cmd_copy_memory_to_acceleration_structure_khr),
+            ._address = try device.load(command.get_acceleration_structure_device_address_khr),
+            ._compatibility = try device.load(command.get_device_acceleration_structure_compatibility_khr),
+            ._write_properties_host = try device.load(command.write_acceleration_structures_properties_khr),
+            ._write_properties_command = try device.load(command.cmd_write_acceleration_structures_properties_khr),
+            ._create_pipeline = try device.load(command.create_ray_tracing_pipelines_khr),
+            ._destroy_pipeline = device.dispatch.destroy_pipeline,
+            ._group_handles = try device.load(command.get_ray_tracing_shader_group_handles_khr),
+            ._capture_group_handles = try device.load(command.get_ray_tracing_capture_replay_shader_group_handles_khr),
+            ._group_stack_size = try device.load(command.get_ray_tracing_shader_group_stack_size_khr),
+            ._trace = try device.load(command.cmd_trace_rays_khr),
+            ._trace_indirect = try device.load(command.cmd_trace_rays_indirect_khr),
+            ._set_stack_size = try device.load(command.cmd_set_ray_tracing_pipeline_stack_size_khr),
+            .micromaps = .{
+                ._device = handle,
+                ._state = state,
+                ._allocation_callbacks = callbacks,
+                ._create = try device.load(command.create_micromap_ext),
+                ._destroy = try device.load(command.destroy_micromap_ext),
+                ._sizes = try device.load(command.get_micromap_build_sizes_ext),
+                ._build_host = try device.load(command.build_micromaps_ext),
+                ._build_command = try device.load(command.cmd_build_micromaps_ext),
+                ._copy_host = try device.load(command.copy_micromap_ext),
+                ._copy_command = try device.load(command.cmd_copy_micromap_ext),
+                ._serialize_host = try device.load(command.copy_micromap_to_memory_ext),
+                ._serialize_command = try device.load(command.cmd_copy_micromap_to_memory_ext),
+                ._deserialize_host = try device.load(command.copy_memory_to_micromap_ext),
+                ._deserialize_command = try device.load(command.cmd_copy_memory_to_micromap_ext),
+                ._compatibility = try device.load(command.get_device_micromap_compatibility_ext),
+                ._write_properties_host = try device.load(command.write_micromaps_properties_ext),
+                ._write_properties_command = try device.load(command.cmd_write_micromaps_properties_ext),
+            },
         };
     }
 

@@ -225,6 +225,52 @@ defer vertex_buffer.deinit();
 Use `createBuffer`, `memoryRequirements`, `allocateMemory`, and `Buffer.bindMemory` when placing
 several resources into one allocation. See `examples/buffer_setup.zig` for the complete setup.
 
+Ray tracing uses one typed KHR context; normal application code never constructs a Vulkan union,
+loads an extension function, or names a raw handle. Geometry is a tagged union, so triangle, AABB,
+and instance pointer layouts cannot be mixed:
+
+```zig
+const rt_properties = try physical_device.rayTracingProperties();
+const rt = try device.rayTracingContext(.{ .properties = rt_properties });
+
+const geometries = [_]vk.ray_tracing.Geometry{.{
+    .triangles = .{ .data = .{
+        .vertex_format = .r32g32b32_sfloat,
+        .vertex_data = .{ .device = vertex_address },
+        .vertex_stride = .fromBytes(@sizeOf([3]f32)),
+        .max_vertex = vertex_count - 1,
+        .indices = .{ .uint32 = index_address },
+    } },
+}};
+const primitive_counts = [_]u32{index_count / 3};
+const sizes = try rt.buildSizes(
+    .device,
+    .bottom_level,
+    .init(&.{.prefer_fast_trace}),
+    &geometries,
+    &primitive_counts,
+);
+
+var blas = try rt.createStructure(.{
+    .type = .bottom_level,
+    .storage = &acceleration_storage,
+    .size = sizes.structure,
+});
+defer blas.deinit();
+```
+
+Use `buildCommand` or `buildHost`, `copyCommand`/`copyHost`, and the typed serialization methods
+for the rest of the acceleration-structure lifecycle. `createPipeline`, `shaderGroupHandles`,
+`ShaderBindingTables`, and `trace` cover ray dispatch. `rt.micromaps` provides the same ownership,
+build, compact/copy, serialization, compatibility, and property-query model for opacity micromaps.
+
+Acceleration-structure storage, scratch, geometry input, instance targets, and shader-binding-table
+buffers must remain alive until every submission that uses them completes. After build or copy,
+record the appropriate acceleration-structure/micromap write-to-read barrier before tracing or a
+dependent build. Host operations require externally synchronized objects and live host memory for
+the duration of the call. Scratch sizes come from `buildSizes`; device scratch addresses are checked
+against `RayTracingProperties.scratch_alignment`.
+
 Mapped allocations expose only their requested range and normalize non-coherent flushes to the
 device atom size:
 

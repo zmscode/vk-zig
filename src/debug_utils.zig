@@ -129,6 +129,8 @@ pub const ObjectType = enum(u32) {
     video_session = raw.VK_OBJECT_TYPE_VIDEO_SESSION_KHR,
     video_session_parameters = raw.VK_OBJECT_TYPE_VIDEO_SESSION_PARAMETERS_KHR,
     optical_flow_session = raw.VK_OBJECT_TYPE_OPTICAL_FLOW_SESSION_NV,
+    acceleration_structure = raw.VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR,
+    micromap = raw.VK_OBJECT_TYPE_MICROMAP_EXT,
     _,
 
     fn fromRaw(value: raw.VkObjectType) ObjectType {

@@ -133,6 +133,11 @@ pub const Kind = union(enum) {
     timestamp,
     pipeline_statistics: PipelineStatisticFlags,
     performance: Performance,
+    acceleration_structure_compacted_size,
+    acceleration_structure_serialization_size,
+    acceleration_structure_size,
+    micromap_compacted_size,
+    micromap_serialization_size,
 };
 
 pub const Options = struct {
@@ -509,6 +514,11 @@ pub fn create(
             performance_info.pNext = options.next;
             break :blk raw.VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR;
         },
+        .acceleration_structure_compacted_size => raw.VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+        .acceleration_structure_serialization_size => raw.VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR,
+        .acceleration_structure_size => raw.VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR,
+        .micromap_compacted_size => raw.VK_QUERY_TYPE_MICROMAP_COMPACTED_SIZE_EXT,
+        .micromap_serialization_size => raw.VK_QUERY_TYPE_MICROMAP_SERIALIZATION_SIZE_EXT,
     };
     const statistics: raw.VkQueryPipelineStatisticFlags = switch (options.kind) {
         .pipeline_statistics => |flags| if (flags.bits == 0) return error.InvalidOptions else @intCast(flags.bits),

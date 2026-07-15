@@ -23,6 +23,7 @@ modules so changes do not accumulate in one file:
 - `query.zig`: query pools, typed readback, timestamps, calibration, and performance queries.
 - `mesh_shader.zig`: EXT/NV mesh-task limits and direct/indirect recording.
 - `fragment_shading_rate.zig`: KHR/NV rates, images, palettes, combiners, and recording.
+- `ray_tracing.zig`: KHR acceleration structures, ray pipelines, shader-binding tables, tracing, and isolated opacity micromaps/NV compatibility.
 - `debug_utils.zig`: typed validation messages, callbacks, labels, and messengers.
 
 Generated raw declarations and typed Vulkan vocabulary remain separate build

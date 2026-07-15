@@ -231,6 +231,7 @@ pub const Buffer = struct {
     active_subpass_count: u32 = 0,
     graphics_pipeline_bound: bool = false,
     compute_pipeline_bound: bool = false,
+    ray_tracing_pipeline_bound: bool = false,
     conditional_rendering_active: bool = false,
     transform_feedback_active: bool = false,
     video_coding_active: bool = false,
@@ -329,6 +330,7 @@ pub const Buffer = struct {
             buffer.active_subpass_count = 0;
             buffer.graphics_pipeline_bound = false;
             buffer.compute_pipeline_bound = false;
+            buffer.ray_tracing_pipeline_bound = false;
             buffer.conditional_rendering_active = false;
             buffer.transform_feedback_active = false;
             buffer.video_coding_active = false;
@@ -360,6 +362,7 @@ pub const Buffer = struct {
             buffer.active_subpass_count = 0;
             buffer.graphics_pipeline_bound = false;
             buffer.compute_pipeline_bound = false;
+            buffer.ray_tracing_pipeline_bound = false;
             buffer.conditional_rendering_active = false;
             buffer.transform_feedback_active = false;
             buffer.video_coding_active = false;
@@ -424,6 +427,7 @@ pub const Buffer = struct {
         buffer.active_subpass_count = 0;
         buffer.graphics_pipeline_bound = false;
         buffer.compute_pipeline_bound = false;
+        buffer.ray_tracing_pipeline_bound = false;
         buffer.conditional_rendering_active = false;
         buffer.transform_feedback_active = false;
         buffer.video_coding_active = false;
@@ -465,6 +469,7 @@ pub const Buffer = struct {
         buffer.active_subpass_count = 0;
         buffer.graphics_pipeline_bound = false;
         buffer.compute_pipeline_bound = false;
+        buffer.ray_tracing_pipeline_bound = false;
         buffer.conditional_rendering_active = false;
         buffer.transform_feedback_active = false;
         buffer.video_coding_active = false;
@@ -986,7 +991,10 @@ pub const Buffer = struct {
                 command_buffer.graphics_pipeline_bound = true;
             },
             .compute => command_buffer.compute_pipeline_bound = true,
-            else => return error.InvalidOptions,
+            else => if (value.bind_point.toRaw() == raw.VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
+                if (command_buffer.rendering_active or command_buffer.render_pass_active or command_buffer.video_coding_active) return error.InvalidOptions;
+                command_buffer.ray_tracing_pipeline_bound = true;
+            } else return error.InvalidOptions,
         }
         command_buffer.cmd_bind_pipeline(handle, value.bind_point.toRaw(), try value.rawHandle());
     }

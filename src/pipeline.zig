@@ -155,6 +155,7 @@ pub fn createLayout(
 pub const BindPoint = enum(raw.VkPipelineBindPoint) {
     graphics = raw.VK_PIPELINE_BIND_POINT_GRAPHICS,
     compute = raw.VK_PIPELINE_BIND_POINT_COMPUTE,
+    ray_tracing = raw.VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
     _,
 
     pub fn fromRaw(value: raw.VkPipelineBindPoint) BindPoint {
