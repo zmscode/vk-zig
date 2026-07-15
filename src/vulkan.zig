@@ -10319,3 +10319,71 @@ test "sparse queue binding validates resources and preserves bind semantics" {
     try std.testing.expectError(error.OutOfDeviceMemory, queue.bindSparse(.{ .batches = &batches }));
     test_sparse_bind_result = raw.VK_SUCCESS;
 }
+
+test "workflow helpers expose explicit fence and timeline completion" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_queue_submit2_result = raw.VK_SUCCESS;
+    test_queue_submit_count = 0;
+    test_queue_submit2_call_count = 0;
+    var device = testDevice();
+    defer device.deinit();
+    var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
+    defer pool.deinit();
+    var fence = try device.createFence(.{});
+    defer fence.deinit();
+    var timeline = try device.createSemaphore(.{ .kind = .timeline });
+    defer timeline.deinit();
+    const queue: Queue = .{
+        ._handle = testHandle(raw.VkQueue, 0x2100),
+        ._device_handle = device._handle.?,
+        ._device_state = &device._state,
+        .queue_submit = testQueueSubmit,
+        .queue_submit2 = testQueueSubmit2,
+        .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
+        .queue_present_khr = null,
+        .queue_begin_debug_utils_label_ext = null,
+        .queue_end_debug_utils_label_ext = null,
+        .queue_insert_debug_utils_label_ext = null,
+    };
+
+    var helper: workflows.OneTimeCommands = .{};
+    try helper.begin(&pool);
+    test_fence_status_result = raw.VK_NOT_READY;
+    try helper.submit(&queue, .{ .fence = &fence });
+    try std.testing.expectEqual(@as(usize, 1), test_queue_submit_count);
+    try std.testing.expect(!try helper.pollComplete());
+    test_fence_status_result = raw.VK_SUCCESS;
+    try std.testing.expect(try helper.pollComplete());
+    try helper.release(&pool);
+
+    try helper.begin(&pool);
+    test_timeline_counter = 2;
+    try helper.submit(&queue, .{ .timeline = .{ .semaphore = &timeline, .value = 4 } });
+    try std.testing.expectEqual(@as(usize, 1), test_queue_submit2_call_count);
+    try std.testing.expectEqual(@as(u64, 4), test_submit2_signal_value);
+    try std.testing.expect(!try helper.pollComplete());
+    test_timeline_counter = 4;
+    try std.testing.expect(try helper.pollComplete());
+    try helper.release(&pool);
+
+    const Context = struct {
+        retired: *std.ArrayList(u32),
+
+        fn retire(context: *@This(), value: u32) void {
+            context.retired.append(std.testing.allocator, value) catch unreachable;
+        }
+    };
+    var retired: std.ArrayList(u32) = .empty;
+    defer retired.deinit(std.testing.allocator);
+    var retirements: workflows.RetirementQueue(u32, 2) = .{};
+    try retirements.enqueue(1, .{ .fence = &fence });
+    try retirements.enqueue(2, .{ .timeline = .{ .semaphore = &timeline, .value = 6 } });
+    var context: Context = .{ .retired = &retired };
+    test_fence_status_result = raw.VK_NOT_READY;
+    try std.testing.expectEqual(@as(u32, 0), try retirements.retireCompleted(&context, Context.retire));
+    test_fence_status_result = raw.VK_SUCCESS;
+    try std.testing.expectEqual(@as(u32, 1), try retirements.retireCompleted(&context, Context.retire));
+    test_timeline_counter = 6;
+    try std.testing.expectEqual(@as(u32, 1), try retirements.retireCompleted(&context, Context.retire));
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, retired.items);
+}

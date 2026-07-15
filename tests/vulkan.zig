@@ -1037,6 +1037,12 @@ test "all public wrapper declarations compile" {
     _ = vk.sparse.MemoryBind;
     _ = vk.sparse.ImageMemoryBind;
     _ = vk.sparse.BindOptions;
+    _ = vk.workflows.UploadBatch(4);
+    _ = vk.workflows.OneTimeCommands;
+    _ = vk.workflows.RetirementQueue(u32, 4);
+    _ = &vk.workflows.selectMemory;
+    _ = &vk.workflows.cache.load;
+    _ = &vk.workflows.cache.store;
     _ = &vk.PhysicalDevice.features;
     _ = &vk.PhysicalDevice.features2;
     _ = &vk.PhysicalDevice.extensionFeatures;

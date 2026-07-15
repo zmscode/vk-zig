@@ -21,6 +21,19 @@ pub const Completion = union(enum) {
         semaphore: *const synchronization.Semaphore,
         value: u64,
     },
+
+    pub fn isReady(completion: Completion) core.Error!bool {
+        return switch (completion) {
+            .fence => |fence| switch (try fence.status()) {
+                .signaled => true,
+                .unsignaled => false,
+            },
+            .timeline => |timeline| {
+                if (timeline.semaphore.kind != .timeline) return error.InvalidOptions;
+                return try timeline.semaphore.counterValue() >= timeline.value;
+            },
+        };
+    }
 };
 
 pub const UploadTransition = struct {
@@ -156,6 +169,7 @@ pub fn UploadBatch(comptime capacity: u32) type {
 /// An explicit one-time command-buffer lifecycle. Submission never waits implicitly.
 pub const OneTimeCommands = struct {
     command_buffer: ?commands.Buffer = null,
+    completion: ?Completion = null,
     state: State = .empty,
 
     pub const State = enum {
@@ -188,14 +202,51 @@ pub const OneTimeCommands = struct {
     pub fn submit(
         helper: *OneTimeCommands,
         queue: *const queues.Queue,
-        completion_fence: ?*const synchronization.Fence,
+        completion: ?Completion,
     ) core.Error!void {
         if (helper.state != .recording) return error.InvalidOptions;
         const command_buffer = &helper.command_buffer.?;
         try command_buffer.end();
-        const submitted = [_]*commands.Buffer{command_buffer};
-        try queue.submit(.{ .command_buffers = &submitted, .fence = completion_fence });
+        switch (completion orelse {
+            const submitted = [_]*commands.Buffer{command_buffer};
+            try queue.submit(.{ .command_buffers = &submitted });
+            helper.state = .submitted;
+            return;
+        }) {
+            .fence => |fence| {
+                const submitted = [_]*commands.Buffer{command_buffer};
+                try queue.submit(.{ .command_buffers = &submitted, .fence = fence });
+            },
+            .timeline => |timeline| {
+                if (timeline.semaphore.kind != .timeline or timeline.value == 0) {
+                    return error.InvalidOptions;
+                }
+                const submitted = [_]queues.CommandBufferSubmit{.{
+                    .command_buffer = command_buffer,
+                }};
+                const signals = [_]queues.SemaphoreSubmit{.{
+                    .semaphore = timeline.semaphore,
+                    .value = timeline.value,
+                    .stage = .init(&.{.all_commands}),
+                }};
+                const submissions = [_]queues.Submit2Options{.{
+                    .command_buffers = &submitted,
+                    .signals = &signals,
+                }};
+                try queue.submit2(.{ .submits = &submissions });
+            },
+        }
+        helper.completion = completion;
         helper.state = .submitted;
+    }
+
+    pub fn pollComplete(helper: *OneTimeCommands) core.Error!bool {
+        if (helper.state == .complete) return true;
+        if (helper.state != .submitted) return error.InvalidOptions;
+        const completion = helper.completion orelse return error.InvalidOptions;
+        if (!try completion.isReady()) return false;
+        try helper.markComplete();
+        return true;
     }
 
     pub fn markComplete(helper: *OneTimeCommands) core.Error!void {
@@ -210,6 +261,7 @@ pub const OneTimeCommands = struct {
             try pool.freeCommandBuffer(command_buffer);
         }
         helper.command_buffer = null;
+        helper.completion = null;
         helper.state = .empty;
     }
 };
@@ -252,6 +304,22 @@ pub fn RetirementQueue(comptime T: type, comptime capacity: u32) type {
             while (retired < capacity and queue.count > 0) : (retired += 1) {
                 const entry = queue.entries[queue.head];
                 if (!try is_ready(context, entry.completion)) break;
+                retire(context, entry.value);
+                queue.head = (queue.head + 1) % capacity;
+                queue.count -= 1;
+            }
+            return retired;
+        }
+
+        pub fn retireCompleted(
+            queue: *Queue,
+            context: anytype,
+            comptime retire: fn (@TypeOf(context), T) void,
+        ) core.Error!u32 {
+            var retired: u32 = 0;
+            while (retired < capacity and queue.count > 0) : (retired += 1) {
+                const entry = queue.entries[queue.head];
+                if (!try entry.completion.isReady()) break;
                 retire(context, entry.value);
                 queue.head = (queue.head + 1) % capacity;
                 queue.count -= 1;
@@ -325,6 +393,26 @@ test "bounded upload rollback and capacity" {
         batch.appendBuffer(fake_buffer, .zero, "e", 1, .ignored),
     );
     try std.testing.expectEqual(@as(u32, 1), batch.operation_count);
+
+    batch.reset();
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        batch.appendBuffer(fake_buffer, .zero, "012345678", 1, .ignored),
+    );
+    try std.testing.expectEqual(@as(u32, 0), batch.operation_count);
+    try std.testing.expectEqual(@as(u64, 0), batch.staging_used);
+}
+
+test "cache helpers preserve caller ownership and capacity" {
+    var destination: [4]u8 = undefined;
+    const loaded = try cache.load(&destination, "data");
+    try std.testing.expectEqualStrings("data", loaded);
+    try std.testing.expectError(error.BufferTooSmall, cache.load(destination[0..3], "data"));
+
+    var output: [4]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&output);
+    try cache.store(&writer, loaded);
+    try std.testing.expectEqualStrings("data", writer.buffered());
 }
 
 test "retirement is ordered" {
