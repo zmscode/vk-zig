@@ -155,6 +155,10 @@ device's raw command-label methods only for advanced interop paths that cannot u
 - Enumerate `deviceExtensions`, enable `vk.extension.khr_swapchain.name`, then use
   `device.createSwapchain`. Handle every `AcquireResult` and `PresentStatus` tag; `.out_of_date`
   and `.suboptimal` are normal control flow for recreation, not generic errors.
+- Use `instance.displayContext(&physical_device)` for direct displays, modes, planes, and display
+  surfaces. Use `device.presentationController()` for HDR, present waiting/timing, display events,
+  image release, full-screen exclusive, low-latency, and anti-lag workflows. Prefer the typed fields
+  on `SwapchainOptions` and `PresentOptions` over manually building presentation `pNext` chains.
 - Define a handler accepting `vk.ext.debug_utils.Message`, construct it with
   `MessengerConfig.fromHandler`, and pass it as `InstanceOptions.debug_messenger`. This path owns
   the C trampoline, automatically enables `VK_EXT_debug_utils`, chains the creation callback, and

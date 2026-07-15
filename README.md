@@ -9,8 +9,8 @@ package provides:
 - resource-safe `deinit` methods and Zig errors for common `VkResult` failures;
 - generated command descriptors that prevent PFN/name and dispatch-scope mismatches;
 - generated extension-name descriptors and a bounded, allocation-free extension set;
-- domain modules for buffers, images, memory, synchronization, commands, queues, queries, presentation,
-  formats, capabilities, and debug utilities;
+- domain modules for buffers, images, memory, synchronization, commands, queues, queries,
+  presentation, direct displays, presentation extensions, formats, capabilities, and debug utilities;
 - reproducible offline builds from vendored Khronos inputs; and
 - an explicit command to pull, verify, and vendor a new Vulkan registry revision.
 
@@ -380,6 +380,19 @@ defer gpa.free(formats);
 const present_modes = try physical_device.presentModes(gpa, &surface);
 defer gpa.free(present_modes);
 ```
+
+Direct-display applications use `instance.displayContext(&physical_device)` to enumerate displays,
+planes, and modes and to create display-plane surfaces without raw handles or structures. Each
+enumeration has `Count`, `Into`, and allocating forms, and an unavailable display extension returns
+`error.MissingCommand`.
+
+Advanced swapchain behavior is collected under `device.presentationController()`. Swapchain and
+present options accept compatible present modes, low-latency mode, present IDs, desired display
+times, damaged regions, presentation fences, and per-present modes through typed fields. The
+controller covers present waiting, maintenance1 image release, HDR metadata, GOOGLE display timing,
+display power/events, vertical-blank counters, full-screen exclusive control, NV low latency and
+queue notification, and AMD anti-lag. Its status unions preserve timeout, suboptimal, out-of-date,
+and full-screen-loss outcomes rather than flattening them into errors.
 
 Capability helpers apply Vulkan's clamping rules while reporting whether a preference was met:
 

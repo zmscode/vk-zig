@@ -26,6 +26,8 @@ pub const synchronization = @import("synchronization.zig");
 pub const queries = @import("query.zig");
 pub const commands = @import("command_buffer.zig");
 pub const presentation = @import("presentation.zig");
+pub const display = @import("display.zig");
+pub const present_extensions = @import("present_extensions.zig");
 pub const queues = @import("queue.zig");
 pub const debug_utils = @import("debug_utils.zig");
 pub const tooling = @import("diagnostics.zig");
@@ -1006,6 +1008,32 @@ pub const Instance = struct {
         comptime descriptor: anytype,
     ) Error!DescriptorFunction(descriptor, .instance) {
         return (try instance.load(descriptor)) orelse error.MissingCommand;
+    }
+
+    /// Creates the focused direct-display discovery and surface context.
+    pub fn displayContext(
+        instance: *const Instance,
+        physical_device: *const PhysicalDevice,
+    ) Error!display.Context {
+        const instance_handle = try instance.rawHandle();
+        if (physical_device._instance_handle != instance_handle) return error.InvalidHandle;
+        return .{
+            ._instance = instance_handle,
+            ._physical_device = physical_device._handle,
+            ._instance_borrow = instance._child_generation.borrowOwner(&instance._owner),
+            ._allocation_callbacks = instance.allocation_callbacks,
+            ._get_properties = try instance.load(command.get_physical_device_display_properties_khr),
+            ._get_plane_properties = try instance.load(command.get_physical_device_display_plane_properties_khr),
+            ._get_supported_displays = try instance.load(command.get_display_plane_supported_displays_khr),
+            ._get_modes = try instance.load(command.get_display_mode_properties_khr),
+            ._create_mode = try instance.load(command.create_display_mode_khr),
+            ._get_plane_capabilities = try instance.load(command.get_display_plane_capabilities_khr),
+            ._create_surface = try instance.load(command.create_display_plane_surface_khr),
+            ._destroy_surface = try instance.load(command.destroy_surface_khr),
+            ._release_display = try instance.load(command.release_display_ext),
+            ._acquire_drm_display = try instance.load(command.acquire_drm_display_ext),
+            ._get_drm_display = try instance.load(command.get_drm_display_ext),
+        };
     }
 
     /// Loads a dynamic command name without verifying that it matches the PFN type.
@@ -3082,6 +3110,37 @@ pub const Device = struct {
         };
     }
 
+    /// Loads advanced swapchain, display-control, timing, and latency commands.
+    /// Individual methods return `error.MissingCommand` when their extension is absent.
+    pub fn presentationController(device: *const Device) Error!present_extensions.Context {
+        return .{
+            ._device = try device.dispatchHandle(),
+            ._state = &device._state,
+            ._allocation_callbacks = device.allocation_callbacks,
+            ._get_device_proc_addr = device.dispatch.get_device_proc_addr,
+            ._wait = try device.load(command.wait_for_present_khr),
+            ._wait2 = try device.load(command.wait_for_present2_khr),
+            ._release_images = try device.load(command.release_swapchain_images_ext),
+            ._set_hdr = try device.load(command.set_hdr_metadata_ext),
+            ._refresh_cycle = try device.load(command.get_refresh_cycle_duration_google),
+            ._past_timings = try device.load(command.get_past_presentation_timing_google),
+            ._display_power = try device.load(command.display_power_control_ext),
+            ._register_device_event = try device.load(command.register_device_event_ext),
+            ._register_display_event = try device.load(command.register_display_event_ext),
+            ._swapchain_counter = try device.load(command.get_swapchain_counter_ext),
+            ._set_sleep_mode = try device.load(command.set_latency_sleep_mode_nv),
+            ._latency_sleep = try device.load(command.latency_sleep_nv),
+            ._set_marker = try device.load(command.set_latency_marker_nv),
+            ._get_latency_timings = try device.load(command.get_latency_timings_nv),
+            ._notify_queue = try device.load(command.queue_notify_out_of_band_nv),
+            ._anti_lag = try device.load(command.anti_lag_update_amd),
+            ._destroy_fence = device.dispatch.destroy_fence,
+            ._get_fence_status = device.dispatch.get_fence_status,
+            ._reset_fences = device.dispatch.reset_fences,
+            ._wait_for_fences = device.dispatch.wait_for_fences,
+        };
+    }
+
     /// Loads EXT and NV mesh-shader recording commands independently. Calling
     /// a method for an unavailable variant returns `error.MissingCommand`.
     pub fn meshShaderRecorder(device: *const Device) Error!mesh_shader.Recorder {
@@ -4144,15 +4203,71 @@ pub const Device = struct {
         }
         var group_info: raw.VkDeviceGroupSwapchainCreateInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEVICE_GROUP_SWAPCHAIN_CREATE_INFO_KHR,
-            .pNext = options.next,
         };
+        var next: ?*const anyopaque = null;
+        var compatible_modes_raw: [16]raw.VkPresentModeKHR = undefined;
+        var modes_info: raw.VkSwapchainPresentModesCreateInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR,
+        };
+        if (options.compatible_present_modes.len != 0) {
+            for (options.compatible_present_modes, compatible_modes_raw[0..options.compatible_present_modes.len]) |mode, *output| {
+                output.* = mode.toRaw();
+            }
+            modes_info.presentModeCount = @intCast(options.compatible_present_modes.len);
+            modes_info.pPresentModes = compatible_modes_raw[0..options.compatible_present_modes.len].ptr;
+            modes_info.pNext = next;
+            next = &modes_info;
+        }
+        var latency_info: raw.VkSwapchainLatencyCreateInfoNV = .{
+            .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV,
+            .latencyModeEnable = if (options.low_latency_mode) raw.VK_TRUE else raw.VK_FALSE,
+        };
+        if (options.low_latency_mode) {
+            latency_info.pNext = next;
+            next = &latency_info;
+        }
+        const PlatformInfoFallback = extern struct {
+            sType: raw.VkStructureType = 0,
+            pNext: ?*const anyopaque = null,
+        };
+        const FullScreenInfo = if (@hasDecl(raw, "VkSurfaceFullScreenExclusiveInfoEXT"))
+            @field(raw, "VkSurfaceFullScreenExclusiveInfoEXT")
+        else
+            PlatformInfoFallback;
+        const MonitorInfo = if (@hasDecl(raw, "VkSurfaceFullScreenExclusiveWin32InfoEXT"))
+            @field(raw, "VkSurfaceFullScreenExclusiveWin32InfoEXT")
+        else
+            PlatformInfoFallback;
+        var full_screen_info: FullScreenInfo = .{};
+        var monitor_info: MonitorInfo = .{};
+        if (options.full_screen_exclusive) |exclusive| {
+            if (comptime @hasDecl(raw, "VkSurfaceFullScreenExclusiveInfoEXT")) {
+                full_screen_info.sType = raw.VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT;
+                full_screen_info.fullScreenExclusive = switch (exclusive) {
+                    .default => raw.VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT,
+                    .allowed => raw.VK_FULL_SCREEN_EXCLUSIVE_ALLOWED_EXT,
+                    .disallowed => raw.VK_FULL_SCREEN_EXCLUSIVE_DISALLOWED_EXT,
+                    .application_controlled => raw.VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT,
+                };
+                full_screen_info.pNext = next;
+                next = &full_screen_info;
+                if (options.full_screen_monitor) |monitor| {
+                    monitor_info.sType = raw.VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT;
+                    monitor_info.hmonitor = @ptrCast(monitor);
+                    monitor_info.pNext = next;
+                    next = &monitor_info;
+                }
+            } else return error.UnsupportedOperation;
+        }
         if (options.device_group_modes) |modes| {
             if (device._device_group_size == 1 or modes.toRaw() == 0) return error.InvalidOptions;
             group_info.modes = modes.toRaw();
+            group_info.pNext = next;
+            next = &group_info;
         }
         const create_info: raw.VkSwapchainCreateInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-            .pNext = if (options.device_group_modes != null) &group_info else options.next,
+            .pNext = next,
             .flags = options.flags.toRaw(),
             .surface = try options.surface.rawHandle(),
             .minImageCount = options.min_image_count,

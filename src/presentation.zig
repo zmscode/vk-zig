@@ -98,8 +98,15 @@ pub const Options = struct {
     clipped: bool = true,
     old_swapchain: ?*const Swapchain = null,
     flags: types.SwapchainCreateFlags = .empty,
-    next: ?*const anyopaque = null,
     device_group_modes: ?device_group.PresentModes = null,
+    /// Additional compatible modes enabled by swapchain-maintenance1.
+    compatible_present_modes: []const types.PresentMode = &.{},
+    /// Enables VK_NV_low_latency2 mode at swapchain creation.
+    low_latency_mode: bool = false,
+    /// Win32-only full-screen-exclusive creation policy.
+    full_screen_exclusive: ?FullScreenExclusive = null,
+    /// Optional native monitor for application-controlled full-screen mode.
+    full_screen_monitor: ?*anyopaque = null,
 
     pub fn validate(
         options: Options,
@@ -125,7 +132,18 @@ pub const Options = struct {
             if (old._device_handle != device_handle) return error.InvalidHandle;
             _ = try old.rawHandle();
         }
+        if (options.compatible_present_modes.len > 16) return error.CountOverflow;
+        if (options.full_screen_monitor != null and options.full_screen_exclusive == null) {
+            return error.InvalidOptions;
+        }
     }
+};
+
+pub const FullScreenExclusive = enum {
+    default,
+    allowed,
+    disallowed,
+    application_controlled,
 };
 
 /// Immutable properties retained from successful swapchain creation.
@@ -166,15 +184,39 @@ pub const PresentOptions = struct {
     swapchain: *const Swapchain,
     image_index: core.SwapchainImageIndex,
     wait_semaphores: []const *const sync.Semaphore = &.{},
-    next: ?*const anyopaque = null,
     device_mask: ?device_group.Mask = null,
     device_group_mode: ?device_group.PresentMode = null,
+    /// Monotonically increasing KHR_present_id value.
+    present_id: ?u64 = null,
+    /// KHR_present_id2 value; mutually exclusive with `present_id`.
+    present_id2: ?u64 = null,
+    /// GOOGLE_display_timing desired presentation request.
+    google_timing: ?GooglePresentTime = null,
+    /// Damaged regions for KHR_incremental_present.
+    damaged_regions: []const PresentRegion = &.{},
+    /// Fence signaled when this presentation is retired (maintenance1).
+    present_fence: ?*const sync.Fence = null,
+    /// Optional per-present mode selected from swapchain-compatible modes.
+    present_mode: ?types.PresentMode = null,
+    /// NV_low_latency2 presentation identifier.
+    latency_present_id: ?u64 = null,
+};
+
+pub const GooglePresentTime = struct {
+    id: u32,
+    desired_time_ns: u64,
+};
+
+pub const PresentRegion = struct {
+    rectangle: types.Rect2D,
+    layer: u32 = 0,
 };
 
 pub const PresentStatus = enum {
     success,
     suboptimal,
     out_of_date,
+    full_screen_exclusive_lost,
 };
 
 pub const Swapchain = struct {

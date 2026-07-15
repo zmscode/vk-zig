@@ -489,19 +489,87 @@ pub const Queue = struct {
         const swapchain_handle = try options.swapchain.rawHandle();
         const image_index = options.image_index.toRaw();
         if ((options.device_mask == null) != (options.device_group_mode == null)) return error.InvalidOptions;
+        if (options.present_id != null and options.present_id2 != null) return error.InvalidOptions;
+        if (options.damaged_regions.len > 64) return error.CountOverflow;
+        var next: ?*const anyopaque = null;
+        var present_id_info: raw.VkPresentIdKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
+        if (options.present_id) |present_id| {
+            present_id_info.swapchainCount = 1;
+            present_id_info.pPresentIds = &present_id;
+            present_id_info.pNext = next;
+            next = &present_id_info;
+        }
+        var present_id2_info: raw.VkPresentId2KHR = .{ .sType = raw.VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR };
+        if (options.present_id2) |present_id| {
+            present_id2_info.swapchainCount = 1;
+            present_id2_info.pPresentIds = &present_id;
+            present_id2_info.pNext = next;
+            next = &present_id2_info;
+        }
+        var google_time: raw.VkPresentTimeGOOGLE = .{};
+        var google_info: raw.VkPresentTimesInfoGOOGLE = .{ .sType = raw.VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE };
+        if (options.google_timing) |timing| {
+            google_time = .{ .presentID = timing.id, .desiredPresentTime = timing.desired_time_ns };
+            google_info.swapchainCount = 1;
+            google_info.pTimes = &google_time;
+            google_info.pNext = next;
+            next = &google_info;
+        }
+        var rectangles: [64]raw.VkRectLayerKHR = undefined;
+        var region: raw.VkPresentRegionKHR = .{};
+        var regions_info: raw.VkPresentRegionsKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_PRESENT_REGIONS_KHR };
+        if (options.damaged_regions.len != 0) {
+            for (options.damaged_regions, 0..) |damaged, index| rectangles[index] = .{
+                .offset = damaged.rectangle.offset.toRaw(),
+                .extent = damaged.rectangle.extent.toRaw(),
+                .layer = damaged.layer,
+            };
+            region.rectangleCount = @intCast(options.damaged_regions.len);
+            region.pRectangles = rectangles[0..options.damaged_regions.len].ptr;
+            regions_info.swapchainCount = 1;
+            regions_info.pRegions = &region;
+            regions_info.pNext = next;
+            next = &regions_info;
+        }
+        var present_fence_handle: raw.VkFence = null;
+        var fence_info: raw.VkSwapchainPresentFenceInfoKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR };
+        if (options.present_fence) |fence| {
+            if (fence._device_handle != queue._device_handle) return error.InvalidHandle;
+            present_fence_handle = try fence.rawHandle();
+            fence_info.swapchainCount = 1;
+            fence_info.pFences = &present_fence_handle;
+            fence_info.pNext = next;
+            next = &fence_info;
+        }
+        var present_mode_raw: raw.VkPresentModeKHR = 0;
+        var mode_info: raw.VkSwapchainPresentModeInfoKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_KHR };
+        if (options.present_mode) |mode| {
+            present_mode_raw = mode.toRaw();
+            mode_info.swapchainCount = 1;
+            mode_info.pPresentModes = &present_mode_raw;
+            mode_info.pNext = next;
+            next = &mode_info;
+        }
+        var latency_info: raw.VkLatencySubmissionPresentIdNV = .{ .sType = raw.VK_STRUCTURE_TYPE_LATENCY_SUBMISSION_PRESENT_ID_NV };
+        if (options.latency_present_id) |present_id| {
+            latency_info.presentID = present_id;
+            latency_info.pNext = next;
+            next = &latency_info;
+        }
         var group_info: raw.VkDeviceGroupPresentInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR,
-            .pNext = options.next,
+            .pNext = next,
         };
         if (options.device_mask) |mask| {
             try mask.validate(queue._device_group_size);
             group_info.swapchainCount = 1;
             group_info.pDeviceMasks = &mask.bits;
             group_info.mode = options.device_group_mode.?.toRaw();
+            next = &group_info;
         }
         const present_info: raw.VkPresentInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = if (options.device_mask != null) &group_info else options.next,
+            .pNext = next,
             .waitSemaphoreCount = @intCast(options.wait_semaphores.len),
             .pWaitSemaphores = if (options.wait_semaphores.len == 0) null else wait_handles[0..options.wait_semaphores.len].ptr,
             .swapchainCount = 1,
@@ -512,6 +580,7 @@ pub const Queue = struct {
         if (result == raw.VK_SUCCESS) return .success;
         if (result == raw.VK_SUBOPTIMAL_KHR) return .suboptimal;
         if (result == raw.VK_ERROR_OUT_OF_DATE_KHR) return .out_of_date;
+        if (result == raw.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) return .full_screen_exclusive_lost;
         try queue.checkResult(result);
         unreachable;
     }
