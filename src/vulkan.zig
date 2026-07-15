@@ -720,7 +720,7 @@ pub const Entry = struct {
         instance._api_version = options.api_version;
         instance.recordEnabledExtensions(extension_pointers[0..extension_count]);
         if (options.debug_messenger) |config| {
-            instance._debug_messenger = try instance.createDebugMessenger(
+            instance._debug_messenger = try instance.createDebugMessengerAdvanced(
                 config,
                 advanced.allocation_callbacks,
             );
@@ -842,6 +842,14 @@ pub const Instance = struct {
     }
 
     pub fn createDebugMessenger(
+        instance: *const Instance,
+        config: debug_utils.Config,
+    ) Error!debug_utils.Messenger {
+        return instance.createDebugMessengerAdvanced(config, instance.allocation_callbacks);
+    }
+
+    /// Advanced escape hatch for choosing a raw allocator different from the instance allocator.
+    pub fn createDebugMessengerAdvanced(
         instance: *const Instance,
         config: debug_utils.Config,
         allocation_callbacks: ?*const raw.VkAllocationCallbacks,
@@ -2908,14 +2916,12 @@ pub const Device = struct {
 
     pub fn createPipelineCache(device: *const Device, options: PipelineCacheOptions) Error!PipelineCache {
         const device_handle = try device.dispatchHandle();
-        var resolved = options;
-        if (resolved.allocation_callbacks == null) resolved.allocation_callbacks = device.allocation_callbacks;
         return pipeline_tools.createCache(device_handle, device._state, .{
             .create = device.dispatch.create_pipeline_cache,
             .destroy = device.dispatch.destroy_pipeline_cache,
             .get_data = device.dispatch.get_pipeline_cache_data,
             .merge = device.dispatch.merge_pipeline_caches,
-        }, resolved) catch |err| return device.recordError(err);
+        }, options, device.allocation_callbacks) catch |err| return device.recordError(err);
     }
 
     pub fn createDeferredOperation(device: *const Device) Error!DeferredOperation {
@@ -3102,8 +3108,6 @@ pub const Device = struct {
         options: ValidationCacheOptions,
     ) Error!ValidationCache {
         const device_handle = try device.dispatchHandle();
-        var resolved = options;
-        if (resolved.allocation_callbacks == null) resolved.allocation_callbacks = device.allocation_callbacks;
         return tooling.createValidationCache(
             device_handle,
             device._state,
@@ -3113,7 +3117,8 @@ pub const Device = struct {
                 .merge = device.dispatch.merge_validation_caches_ext orelse return error.MissingCommand,
                 .get_data = device.dispatch.get_validation_cache_data_ext orelse return error.MissingCommand,
             },
-            resolved,
+            options,
+            device.allocation_callbacks,
         ) catch |err| return device.recordError(err);
     }
 
@@ -3388,8 +3393,6 @@ pub const Device = struct {
 
     pub fn createQueryPool(device: *const Device, options: QueryPoolOptions) Error!QueryPool {
         const device_handle = try device.dispatchHandle();
-        var resolved = options;
-        if (resolved.allocation_callbacks == null) resolved.allocation_callbacks = device.allocation_callbacks;
         return queries.create(device_handle, @constCast(&device._state), .{
             .create = device.dispatch.create_query_pool,
             .destroy = device.dispatch.destroy_query_pool,
@@ -3401,7 +3404,7 @@ pub const Device = struct {
             .write_timestamp = device.dispatch.cmd_write_timestamp,
             .write_timestamp2 = device.dispatch.cmd_write_timestamp2,
             .copy_results = device.dispatch.cmd_copy_query_pool_results,
-        }, resolved);
+        }, options, device.allocation_callbacks);
     }
 
     /// Samples multiple clock domains in one calibrated operation. The returned slice aliases
@@ -3711,12 +3714,12 @@ pub const Device = struct {
         const result = create_swapchain(
             device_handle,
             &create_info,
-            options.allocation_callbacks,
+            device.allocation_callbacks,
             &handle,
         );
         if (result != raw.VK_SUCCESS) {
             if (handle) |provisional_handle| {
-                destroy_swapchain(device_handle, provisional_handle, options.allocation_callbacks);
+                destroy_swapchain(device_handle, provisional_handle, device.allocation_callbacks);
             }
             try core.checkSuccessTracked(@constCast(&device._state), result);
             unreachable;
@@ -3730,7 +3733,7 @@ pub const Device = struct {
             null,
         ));
         if (image_count > presentation.image_count_max) {
-            destroy_swapchain(device_handle, live_handle, options.allocation_callbacks);
+            destroy_swapchain(device_handle, live_handle, device.allocation_callbacks);
             return error.TooManyObjects;
         }
         return .{
@@ -3738,7 +3741,7 @@ pub const Device = struct {
             ._owner = try .init(&live_handle),
             ._device_handle = device_handle,
             ._device_state = @constCast(&device._state),
-            .allocation_callbacks = options.allocation_callbacks,
+            .allocation_callbacks = device.allocation_callbacks,
             .destroy_swapchain = destroy_swapchain,
             .get_swapchain_images = get_images,
             .acquire_next_image = acquire_next_image,
@@ -7172,6 +7175,20 @@ fn testDevice() Device {
     };
 }
 
+test "normal ownership options do not expose raw allocation callbacks" {
+    inline for ([_]type{
+        InstanceOptions,
+        DeviceOptions,
+        SwapchainOptions,
+        PipelineCacheOptions,
+        ValidationCacheOptions,
+        QueryPoolOptions,
+    }) |OptionsType| {
+        try std.testing.expect(!@hasField(OptionsType, "allocation_callbacks"));
+    }
+    try std.testing.expect(@hasField(AdvancedInstanceOptions, "allocation_callbacks"));
+}
+
 test "generated command descriptors resolve promoted aliases internally" {
     var instance = testInstance();
     defer instance.deinit();
@@ -8848,7 +8865,7 @@ test "debug messenger handles fake dispatch success and failures" {
         .{},
     );
 
-    var messenger = try instance.createDebugMessenger(config, null);
+    var messenger = try instance.createDebugMessenger(config);
     messenger.deinit();
     messenger.deinit();
     try std.testing.expectEqual(@as(usize, 1), test_destroy_messenger_count);
@@ -8857,7 +8874,7 @@ test "debug messenger handles fake dispatch success and failures" {
     test_create_null_handle = true;
     try std.testing.expectError(
         error.InvalidHandle,
-        instance.createDebugMessenger(config, null),
+        instance.createDebugMessenger(config),
     );
 
     test_create_null_handle = false;
@@ -8865,7 +8882,7 @@ test "debug messenger handles fake dispatch success and failures" {
     test_destroy_messenger_count = 0;
     try std.testing.expectError(
         error.InitializationFailed,
-        instance.createDebugMessenger(config, null),
+        instance.createDebugMessenger(config),
     );
     try std.testing.expectEqual(@as(usize, 1), test_destroy_messenger_count);
 
@@ -8874,7 +8891,7 @@ test "debug messenger handles fake dispatch success and failures" {
     test_create_messenger_count = 0;
     try std.testing.expectError(
         error.MissingCommand,
-        instance.createDebugMessenger(config, null),
+        instance.createDebugMessenger(config),
     );
     try std.testing.expectEqual(@as(usize, 0), test_create_messenger_count);
 }

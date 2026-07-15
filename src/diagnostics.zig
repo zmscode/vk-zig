@@ -218,7 +218,6 @@ fn getFaultReportOnce(
 
 pub const ValidationCacheOptions = struct {
     initial_data: []const u8 = &.{},
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
 };
 
 pub const ValidationCacheDispatch = struct {
@@ -316,6 +315,7 @@ pub fn createValidationCache(
     create: CommandFunction(raw.PFN_vkCreateValidationCacheEXT),
     dispatch: ValidationCacheDispatch,
     options: ValidationCacheOptions,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
 ) core.Error!ValidationCache {
     try device_state.ensureDispatchAllowed();
     const info: raw.VkValidationCacheCreateInfoEXT = .{
@@ -324,9 +324,9 @@ pub fn createValidationCache(
         .pInitialData = if (options.initial_data.len == 0) null else options.initial_data.ptr,
     };
     var handle: raw.VkValidationCacheEXT = null;
-    const result = create(device_handle, &info, options.allocation_callbacks, &handle);
+    const result = create(device_handle, &info, allocation_callbacks, &handle);
     if (result != raw.VK_SUCCESS) {
-        if (handle) |provisional| dispatch.destroy(device_handle, provisional, options.allocation_callbacks);
+        if (handle) |provisional| dispatch.destroy(device_handle, provisional, allocation_callbacks);
         try core.checkSuccessOptional(&device_state, result);
         unreachable;
     }
@@ -335,7 +335,7 @@ pub fn createValidationCache(
         ._owner = try .init(&handle),
         ._device_handle = device_handle,
         ._device_state = device_state,
-        .allocation_callbacks = options.allocation_callbacks,
+        .allocation_callbacks = allocation_callbacks,
         .dispatch = dispatch,
     };
 }
@@ -636,8 +636,8 @@ test "validation caches own data, validate merges, and destroy once" {
     test_validation_create_result = raw.VK_SUCCESS;
     test_validation_destroy_count = 0;
     test_validation_merge_count = 0;
-    var destination = try createValidationCache(device, state, testCreateValidation, dispatch, .{});
-    var source = try createValidationCache(device, state, testCreateValidation, dispatch, .{});
+    var destination = try createValidationCache(device, state, testCreateValidation, dispatch, .{}, null);
+    var source = try createValidationCache(device, state, testCreateValidation, dispatch, .{}, null);
     defer source.deinit();
     const bytes = try destination.data(std.testing.allocator);
     defer std.testing.allocator.free(bytes);
@@ -662,6 +662,6 @@ test "validation cache failed creation rolls back a provisional handle" {
         .destroy = testDestroyValidation,
         .merge = testMergeValidation,
         .get_data = testValidationData,
-    }, .{}));
+    }, .{}, null));
     try std.testing.expectEqual(@as(usize, 1), test_validation_destroy_count);
 }

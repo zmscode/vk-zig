@@ -98,7 +98,6 @@ pub const Options = struct {
     old_swapchain: ?*const Swapchain = null,
     flags: types.SwapchainCreateFlags = .empty,
     next: ?*const anyopaque = null,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
 
     pub fn validate(
         options: Options,

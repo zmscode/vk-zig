@@ -489,7 +489,6 @@ pub fn releaseCapturedPipelineData(
 
 pub const CacheOptions = struct {
     initial_data: []const u8 = &.{},
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
 };
 
 pub const CacheDispatch = struct {
@@ -579,6 +578,7 @@ pub fn createCache(
     device_state: core.DeviceState,
     dispatch: CacheDispatch,
     options: CacheOptions,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
 ) core.Error!Cache {
     try device_state.ensureDispatchAllowed();
     const info: raw.VkPipelineCacheCreateInfo = .{
@@ -587,9 +587,9 @@ pub fn createCache(
         .pInitialData = if (options.initial_data.len == 0) null else options.initial_data.ptr,
     };
     var handle: raw.VkPipelineCache = null;
-    const result = dispatch.create(device_handle, &info, options.allocation_callbacks, &handle);
+    const result = dispatch.create(device_handle, &info, allocation_callbacks, &handle);
     if (result != raw.VK_SUCCESS) {
-        if (handle) |provisional| dispatch.destroy(device_handle, provisional, options.allocation_callbacks);
+        if (handle) |provisional| dispatch.destroy(device_handle, provisional, allocation_callbacks);
         try core.checkSuccessOptional(&device_state, result);
         unreachable;
     }
@@ -598,7 +598,7 @@ pub fn createCache(
         ._owner = try .init(&handle),
         ._device_handle = device_handle,
         ._device_state = device_state,
-        .allocation_callbacks = options.allocation_callbacks,
+        .allocation_callbacks = allocation_callbacks,
         .dispatch = dispatch,
     };
 }
@@ -865,8 +865,8 @@ test "pipeline cache data merge and deferred statuses stay typed" {
     const device: DeviceHandle = @ptrFromInt(0x1000);
     const cache_dispatch: CacheDispatch = .{ .create = testCreateCache, .destroy = testDestroyCache, .get_data = testCacheData, .merge = testMerge };
     test_cache_destroy_count = 0;
-    var first = try createCache(device, state, cache_dispatch, .{});
-    var second = try createCache(device, state, cache_dispatch, .{});
+    var first = try createCache(device, state, cache_dispatch, .{}, null);
+    var second = try createCache(device, state, cache_dispatch, .{}, null);
     defer second.deinit();
     var too_small: [2]u8 = undefined;
     try std.testing.expectError(error.BufferTooSmall, first.dataInto(&too_small));
@@ -916,7 +916,7 @@ test "invalid cache data rolls back a provisional cache" {
         .destroy = testDestroyCache,
         .get_data = testCacheData,
         .merge = testMerge,
-    }, .{ .initial_data = &.{1} }));
+    }, .{ .initial_data = &.{1} }, null));
     try std.testing.expectEqual(@as(usize, 1), test_cache_destroy_count);
 }
 

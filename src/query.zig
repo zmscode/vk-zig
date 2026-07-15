@@ -139,7 +139,6 @@ pub const Options = struct {
     kind: Kind,
     count: u32,
     next: ?*const anyopaque = null,
-    allocation_callbacks: ?*const raw.VkAllocationCallbacks = null,
 };
 
 pub const ResultOptions = struct {
@@ -491,6 +490,7 @@ pub fn create(
     device_state: *core.DeviceState,
     dispatch: Dispatch,
     options: Options,
+    allocation_callbacks: ?*const raw.VkAllocationCallbacks,
 ) core.Error!Pool {
     try device_state.ensureDispatchAllowed();
     if (options.count == 0) return error.InvalidOptions;
@@ -525,9 +525,9 @@ pub fn create(
         .pipelineStatistics = statistics,
     };
     var handle: raw.VkQueryPool = null;
-    const result = dispatch.create(device_handle, &create_info, options.allocation_callbacks, &handle);
+    const result = dispatch.create(device_handle, &create_info, allocation_callbacks, &handle);
     if (result != raw.VK_SUCCESS) {
-        if (handle) |provisional| dispatch.destroy(device_handle, provisional, options.allocation_callbacks);
+        if (handle) |provisional| dispatch.destroy(device_handle, provisional, allocation_callbacks);
         try core.checkSuccessTracked(device_state, result);
         unreachable;
     }
@@ -543,7 +543,7 @@ pub fn create(
             .performance => |performance| @intCast(performance.counter_indices.len),
             else => 1,
         },
-        .allocation_callbacks = options.allocation_callbacks,
+        .allocation_callbacks = allocation_callbacks,
         .dispatch = dispatch,
     };
 }
@@ -642,6 +642,7 @@ test "query results keep ready not-ready and partial distinct" {
         &state,
         testDispatch(),
         .{ .kind = .timestamp, .count = 2 },
+        null,
     );
     defer pool.deinit();
 
@@ -678,12 +679,14 @@ test "query creation validates kind and cleanup is idempotent" {
         &state,
         testDispatch(),
         .{ .kind = .{ .pipeline_statistics = .empty }, .count = 1 },
+        null,
     ));
     var pool = try create(
         testHandle(raw.VkDevice, 0x2000),
         &state,
         testDispatch(),
         .{ .kind = .occlusion, .count = 1 },
+        null,
     );
     test_destroy_count = 0;
     pool.deinit();
