@@ -1458,6 +1458,32 @@ pub const PhysicalDevice = struct {
         return .forInstance(.physical_device, device._handle, device._instance_handle);
     }
 
+    /// Loads typed Vulkan Video capability and format queries for this adapter.
+    pub fn videoQueries(device: *const PhysicalDevice) Error!video.QueryContext {
+        _ = try device.rawHandle();
+        return .{
+            ._physical_device = device._handle,
+            ._capabilities = loadInstanceDescriptor(
+                device.dispatch.get_instance_proc_addr,
+                device._instance_handle,
+                command.get_physical_device_video_capabilities_khr,
+                .instance,
+            ),
+            ._formats = loadInstanceDescriptor(
+                device.dispatch.get_instance_proc_addr,
+                device._instance_handle,
+                command.get_physical_device_video_format_properties_khr,
+                .instance,
+            ),
+            ._quality = loadInstanceDescriptor(
+                device.dispatch.get_instance_proc_addr,
+                device._instance_handle,
+                command.get_physical_device_video_encode_quality_level_properties_khr,
+                .instance,
+            ),
+        };
+    }
+
     pub fn groupMember(device: *const PhysicalDevice) device_configuration.GroupMember {
         return .{ ._handle = device._handle, ._instance_handle = device._instance_handle };
     }
@@ -3141,6 +3167,22 @@ pub const Device = struct {
         };
     }
 
+    /// Loads typed video-session ownership and memory operations.
+    pub fn videoContext(device: *const Device) Error!video.Context {
+        return .{
+            ._device = try device.dispatchHandle(),
+            ._state = &device._state,
+            ._allocation_callbacks = device.allocation_callbacks,
+            ._create_session = try device.load(command.create_video_session_khr),
+            ._destroy_session = try device.load(command.destroy_video_session_khr),
+            ._get_memory_requirements = try device.load(command.get_video_session_memory_requirements_khr),
+            ._bind_memory = try device.load(command.bind_video_session_memory_khr),
+            ._create_parameters = try device.load(command.create_video_session_parameters_khr),
+            ._update_parameters = try device.load(command.update_video_session_parameters_khr),
+            ._destroy_parameters = try device.load(command.destroy_video_session_parameters_khr),
+        };
+    }
+
     /// Loads EXT and NV mesh-shader recording commands independently. Calling
     /// a method for an unavailable variant returns `error.MissingCommand`.
     pub fn meshShaderRecorder(device: *const Device) Error!mesh_shader.Recorder {
@@ -4169,6 +4211,9 @@ pub const Device = struct {
             .cmd_end_transform_feedback_ext = device.dispatch.cmd_end_transform_feedback_ext,
             .cmd_begin_video_coding_khr = device.dispatch.cmd_begin_video_coding_khr,
             .cmd_end_video_coding_khr = device.dispatch.cmd_end_video_coding_khr,
+            .cmd_control_video_coding_khr = device.dispatch.cmd_control_video_coding_khr,
+            .cmd_decode_video_khr = device.dispatch.cmd_decode_video_khr,
+            .cmd_encode_video_khr = device.dispatch.cmd_encode_video_khr,
             .cmd_set_device_mask = device.dispatch.cmd_set_device_mask,
         };
     }
@@ -4880,6 +4925,9 @@ const DeviceDispatch = struct {
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
     cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
     cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
+    cmd_control_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdControlVideoCodingKHR) = null,
+    cmd_decode_video_khr: ?CommandFunction(raw.PFN_vkCmdDecodeVideoKHR) = null,
+    cmd_encode_video_khr: ?CommandFunction(raw.PFN_vkCmdEncodeVideoKHR) = null,
     get_device_group_peer_memory_features: ?CommandFunction(raw.PFN_vkGetDeviceGroupPeerMemoryFeatures),
     cmd_set_device_mask: ?CommandFunction(raw.PFN_vkCmdSetDeviceMask),
     get_device_group_present_capabilities_khr: ?CommandFunction(raw.PFN_vkGetDeviceGroupPresentCapabilitiesKHR),
@@ -5679,6 +5727,9 @@ const DeviceDispatch = struct {
             ),
             .cmd_begin_video_coding_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_begin_video_coding_khr),
             .cmd_end_video_coding_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_end_video_coding_khr),
+            .cmd_control_video_coding_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_control_video_coding_khr),
+            .cmd_decode_video_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_decode_video_khr),
+            .cmd_encode_video_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_encode_video_khr),
             .get_device_group_peer_memory_features = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_device_group_peer_memory_features),
             .cmd_set_device_mask = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_set_device_mask),
             .get_device_group_present_capabilities_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_device_group_present_capabilities_khr),

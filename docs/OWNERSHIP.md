@@ -13,6 +13,10 @@ This applies to the loader, instance, device, presentation objects, resources, a
 pipelines, descriptor and command pools, synchronization objects, query pools, and diagnostic
 objects. Composite helpers delegate cleanup to those tokenized owners.
 
+Vulkan Video session-memory allocations must outlive their session. A recorded coding operation
+borrows its session, parameters, bitstream buffer, image views, and DPB/reference pictures through
+GPU completion; ending the host-side coding scope does not shorten those GPU lifetimes.
+
 Prefer normal final-storage initialization and a single `defer object.deinit()`:
 
 ```zig

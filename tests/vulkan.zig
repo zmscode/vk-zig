@@ -199,6 +199,14 @@ test "wrapper exposes typed Vulkan lifecycle objects" {
     try std.testing.expect(@hasDecl(vk, "present_extensions"));
     try std.testing.expect(@hasDecl(vk.present_extensions, "Context"));
     try std.testing.expect(@hasDecl(vk.Device, "presentationController"));
+    try std.testing.expect(@hasDecl(vk, "video"));
+    try std.testing.expect(@hasDecl(vk.video, "Profile"));
+    try std.testing.expect(@hasDecl(vk.video, "QueryContext"));
+    try std.testing.expect(@hasDecl(vk.video, "Context"));
+    try std.testing.expect(@hasDecl(vk.PhysicalDevice, "videoQueries"));
+    try std.testing.expect(@hasDecl(vk.Device, "videoContext"));
+    try std.testing.expect(@hasDecl(vk.CommandBuffer, "decodeVideo"));
+    try std.testing.expect(@hasDecl(vk.CommandBuffer, "encodeVideo"));
 }
 
 test "generated commands bind scope, name, and function type" {

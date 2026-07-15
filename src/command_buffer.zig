@@ -234,6 +234,7 @@ pub const Buffer = struct {
     conditional_rendering_active: bool = false,
     transform_feedback_active: bool = false,
     video_coding_active: bool = false,
+    active_video_profile: ?video.Profile = null,
     _device_group_size: u32 = 1,
     begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
     end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
@@ -306,6 +307,9 @@ pub const Buffer = struct {
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
     cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
     cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
+    cmd_control_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdControlVideoCodingKHR),
+    cmd_decode_video_khr: ?CommandFunction(raw.PFN_vkCmdDecodeVideoKHR),
+    cmd_encode_video_khr: ?CommandFunction(raw.PFN_vkCmdEncodeVideoKHR),
     cmd_set_device_mask: ?CommandFunction(raw.PFN_vkCmdSetDeviceMask),
 
     fn liveHandle(buffer: *Buffer) core.Error!CommandBufferHandle {
@@ -328,6 +332,7 @@ pub const Buffer = struct {
             buffer.conditional_rendering_active = false;
             buffer.transform_feedback_active = false;
             buffer.video_coding_active = false;
+            buffer.active_video_profile = null;
         }
         return handle;
     }
@@ -358,6 +363,7 @@ pub const Buffer = struct {
             buffer.conditional_rendering_active = false;
             buffer.transform_feedback_active = false;
             buffer.video_coding_active = false;
+            buffer.active_video_profile = null;
         }
         if (buffer.state == .pending) return;
         buffer._pool.free_command_buffers(
@@ -421,6 +427,7 @@ pub const Buffer = struct {
         buffer.conditional_rendering_active = false;
         buffer.transform_feedback_active = false;
         buffer.video_coding_active = false;
+        buffer.active_video_profile = null;
     }
 
     pub fn setDeviceMask(buffer: *Buffer, mask: device_group.Mask) core.Error!void {
@@ -461,6 +468,7 @@ pub const Buffer = struct {
         buffer.conditional_rendering_active = false;
         buffer.transform_feedback_active = false;
         buffer.video_coding_active = false;
+        buffer.active_video_profile = null;
     }
 
     pub fn markComplete(buffer: *Buffer) core.Error!void {
@@ -1336,6 +1344,7 @@ pub const Buffer = struct {
         const handle = try buffer.liveHandle();
         if (buffer.state != .recording or buffer.video_coding_active or buffer.rendering_active or buffer.render_pass_active) return error.InvalidOptions;
         if (options.session._device_handle != buffer._device_handle) return error.InvalidHandle;
+        if (!video.referencesMatch(options.session.profile, options.references)) return error.UnsupportedCodec;
         const begin_command = buffer.cmd_begin_video_coding_khr orelse return error.MissingCommand;
         _ = buffer.cmd_end_video_coding_khr orelse return error.MissingCommand;
         const parameters_handle = if (options.parameters) |parameters| blk: {
@@ -1344,13 +1353,18 @@ pub const Buffer = struct {
         } else null;
         var owner = try core.Owner.init({});
         errdefer _ = owner.release({}) catch {};
+        var reference_storage: video.ReferenceStorage = .{};
+        const references = try reference_storage.build(buffer._device_handle, options.references);
         const info: raw.VkVideoBeginCodingInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR,
             .videoSession = try options.session.rawHandle(),
             .videoSessionParameters = parameters_handle,
+            .referenceSlotCount = @intCast(references.len),
+            .pReferenceSlots = if (references.len == 0) null else references.ptr,
         };
         begin_command(handle, &info);
         buffer.video_coding_active = true;
+        buffer.active_video_profile = options.session.profile;
         return .{ ._owner = owner, .buffer = buffer };
     }
 
@@ -1363,6 +1377,107 @@ pub const Buffer = struct {
         };
         end_command(handle, &info);
         buffer.video_coding_active = false;
+        buffer.active_video_profile = null;
+    }
+
+    pub fn controlVideoCoding(buffer: *Buffer, options: video.Control) core.Error!void {
+        if (buffer.state != .recording or !buffer.video_coding_active) return error.InvalidOptions;
+        const control = buffer.cmd_control_video_coding_khr orelse return error.MissingCommand;
+        const info: raw.VkVideoCodingControlInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR,
+            .flags = options.flags(),
+        };
+        control(try buffer.liveHandle(), &info);
+    }
+
+    pub fn decodeVideo(buffer: *Buffer, options: video.DecodeOptions) core.Error!void {
+        if (buffer.state != .recording or !buffer.video_coding_active or options.bitstream._device_handle != buffer._device_handle) return error.InvalidHandle;
+        const decode = buffer.cmd_decode_video_khr orelse return error.MissingCommand;
+        const profile = buffer.active_video_profile orelse return error.InvalidOptions;
+        if (!video.decodeMatches(profile, options.codec) or !video.referencesMatch(profile, options.references)) return error.UnsupportedCodec;
+        if (options.setup_reference) |setup| if (!video.referencesMatch(profile, &.{setup})) return error.UnsupportedCodec;
+        if (options.range.bytes() == 0 or options.offset.bytes() > options.bitstream.size.bytes() or options.range.bytes() > options.bitstream.size.bytes() - options.offset.bytes()) return error.InvalidOptions;
+        var references_storage: video.ReferenceStorage = .{};
+        const references = try references_storage.build(buffer._device_handle, options.references);
+        var setup_storage: video.ReferenceStorage = .{};
+        const setup_slots = if (options.setup_reference) |setup| try setup_storage.build(buffer._device_handle, &.{setup}) else &.{};
+        const setup_pointer: ?*const raw.VkVideoReferenceSlotInfoKHR = if (setup_slots.len == 0) null else &setup_slots[0];
+        var h264: raw.VkVideoDecodeH264PictureInfoKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PICTURE_INFO_KHR };
+        var h265: raw.VkVideoDecodeH265PictureInfoKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR };
+        const codec_pointer: *const anyopaque = switch (options.codec) {
+            .h264 => |value| blk: {
+                if (value.slice_offsets.len == 0 or value.slice_offsets.len > 4096) return error.InvalidOptions;
+                h264.pStdPictureInfo = value.picture;
+                h264.sliceCount = @intCast(value.slice_offsets.len);
+                h264.pSliceOffsets = value.slice_offsets.ptr;
+                break :blk &h264;
+            },
+            .h265 => |value| blk: {
+                if (value.slice_segment_offsets.len == 0 or value.slice_segment_offsets.len > 4096) return error.InvalidOptions;
+                h265.pStdPictureInfo = value.picture;
+                h265.sliceSegmentCount = @intCast(value.slice_segment_offsets.len);
+                h265.pSliceSegmentOffsets = value.slice_segment_offsets.ptr;
+                break :blk &h265;
+            },
+        };
+        const info: raw.VkVideoDecodeInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR,
+            .pNext = codec_pointer,
+            .srcBuffer = try options.bitstream.rawHandle(),
+            .srcBufferOffset = options.offset.bytes(),
+            .srcBufferRange = options.range.bytes(),
+            .dstPictureResource = try options.destination.toRaw(buffer._device_handle),
+            .pSetupReferenceSlot = setup_pointer,
+            .referenceSlotCount = @intCast(references.len),
+            .pReferenceSlots = if (references.len == 0) null else references.ptr,
+        };
+        decode(try buffer.liveHandle(), &info);
+    }
+
+    pub fn encodeVideo(buffer: *Buffer, options: video.EncodeOptions) core.Error!void {
+        if (buffer.state != .recording or !buffer.video_coding_active or options.bitstream._device_handle != buffer._device_handle) return error.InvalidHandle;
+        const encode = buffer.cmd_encode_video_khr orelse return error.MissingCommand;
+        const profile = buffer.active_video_profile orelse return error.InvalidOptions;
+        if (!video.encodeMatches(profile, options.codec) or !video.referencesMatch(profile, options.references)) return error.UnsupportedCodec;
+        if (options.setup_reference) |setup| if (!video.referencesMatch(profile, &.{setup})) return error.UnsupportedCodec;
+        if (options.range.bytes() == 0 or options.offset.bytes() > options.bitstream.size.bytes() or options.range.bytes() > options.bitstream.size.bytes() - options.offset.bytes()) return error.InvalidOptions;
+        var references_storage: video.ReferenceStorage = .{};
+        const references = try references_storage.build(buffer._device_handle, options.references);
+        var setup_storage: video.ReferenceStorage = .{};
+        const setup_slots = if (options.setup_reference) |setup| try setup_storage.build(buffer._device_handle, &.{setup}) else &.{};
+        const setup_pointer: ?*const raw.VkVideoReferenceSlotInfoKHR = if (setup_slots.len == 0) null else &setup_slots[0];
+        var h264: raw.VkVideoEncodeH264PictureInfoKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
+        var h265: raw.VkVideoEncodeH265PictureInfoKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_PICTURE_INFO_KHR };
+        const codec_pointer: *const anyopaque = switch (options.codec) {
+            .h264 => |value| blk: {
+                if (value.slices.len == 0 or value.slices.len > 4096) return error.InvalidOptions;
+                h264.pStdPictureInfo = value.picture;
+                h264.naluSliceEntryCount = @intCast(value.slices.len);
+                h264.pNaluSliceEntries = value.slices.ptr;
+                h264.generatePrefixNalu = if (value.generate_prefix_nalu) raw.VK_TRUE else raw.VK_FALSE;
+                break :blk &h264;
+            },
+            .h265 => |value| blk: {
+                if (value.slices.len == 0 or value.slices.len > 4096) return error.InvalidOptions;
+                h265.pStdPictureInfo = value.picture;
+                h265.naluSliceSegmentEntryCount = @intCast(value.slices.len);
+                h265.pNaluSliceSegmentEntries = value.slices.ptr;
+                break :blk &h265;
+            },
+        };
+        const info: raw.VkVideoEncodeInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_VIDEO_ENCODE_INFO_KHR,
+            .pNext = codec_pointer,
+            .dstBuffer = try options.bitstream.rawHandle(),
+            .dstBufferOffset = options.offset.bytes(),
+            .dstBufferRange = options.range.bytes(),
+            .srcPictureResource = try options.source.toRaw(buffer._device_handle),
+            .pSetupReferenceSlot = setup_pointer,
+            .referenceSlotCount = @intCast(references.len),
+            .pReferenceSlots = if (references.len == 0) null else references.ptr,
+            .precedingExternallyEncodedBytes = options.preceding_externally_encoded_bytes,
+        };
+        encode(try buffer.liveHandle(), &info);
     }
 
     pub fn rawHandle(buffer: *Buffer) core.Error!raw.VkCommandBuffer {
@@ -1571,6 +1686,9 @@ pub const Pool = struct {
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
     cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
     cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
+    cmd_control_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdControlVideoCodingKHR),
+    cmd_decode_video_khr: ?CommandFunction(raw.PFN_vkCmdDecodeVideoKHR),
+    cmd_encode_video_khr: ?CommandFunction(raw.PFN_vkCmdEncodeVideoKHR),
     cmd_set_device_mask: ?CommandFunction(raw.PFN_vkCmdSetDeviceMask),
 
     pub fn deinit(pool: *Pool) void {
@@ -1674,6 +1792,9 @@ pub const Pool = struct {
             .cmd_end_transform_feedback_ext = pool.cmd_end_transform_feedback_ext,
             .cmd_begin_video_coding_khr = pool.cmd_begin_video_coding_khr,
             .cmd_end_video_coding_khr = pool.cmd_end_video_coding_khr,
+            .cmd_control_video_coding_khr = pool.cmd_control_video_coding_khr,
+            .cmd_decode_video_khr = pool.cmd_decode_video_khr,
+            .cmd_encode_video_khr = pool.cmd_encode_video_khr,
             .cmd_set_device_mask = pool.cmd_set_device_mask,
             ._device_group_size = pool._device_group_size,
         };

@@ -484,6 +484,18 @@ rendering, and use `device.fragmentShadingRateController()` for dynamic KHR rate
 palettes. Unsupported vendor commands return `error.MissingCommand`; there is no silent fallback
 between EXT, KHR, and NV behavior.
 
+Vulkan Video is isolated under `vk.video`. Start with `physical_device.videoQueries()` for typed
+codec profiles, capabilities, formats, and encode quality levels. Create sessions and parameter
+objects through `device.videoContext()`, enumerate each session's memory requirements, allocate and
+bind every required index, then use `CommandBuffer.beginVideoCoding`, `controlVideoCoding`,
+`decodeVideo`, and `encodeVideo`. H.264/H.265/AV1/VP9 profile combinations are tagged; incompatible
+parameter, reference-picture, decode, and encode codec data is rejected before dispatch. Khronos
+StdVideo payload types are re-exported from `vk.video`, so applications do not import `vk.raw`.
+
+Session memory allocations must outlive the session. Bitstream buffers, parameter objects, image
+views, and every DPB/reference-picture resource used by a recorded coding scope must remain alive
+and externally synchronized until the GPU has completed that submission.
+
 `deviceExtensions` enumerates per-device support. Once `VK_KHR_swapchain` is enabled on the
 logical device, create and own a swapchain without manually loading its commands:
 

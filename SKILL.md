@@ -159,6 +159,10 @@ device's raw command-label methods only for advanced interop paths that cannot u
   surfaces. Use `device.presentationController()` for HDR, present waiting/timing, display events,
   image release, full-screen exclusive, low-latency, and anti-lag workflows. Prefer the typed fields
   on `SwapchainOptions` and `PresentOptions` over manually building presentation `pNext` chains.
+- For Vulkan Video, use `physical_device.videoQueries()` and `device.videoContext()`. Select a
+  tagged `vk.video.Profile`, bind every reported session-memory index, and record through the typed
+  command-buffer video scope. Keep session allocations, parameters, bitstreams, image views, and
+  reference pictures alive until the GPU completes the submission.
 - Define a handler accepting `vk.ext.debug_utils.Message`, construct it with
   `MessengerConfig.fromHandler`, and pass it as `InstanceOptions.debug_messenger`. This path owns
   the C trampoline, automatically enables `VK_EXT_debug_utils`, chains the creation callback, and
