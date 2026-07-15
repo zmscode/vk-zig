@@ -300,3 +300,47 @@ pub fn formatsInto(
     }
     return storage[0..count];
 }
+
+pub fn formatCount(
+    physical_device: raw.VkPhysicalDevice,
+    get_formats: CommandFunction(raw.PFN_vkGetPhysicalDeviceOpticalFlowImageFormatsNV),
+    usage: UsageFlags,
+) core.Error!u32 {
+    const info: raw.VkOpticalFlowImageFormatInfoNV = .{
+        .sType = raw.VK_STRUCTURE_TYPE_OPTICAL_FLOW_IMAGE_FORMAT_INFO_NV,
+        .usage = usage.bits,
+    };
+    var count: u32 = 0;
+    const result = get_formats(physical_device, &info, &count, null);
+    if (result != raw.VK_SUCCESS and result != raw.VK_INCOMPLETE) try core.checkSuccess(result);
+    if (count > format_count_max) return error.CountOverflow;
+    return count;
+}
+
+pub fn formats(
+    gpa: std.mem.Allocator,
+    physical_device: raw.VkPhysicalDevice,
+    get_formats: CommandFunction(raw.PFN_vkGetPhysicalDeviceOpticalFlowImageFormatsNV),
+    usage: UsageFlags,
+) (core.Error || std.mem.Allocator.Error)![]Format {
+    var output = try gpa.alloc(Format, try formatCount(physical_device, get_formats, usage));
+    errdefer gpa.free(output);
+    for (0..4) |_| {
+        const written = formatsInto(physical_device, get_formats, usage, output) catch |err| switch (err) {
+            error.BufferTooSmall => {
+                const required = try formatCount(physical_device, get_formats, usage);
+                const next = if (required > output.len) required else @min(output.len * 2, format_count_max);
+                if (next <= output.len) return error.EnumerationUnstable;
+                output = try gpa.realloc(output, next);
+                continue;
+            },
+            else => return err,
+        };
+        return gpa.realloc(output, written.len);
+    }
+    return error.EnumerationUnstable;
+}
+
+test "all optical-flow declarations compile" {
+    std.testing.refAllDecls(@This());
+}

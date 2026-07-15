@@ -163,6 +163,10 @@ device's raw command-label methods only for advanced interop paths that cannot u
   tagged `vk.video.Profile`, bind every reported session-memory index, and record through the typed
   command-buffer video scope. Keep session allocations, parameters, bitstreams, image views, and
   reference pictures alive until the GPU completes the submission.
+- Keep specialty compute in its focused namespace: `vk.optical_flow`, `vk.tensor`,
+  `vk.cooperative_math`, or `vk.data_graph`. Obtain the corresponding context from the physical or
+  logical device, and keep bound allocations plus borrowed views/pipelines alive through GPU
+  completion. A missing vendor extension is `error.MissingCommand`, not a reason to load raw PFNs.
 - Define a handler accepting `vk.ext.debug_utils.Message`, construct it with
   `MessengerConfig.fromHandler`, and pass it as `InstanceOptions.debug_messenger`. This path owns
   the C trampoline, automatically enables `VK_EXT_debug_utils`, chains the creation callback, and

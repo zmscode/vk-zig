@@ -207,6 +207,17 @@ test "wrapper exposes typed Vulkan lifecycle objects" {
     try std.testing.expect(@hasDecl(vk.Device, "videoContext"));
     try std.testing.expect(@hasDecl(vk.CommandBuffer, "decodeVideo"));
     try std.testing.expect(@hasDecl(vk.CommandBuffer, "encodeVideo"));
+    try std.testing.expect(@hasDecl(vk.Device, "createOpticalFlowSession"));
+    try std.testing.expect(@hasDecl(vk.PhysicalDevice, "opticalFlowFormats"));
+    try std.testing.expect(@hasDecl(vk, "tensor"));
+    try std.testing.expect(@hasDecl(vk.tensor, "Context"));
+    try std.testing.expect(@hasDecl(vk.Device, "tensorContext"));
+    try std.testing.expect(@hasDecl(vk, "cooperative_math"));
+    try std.testing.expect(@hasDecl(vk.PhysicalDevice, "cooperativeMathQueries"));
+    try std.testing.expect(@hasDecl(vk.Device, "cooperativeMatrixConverter"));
+    try std.testing.expect(@hasDecl(vk, "data_graph"));
+    try std.testing.expect(@hasDecl(vk.data_graph, "Context"));
+    try std.testing.expect(@hasDecl(vk.Device, "dataGraphContext"));
 }
 
 test "generated commands bind scope, name, and function type" {

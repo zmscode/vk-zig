@@ -33,6 +33,9 @@ pub const debug_utils = @import("debug_utils.zig");
 pub const tooling = @import("diagnostics.zig");
 pub const workflows = @import("workflows.zig");
 pub const optical_flow = @import("optical_flow.zig");
+pub const tensor = @import("tensor.zig");
+pub const cooperative_math = @import("cooperative_math.zig");
+pub const data_graph = @import("data_graph.zig");
 pub const video = @import("video.zig");
 pub const mesh_shader = @import("mesh_shader.zig");
 pub const fragment_shading_rate = @import("fragment_shading_rate.zig");
@@ -1481,6 +1484,31 @@ pub const PhysicalDevice = struct {
                 command.get_physical_device_video_encode_quality_level_properties_khr,
                 .instance,
             ),
+        };
+    }
+
+    pub fn opticalFlowFormatCount(device: *const PhysicalDevice, usage: optical_flow.UsageFlags) Error!u32 {
+        const enumerate = loadInstanceDescriptor(device.dispatch.get_instance_proc_addr, device._instance_handle, command.get_physical_device_optical_flow_image_formats_nv, .instance) orelse return error.MissingCommand;
+        return optical_flow.formatCount(try device.rawHandle(), enumerate, usage);
+    }
+
+    pub fn opticalFlowFormatsInto(device: *const PhysicalDevice, usage: optical_flow.UsageFlags, storage: []optical_flow.Format) Error![]optical_flow.Format {
+        const enumerate = loadInstanceDescriptor(device.dispatch.get_instance_proc_addr, device._instance_handle, command.get_physical_device_optical_flow_image_formats_nv, .instance) orelse return error.MissingCommand;
+        return optical_flow.formatsInto(try device.rawHandle(), enumerate, usage, storage);
+    }
+
+    pub fn opticalFlowFormats(device: *const PhysicalDevice, gpa: std.mem.Allocator, usage: optical_flow.UsageFlags) (Error || std.mem.Allocator.Error)![]optical_flow.Format {
+        const enumerate = loadInstanceDescriptor(device.dispatch.get_instance_proc_addr, device._instance_handle, command.get_physical_device_optical_flow_image_formats_nv, .instance) orelse return error.MissingCommand;
+        return optical_flow.formats(gpa, try device.rawHandle(), enumerate, usage);
+    }
+
+    pub fn cooperativeMathQueries(device: *const PhysicalDevice) Error!cooperative_math.QueryContext {
+        _ = try device.rawHandle();
+        return .{
+            ._physical_device = device._handle,
+            ._matrix_khr = loadInstanceDescriptor(device.dispatch.get_instance_proc_addr, device._instance_handle, command.get_physical_device_cooperative_matrix_properties_khr, .instance),
+            ._matrix_nv = loadInstanceDescriptor(device.dispatch.get_instance_proc_addr, device._instance_handle, command.get_physical_device_cooperative_matrix_properties_nv, .instance),
+            ._vector_nv = loadInstanceDescriptor(device.dispatch.get_instance_proc_addr, device._instance_handle, command.get_physical_device_cooperative_vector_properties_nv, .instance),
         };
     }
 
@@ -3180,6 +3208,57 @@ pub const Device = struct {
             ._create_parameters = try device.load(command.create_video_session_parameters_khr),
             ._update_parameters = try device.load(command.update_video_session_parameters_khr),
             ._destroy_parameters = try device.load(command.destroy_video_session_parameters_khr),
+        };
+    }
+
+    pub fn createOpticalFlowSession(device: *const Device, options: optical_flow.SessionOptions) Error!optical_flow.Session {
+        var output: optical_flow.Session = undefined;
+        try optical_flow.create(&output, try device.dispatchHandle(), @constCast(&device._state), device.allocation_callbacks, .{
+            .create = (try device.load(command.create_optical_flow_session_nv)) orelse return error.MissingCommand,
+            .destroy = (try device.load(command.destroy_optical_flow_session_nv)) orelse return error.MissingCommand,
+            .bind_image = (try device.load(command.bind_optical_flow_session_image_nv)) orelse return error.MissingCommand,
+            .execute = (try device.load(command.cmd_optical_flow_execute_nv)) orelse return error.MissingCommand,
+        }, options);
+        return output;
+    }
+
+    pub fn tensorContext(device: *const Device) Error!tensor.Context {
+        return .{
+            ._device = try device.dispatchHandle(),
+            ._state = &device._state,
+            ._allocation_callbacks = device.allocation_callbacks,
+            ._create = try device.load(command.create_tensor_arm),
+            ._destroy = try device.load(command.destroy_tensor_arm),
+            ._create_view = try device.load(command.create_tensor_view_arm),
+            ._destroy_view = try device.load(command.destroy_tensor_view_arm),
+            ._requirements = try device.load(command.get_tensor_memory_requirements_arm),
+            ._bind = try device.load(command.bind_tensor_memory_arm),
+            ._copy = try device.load(command.cmd_copy_tensor_arm),
+        };
+    }
+
+    pub fn cooperativeMatrixConverter(device: *const Device) Error!cooperative_math.Converter {
+        return .{
+            ._device = try device.dispatchHandle(),
+            ._state = &device._state,
+            ._host = try device.load(command.convert_cooperative_vector_matrix_nv),
+            ._command = try device.load(command.cmd_convert_cooperative_vector_matrix_nv),
+        };
+    }
+
+    pub fn dataGraphContext(device: *const Device) Error!data_graph.Context {
+        return .{
+            ._device = try device.dispatchHandle(),
+            ._state = &device._state,
+            ._allocation_callbacks = device.allocation_callbacks,
+            ._create_pipeline = try device.load(command.create_data_graph_pipelines_arm),
+            ._destroy_pipeline = device.dispatch.destroy_pipeline,
+            ._create_session = try device.load(command.create_data_graph_pipeline_session_arm),
+            ._destroy_session = try device.load(command.destroy_data_graph_pipeline_session_arm),
+            ._requirements = try device.load(command.get_data_graph_pipeline_session_bind_point_requirements_arm),
+            ._memory_requirements = try device.load(command.get_data_graph_pipeline_session_memory_requirements_arm),
+            ._bind = try device.load(command.bind_data_graph_pipeline_session_memory_arm),
+            ._dispatch = try device.load(command.cmd_dispatch_data_graph_arm),
         };
     }
 

@@ -496,6 +496,20 @@ Session memory allocations must outlive the session. Bitstream buffers, paramete
 views, and every DPB/reference-picture resource used by a recorded coding scope must remain alive
 and externally synchronized until the GPU has completed that submission.
 
+Specialty compute is separated by Vulkan family. Use `physical_device.opticalFlowFormats` and
+`device.createOpticalFlowSession` for NV optical flow; `device.tensorContext()` for ARM tensor
+objects, memory, views, and copies; `physical_device.cooperativeMathQueries()` plus
+`device.cooperativeMatrixConverter()` for cooperative matrix/vector discovery and conversion; and
+`device.dataGraphContext()` for ARM data-graph pipelines, sessions, bind-point memory, and dispatch.
+Each context loads commands independently and reports `error.MissingCommand` when its generated
+extension requirement is not enabled.
+
+The following highly vendor-specific metadata paths remain intentional advanced raw-only escape
+hatches: tensor opaque-capture/external-property queries, NV flexible-dimension cooperative-matrix
+properties, and ARM data-graph engine-operation and arbitrary property-blob queries. Their command
+and extension metadata remains generated under `vk.command`; object lifecycle, memory binding, and
+dispatch no longer require raw Vulkan.
+
 `deviceExtensions` enumerates per-device support. Once `VK_KHR_swapchain` is enabled on the
 logical device, create and own a swapchain without manually loading its commands:
 

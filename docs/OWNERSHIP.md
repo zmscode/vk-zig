@@ -17,6 +17,10 @@ Vulkan Video session-memory allocations must outlive their session. A recorded c
 borrows its session, parameters, bitstream buffer, image views, and DPB/reference pictures through
 GPU completion; ending the host-side coding scope does not shorten those GPU lifetimes.
 
+Optical-flow bound images, tensor allocations/views, cooperative-conversion buffers, and data-graph
+pipeline/session allocations are likewise borrowed through GPU completion. Tensor views cannot be
+used after their tensor owner is destroyed, and data-graph sessions cannot outlive their pipeline.
+
 Prefer normal final-storage initialization and a single `defer object.deinit()`:
 
 ```zig
