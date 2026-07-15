@@ -15,6 +15,7 @@ pub const samplers = @import("sampler.zig");
 pub const shaders = @import("shader.zig");
 pub const descriptors = @import("descriptor.zig");
 pub const pipelines = @import("pipeline.zig");
+pub const pipeline_tools = @import("pipeline_tools.zig");
 pub const rendering = @import("rendering.zig");
 pub const render_passes = @import("render_pass.zig");
 pub const transfers = @import("transfer.zig");
@@ -2445,6 +2446,11 @@ pub const PipelineLayout = pipelines.Layout;
 pub const PipelineLayoutOptions = pipelines.LayoutOptions;
 pub const PushConstantRange = pipelines.PushConstantRange;
 pub const Pipeline = pipelines.Pipeline;
+pub const PipelineCache = pipeline_tools.Cache;
+pub const PipelineCacheOptions = pipeline_tools.CacheOptions;
+pub const DeferredOperation = pipeline_tools.DeferredOperation;
+pub const DeferredJoinStatus = pipeline_tools.JoinStatus;
+pub const DeferredCompletionStatus = pipeline_tools.CompletionStatus;
 pub const PipelineCreateResult = pipelines.CreateResult;
 pub const GraphicsPipelineOptions = pipelines.GraphicsOptions;
 pub const ComputePipelineOptions = pipelines.ComputeOptions;
@@ -2848,6 +2854,29 @@ pub const Device = struct {
             .create = device.dispatch.create_pipeline_layout,
             .destroy = device.dispatch.destroy_pipeline_layout,
         }, device._max_push_constant_size, options) catch |err| return device.recordError(err), device._state);
+    }
+
+    pub fn createPipelineCache(device: *const Device, options: PipelineCacheOptions) Error!PipelineCache {
+        const device_handle = try device.dispatchHandle();
+        var resolved = options;
+        if (resolved.allocation_callbacks == null) resolved.allocation_callbacks = device.allocation_callbacks;
+        return pipeline_tools.createCache(device_handle, device._state, .{
+            .create = device.dispatch.create_pipeline_cache,
+            .destroy = device.dispatch.destroy_pipeline_cache,
+            .get_data = device.dispatch.get_pipeline_cache_data,
+            .merge = device.dispatch.merge_pipeline_caches,
+        }, resolved) catch |err| return device.recordError(err);
+    }
+
+    pub fn createDeferredOperation(device: *const Device) Error!DeferredOperation {
+        const device_handle = try device.dispatchHandle();
+        return pipeline_tools.createDeferred(device_handle, device._state, .{
+            .create = device.dispatch.create_deferred_operation_khr orelse return error.MissingCommand,
+            .destroy = device.dispatch.destroy_deferred_operation_khr orelse return error.MissingCommand,
+            .max_concurrency = device.dispatch.get_deferred_operation_max_concurrency_khr orelse return error.MissingCommand,
+            .result = device.dispatch.get_deferred_operation_result_khr orelse return error.MissingCommand,
+            .join = device.dispatch.deferred_operation_join_khr orelse return error.MissingCommand,
+        }, device.allocation_callbacks) catch |err| return device.recordError(err);
     }
 
     pub fn createGraphicsPipeline(
@@ -3803,6 +3832,15 @@ const DeviceDispatch = struct {
     update_descriptor_set_with_template: ?CommandFunction(raw.PFN_vkUpdateDescriptorSetWithTemplate),
     create_pipeline_layout: CommandFunction(raw.PFN_vkCreatePipelineLayout),
     destroy_pipeline_layout: CommandFunction(raw.PFN_vkDestroyPipelineLayout),
+    create_pipeline_cache: CommandFunction(raw.PFN_vkCreatePipelineCache),
+    destroy_pipeline_cache: CommandFunction(raw.PFN_vkDestroyPipelineCache),
+    get_pipeline_cache_data: CommandFunction(raw.PFN_vkGetPipelineCacheData),
+    merge_pipeline_caches: CommandFunction(raw.PFN_vkMergePipelineCaches),
+    create_deferred_operation_khr: ?CommandFunction(raw.PFN_vkCreateDeferredOperationKHR),
+    destroy_deferred_operation_khr: ?CommandFunction(raw.PFN_vkDestroyDeferredOperationKHR),
+    get_deferred_operation_max_concurrency_khr: ?CommandFunction(raw.PFN_vkGetDeferredOperationMaxConcurrencyKHR),
+    get_deferred_operation_result_khr: ?CommandFunction(raw.PFN_vkGetDeferredOperationResultKHR),
+    deferred_operation_join_khr: ?CommandFunction(raw.PFN_vkDeferredOperationJoinKHR),
     create_graphics_pipelines: CommandFunction(raw.PFN_vkCreateGraphicsPipelines),
     create_compute_pipelines: CommandFunction(raw.PFN_vkCreateComputePipelines),
     destroy_pipeline: CommandFunction(raw.PFN_vkDestroyPipeline),
@@ -4166,6 +4204,35 @@ const DeviceDispatch = struct {
                 raw.PFN_vkDestroyPipelineLayout,
                 "vkDestroyPipelineLayout",
             ),
+            .create_pipeline_cache = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkCreatePipelineCache,
+                "vkCreatePipelineCache",
+            ),
+            .destroy_pipeline_cache = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkDestroyPipelineCache,
+                "vkDestroyPipelineCache",
+            ),
+            .get_pipeline_cache_data = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkGetPipelineCacheData,
+                "vkGetPipelineCacheData",
+            ),
+            .merge_pipeline_caches = try loadDeviceRequired(
+                get_device_proc_addr,
+                handle,
+                raw.PFN_vkMergePipelineCaches,
+                "vkMergePipelineCaches",
+            ),
+            .create_deferred_operation_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkCreateDeferredOperationKHR, "vkCreateDeferredOperationKHR"),
+            .destroy_deferred_operation_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkDestroyDeferredOperationKHR, "vkDestroyDeferredOperationKHR"),
+            .get_deferred_operation_max_concurrency_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetDeferredOperationMaxConcurrencyKHR, "vkGetDeferredOperationMaxConcurrencyKHR"),
+            .get_deferred_operation_result_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetDeferredOperationResultKHR, "vkGetDeferredOperationResultKHR"),
+            .deferred_operation_join_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkDeferredOperationJoinKHR, "vkDeferredOperationJoinKHR"),
             .create_graphics_pipelines = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
@@ -6605,6 +6672,15 @@ fn testDevice() Device {
             .update_descriptor_set_with_template = null,
             .create_pipeline_layout = testFunction(raw.PFN_vkCreatePipelineLayout),
             .destroy_pipeline_layout = testFunction(raw.PFN_vkDestroyPipelineLayout),
+            .create_pipeline_cache = testFunction(raw.PFN_vkCreatePipelineCache),
+            .destroy_pipeline_cache = testFunction(raw.PFN_vkDestroyPipelineCache),
+            .get_pipeline_cache_data = testFunction(raw.PFN_vkGetPipelineCacheData),
+            .merge_pipeline_caches = testFunction(raw.PFN_vkMergePipelineCaches),
+            .create_deferred_operation_khr = null,
+            .destroy_deferred_operation_khr = null,
+            .get_deferred_operation_max_concurrency_khr = null,
+            .get_deferred_operation_result_khr = null,
+            .deferred_operation_join_khr = null,
             .create_graphics_pipelines = testFunction(raw.PFN_vkCreateGraphicsPipelines),
             .create_compute_pipelines = testFunction(raw.PFN_vkCreateComputePipelines),
             .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
@@ -8089,6 +8165,8 @@ test "every wrapped Vulkan object implements typed debug naming" {
         descriptors.UpdateTemplate,
         pipelines.Layout,
         pipelines.Pipeline,
+        pipeline_tools.Cache,
+        pipeline_tools.DeferredOperation,
         render_passes.RenderPass,
         render_passes.Framebuffer,
         synchronization.Event,

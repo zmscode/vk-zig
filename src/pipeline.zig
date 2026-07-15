@@ -2,6 +2,7 @@ const raw = @import("vulkan_raw");
 const command = @import("vulkan_commands");
 const core = @import("core.zig");
 const descriptor = @import("descriptor.zig");
+const pipeline_tools = @import("pipeline_tools.zig");
 const shader = @import("shader.zig");
 const debug_utils = @import("debug_utils.zig");
 const types = @import("vulkan_types");
@@ -389,12 +390,14 @@ pub const GraphicsOptions = struct {
     blend_constants: [4]f32 = .{ 0, 0, 0, 0 },
     dynamic_states: []const DynamicState = &.{ .viewport, .scissor },
     compatibility: GraphicsCompatibility = .{ .dynamic_rendering = .{} },
+    cache: ?*const pipeline_tools.Cache = null,
     fail_on_compile_required: bool = false,
 };
 
 pub const ComputeOptions = struct {
     stage: shader.StageOptions,
     layout: *const Layout,
+    cache: ?*const pipeline_tools.Cache = null,
     fail_on_compile_required: bool = false,
 };
 
@@ -538,7 +541,11 @@ pub fn createCompute(
         .layout = try options.layout.rawHandle(),
     };
     var handle: raw.VkPipeline = null;
-    const result = dispatch.create_compute(device_handle, null, 1, &info, allocation_callbacks, &handle);
+    const cache_handle = if (options.cache) |cache| blk: {
+        if (cache._device_handle != device_handle) return error.InvalidHandle;
+        break :blk try cache.rawHandle();
+    } else null;
+    const result = dispatch.create_compute(device_handle, cache_handle, 1, &info, allocation_callbacks, &handle);
     return finishCreate(device_handle, allocation_callbacks, dispatch.destroy, .compute, result, handle, false, null, 0);
 }
 
@@ -711,7 +718,11 @@ pub fn createGraphics(
         .subpass = legacy_subpass,
     };
     var handle: raw.VkPipeline = null;
-    const result = dispatch.create_graphics(device_handle, null, 1, &info, allocation_callbacks, &handle);
+    const cache_handle = if (options.cache) |cache| blk: {
+        if (cache._device_handle != device_handle) return error.InvalidHandle;
+        break :blk try cache.rawHandle();
+    } else null;
+    const result = dispatch.create_graphics(device_handle, cache_handle, 1, &info, allocation_callbacks, &handle);
     return finishCreate(
         device_handle,
         allocation_callbacks,
