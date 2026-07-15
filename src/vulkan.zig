@@ -25,6 +25,7 @@ pub const commands = @import("command_buffer.zig");
 pub const presentation = @import("presentation.zig");
 pub const queues = @import("queue.zig");
 pub const debug_utils = @import("debug_utils.zig");
+pub const tooling = @import("diagnostics.zig");
 pub const workflows = @import("workflows.zig");
 pub const optical_flow = @import("optical_flow.zig");
 
@@ -2451,6 +2452,10 @@ pub const PipelineCacheOptions = pipeline_tools.CacheOptions;
 pub const DeferredOperation = pipeline_tools.DeferredOperation;
 pub const DeferredJoinStatus = pipeline_tools.JoinStatus;
 pub const DeferredCompletionStatus = pipeline_tools.CompletionStatus;
+pub const DeviceFaultReport = tooling.FaultReport;
+pub const DeviceFaultAddress = tooling.FaultAddress;
+pub const DeviceVendorFault = tooling.VendorFault;
+pub const PrivateDataSlot = tooling.PrivateDataSlot;
 pub const PipelineCreateResult = pipelines.CreateResult;
 pub const GraphicsPipelineOptions = pipelines.GraphicsOptions;
 pub const ComputePipelineOptions = pipelines.ComputeOptions;
@@ -2514,7 +2519,7 @@ pub const Device = struct {
     }
 
     /// Returns the live raw handle for explicit FFI integration.
-    pub fn rawHandle(device: *const Device) Error!raw.VkDevice {
+    pub fn rawHandle(device: *const Device) Error!DeviceHandle {
         try device._owner.validate(device);
         if (device._instance_borrow) |borrow| try borrow.validate();
         return device._handle orelse error.InactiveObject;
@@ -2877,6 +2882,28 @@ pub const Device = struct {
             .result = device.dispatch.get_deferred_operation_result_khr orelse return error.MissingCommand,
             .join = device.dispatch.deferred_operation_join_khr orelse return error.MissingCommand,
         }, device.allocation_callbacks) catch |err| return device.recordError(err);
+    }
+
+    /// Retrieves fault diagnostics even after this device has entered the lost state.
+    pub fn faultReport(device: *const Device, gpa: std.mem.Allocator) (Error || std.mem.Allocator.Error)!DeviceFaultReport {
+        const device_handle = try device.rawHandle();
+        const get_fault = device.dispatch.get_device_fault_info_ext orelse return error.MissingCommand;
+        return tooling.getFaultReport(device_handle, get_fault, gpa);
+    }
+
+    pub fn createPrivateDataSlot(device: *const Device) Error!PrivateDataSlot {
+        const device_handle = try device.dispatchHandle();
+        return tooling.createPrivateDataSlot(
+            device_handle,
+            device._state,
+            device.dispatch.create_private_data_slot orelse return error.MissingCommand,
+            .{
+                .destroy = device.dispatch.destroy_private_data_slot orelse return error.MissingCommand,
+                .set = device.dispatch.set_private_data orelse return error.MissingCommand,
+                .get = device.dispatch.get_private_data orelse return error.MissingCommand,
+            },
+            device.allocation_callbacks,
+        ) catch |err| return device.recordError(err);
     }
 
     pub fn createGraphicsPipeline(
@@ -3841,6 +3868,11 @@ const DeviceDispatch = struct {
     get_deferred_operation_max_concurrency_khr: ?CommandFunction(raw.PFN_vkGetDeferredOperationMaxConcurrencyKHR),
     get_deferred_operation_result_khr: ?CommandFunction(raw.PFN_vkGetDeferredOperationResultKHR),
     deferred_operation_join_khr: ?CommandFunction(raw.PFN_vkDeferredOperationJoinKHR),
+    get_device_fault_info_ext: ?CommandFunction(raw.PFN_vkGetDeviceFaultInfoEXT),
+    create_private_data_slot: ?CommandFunction(raw.PFN_vkCreatePrivateDataSlot),
+    destroy_private_data_slot: ?CommandFunction(raw.PFN_vkDestroyPrivateDataSlot),
+    set_private_data: ?CommandFunction(raw.PFN_vkSetPrivateData),
+    get_private_data: ?CommandFunction(raw.PFN_vkGetPrivateData),
     create_graphics_pipelines: CommandFunction(raw.PFN_vkCreateGraphicsPipelines),
     create_compute_pipelines: CommandFunction(raw.PFN_vkCreateComputePipelines),
     destroy_pipeline: CommandFunction(raw.PFN_vkDestroyPipeline),
@@ -4233,6 +4265,11 @@ const DeviceDispatch = struct {
             .get_deferred_operation_max_concurrency_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetDeferredOperationMaxConcurrencyKHR, "vkGetDeferredOperationMaxConcurrencyKHR"),
             .get_deferred_operation_result_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetDeferredOperationResultKHR, "vkGetDeferredOperationResultKHR"),
             .deferred_operation_join_khr = loadDevice(get_device_proc_addr, handle, raw.PFN_vkDeferredOperationJoinKHR, "vkDeferredOperationJoinKHR"),
+            .get_device_fault_info_ext = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetDeviceFaultInfoEXT, "vkGetDeviceFaultInfoEXT"),
+            .create_private_data_slot = loadDevice(get_device_proc_addr, handle, raw.PFN_vkCreatePrivateDataSlot, "vkCreatePrivateDataSlot"),
+            .destroy_private_data_slot = loadDevice(get_device_proc_addr, handle, raw.PFN_vkDestroyPrivateDataSlot, "vkDestroyPrivateDataSlot"),
+            .set_private_data = loadDevice(get_device_proc_addr, handle, raw.PFN_vkSetPrivateData, "vkSetPrivateData"),
+            .get_private_data = loadDevice(get_device_proc_addr, handle, raw.PFN_vkGetPrivateData, "vkGetPrivateData"),
             .create_graphics_pipelines = try loadDeviceRequired(
                 get_device_proc_addr,
                 handle,
@@ -6262,6 +6299,18 @@ fn testCmdEndTransformFeedback(
     test_end_transform_feedback_count += 1;
 }
 
+fn testDeviceFaultInfo(
+    _: raw.VkDevice,
+    counts: [*c]raw.VkDeviceFaultCountsEXT,
+    info: [*c]raw.VkDeviceFaultInfoEXT,
+) callconv(.c) raw.VkResult {
+    counts.*.addressInfoCount = 0;
+    counts.*.vendorInfoCount = 0;
+    counts.*.vendorBinarySize = 0;
+    if (info != null) @memcpy(info.*.description[0..11], "device lost");
+    return raw.VK_SUCCESS;
+}
+
 fn testDestroySwapchain(
     _: raw.VkDevice,
     _: raw.VkSwapchainKHR,
@@ -6681,6 +6730,11 @@ fn testDevice() Device {
             .get_deferred_operation_max_concurrency_khr = null,
             .get_deferred_operation_result_khr = null,
             .deferred_operation_join_khr = null,
+            .get_device_fault_info_ext = null,
+            .create_private_data_slot = null,
+            .destroy_private_data_slot = null,
+            .set_private_data = null,
+            .get_private_data = null,
             .create_graphics_pipelines = testFunction(raw.PFN_vkCreateGraphicsPipelines),
             .create_compute_pipelines = testFunction(raw.PFN_vkCreateComputePipelines),
             .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
@@ -8167,6 +8221,7 @@ test "every wrapped Vulkan object implements typed debug naming" {
         pipelines.Pipeline,
         pipeline_tools.Cache,
         pipeline_tools.DeferredOperation,
+        tooling.PrivateDataSlot,
         render_passes.RenderPass,
         render_passes.Framebuffer,
         synchronization.Event,
@@ -8223,6 +8278,17 @@ test "conditional rendering and transform feedback scopes end once" {
     try std.testing.expectEqual(@as(usize, 1), test_end_conditional_count);
     try std.testing.expectEqual(@as(usize, 1), test_begin_transform_feedback_count);
     try std.testing.expectEqual(@as(usize, 1), test_end_transform_feedback_count);
+}
+
+test "device fault reports remain available after tracked device loss" {
+    var device = testDevice();
+    defer device.deinit();
+    device.dispatch.get_device_fault_info_ext = testDeviceFaultInfo;
+    device._state.markLost();
+    try std.testing.expectEqual(core.DeviceState.Status.lost, device.status());
+    var report = try device.faultReport(std.testing.allocator);
+    defer report.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("device lost", report.description());
 }
 
 test "swapchain acquisition and presentation preserve operation statuses" {

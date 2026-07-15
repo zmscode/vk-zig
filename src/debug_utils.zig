@@ -177,13 +177,13 @@ pub const Object = struct {
     pub fn validateParent(
         object: Object,
         device_handle: core.NonNullHandle(raw.VkDevice),
-        instance_handle: InstanceHandle,
+        instance_handle: raw.VkInstance,
     ) core.Error!void {
         if (object._device_handle) |owner| {
             if (owner != device_handle) return error.InvalidHandle;
         }
         if (object._instance_handle) |owner| {
-            if (owner != instance_handle) return error.InvalidHandle;
+            if (owner != (instance_handle orelse return error.InvalidHandle)) return error.InvalidHandle;
         }
     }
 };
