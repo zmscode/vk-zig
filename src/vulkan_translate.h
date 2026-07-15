@@ -2,7 +2,9 @@
 #define VK_ZIG_TRANSLATE_H_
 
 #define VK_NO_PROTOTYPES 1
+#define VK_ENABLE_BETA_EXTENSIONS 1
 #include <vulkan/vulkan_core.h>
+#include <vulkan/vulkan_beta.h>
 
 #if defined(VK_ZIG_PLATFORM_METAL)
 #include <vulkan/vulkan_metal.h>

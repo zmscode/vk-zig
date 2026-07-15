@@ -24,6 +24,10 @@ modules so changes do not accumulate in one file:
 - `mesh_shader.zig`: EXT/NV mesh-task limits and direct/indirect recording.
 - `fragment_shading_rate.zig`: KHR/NV rates, images, palettes, combiners, and recording.
 - `ray_tracing.zig`: KHR acceleration structures, ray pipelines, shader-binding tables, tracing, and isolated opacity micromaps/NV compatibility.
+- `shader_object.zig`: EXT shader-object ownership, binaries, and stage binding.
+- `descriptor_buffer.zig`: EXT descriptor encoding, buffer binding, offsets, and opaque capture data.
+- `generated_commands.zig`: EXT indirect-command layouts, execution sets, preprocess requirements, and recording, with the NV contract isolated.
+- `execution_graph.zig`: provisional AMDX execution-graph pipelines, nodes, scratch memory, and dispatch.
 - `debug_utils.zig`: typed validation messages, callbacks, labels, and messengers.
 
 Generated raw declarations and typed Vulkan vocabulary remain separate build

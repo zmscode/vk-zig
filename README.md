@@ -656,6 +656,48 @@ try device.updateDescriptorSets(&.{.{
 Call `descriptorSetLayoutSupport` before creation when variable descriptor limits matter. A pool
 reset invalidates all borrowed sets; stale-set use returns `InactiveObject` in every build mode.
 
+Alternative descriptor, pipeline, and dispatch models are independent domain modules. Query each
+family's properties before device creation, enable its generated feature node and extension, then
+load only the context the application uses:
+
+```zig
+const shader_properties = try physical_device.shaderObjectProperties();
+const descriptor_properties = try physical_device.descriptorBufferProperties();
+const generated_properties = try physical_device.generatedCommandsProperties();
+
+const shader_objects = try device.shaderObjectContext();
+const descriptor_buffers = try device.descriptorBufferContext(descriptor_properties);
+const generated = try device.generatedCommandsContext(generated_properties);
+```
+
+`vk.shader_objects` creates owned shader objects from SPIR-V or captured binary bytes, returns
+binary data through allocating and caller-storage forms, and binds typed stage/shader pairs. An
+explicit `null` shader unbinds that stage. Shader stages must match their objects.
+
+`vk.descriptor_buffers` queries descriptor-set-layout sizes and binding offsets, encodes tagged
+sampler/image/buffer/address data into property-sized byte storage, binds typed descriptor-buffer
+addresses, sets aligned per-set offsets, and captures opaque replay data for buffers, images,
+views, samplers, and KHR acceleration structures. The data tag selects the Vulkan union member;
+applications never construct `VkDescriptorGetInfoEXT`.
+
+`vk.generated_commands` owns EXT indirect layouts and pipeline- or shader-object execution sets.
+Its token union prevents execution-set, push-constant, vertex/index-buffer, draw, dispatch, mesh,
+and trace tokens from being interchanged. `memoryRequirements`, `preprocess`, and `execute` use
+typed layouts, command buffers, device addresses, and sizes. The older, incompatible NV contract
+is intentionally isolated at `vk.generated_commands.nv` rather than sharing EXT handle types.
+
+Execution graphs are provisional Vulkan functionality and are exposed separately at
+`vk.execution_graphs`. Query `executionGraphProperties`, load `executionGraphContext`, create a
+graph pipeline with per-stage node metadata, bind the resulting `.execution_graph` pipeline,
+query and initialize its scratch range, then use direct, indirect, or indirect-count dispatch.
+Host payload pointers are tagged separately from device addresses. Building vk-zig enables the
+official Khronos beta header so all AMDX declarations and command descriptors remain generated.
+
+Every extension operation returns `error.MissingCommand` when its command was not enabled. Owned
+shader objects, indirect layouts, execution sets, and execution-graph pipelines support normal
+debug naming through `device.setObjectName`, checked `rawHandle` escape hatches, copy-safe owners,
+rollback on failed creation, and idempotent `deinit`.
+
 ```zig
 var command_pool = try device.createCommandPool(.{
     .family_index = graphics_family,

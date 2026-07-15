@@ -156,6 +156,7 @@ pub const BindPoint = enum(raw.VkPipelineBindPoint) {
     graphics = raw.VK_PIPELINE_BIND_POINT_GRAPHICS,
     compute = raw.VK_PIPELINE_BIND_POINT_COMPUTE,
     ray_tracing = raw.VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+    execution_graph = raw.VK_PIPELINE_BIND_POINT_EXECUTION_GRAPH_AMDX,
     _,
 
     pub fn fromRaw(value: raw.VkPipelineBindPoint) BindPoint {

@@ -167,6 +167,14 @@ device's raw command-label methods only for advanced interop paths that cannot u
   `vk.cooperative_math`, or `vk.data_graph`. Obtain the corresponding context from the physical or
   logical device, and keep bound allocations plus borrowed views/pipelines alive through GPU
   completion. A missing vendor extension is `error.MissingCommand`, not a reason to load raw PFNs.
+- Keep modern alternative models in their independent namespaces. Use `vk.shader_objects` for
+  EXT shader creation/binaries/binding, `vk.descriptor_buffers` for descriptor encoding and
+  capture/replay, `vk.generated_commands` for EXT indirect layouts/execution sets/preprocess and
+  execution, and `vk.execution_graphs` for provisional AMDX graph pipelines and dispatch. Query
+  the matching `PhysicalDevice.*Properties` method and pass its result to the device context.
+  Enable the namespace's exported `Features` node and `extension` descriptor. Do not interchange
+  EXT generated-command types with `vk.generated_commands.nv`, pass descriptor bytes of a size
+  other than `Properties.descriptorSize`, or hand-build the extension's raw pointer/count graphs.
 - Define a handler accepting `vk.ext.debug_utils.Message`, construct it with
   `MessengerConfig.fromHandler`, and pass it as `InstanceOptions.debug_messenger`. This path owns
   the C trampoline, automatically enables `VK_EXT_debug_utils`, chains the creation callback, and

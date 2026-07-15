@@ -131,6 +131,9 @@ pub const ObjectType = enum(u32) {
     optical_flow_session = raw.VK_OBJECT_TYPE_OPTICAL_FLOW_SESSION_NV,
     acceleration_structure = raw.VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR,
     micromap = raw.VK_OBJECT_TYPE_MICROMAP_EXT,
+    shader = raw.VK_OBJECT_TYPE_SHADER_EXT,
+    indirect_commands_layout = raw.VK_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_EXT,
+    indirect_execution_set = raw.VK_OBJECT_TYPE_INDIRECT_EXECUTION_SET_EXT,
     _,
 
     fn fromRaw(value: raw.VkObjectType) ObjectType {

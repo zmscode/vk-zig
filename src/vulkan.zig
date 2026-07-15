@@ -40,6 +40,10 @@ pub const video = @import("video.zig");
 pub const mesh_shader = @import("mesh_shader.zig");
 pub const fragment_shading_rate = @import("fragment_shading_rate.zig");
 pub const ray_tracing = @import("ray_tracing.zig");
+pub const shader_objects = @import("shader_object.zig");
+pub const descriptor_buffers = @import("descriptor_buffer.zig");
+pub const generated_commands = @import("generated_commands.zig");
+pub const execution_graphs = @import("execution_graph.zig");
 
 /// Deprecated short name retained while applications migrate to `synchronization`.
 pub const sync = synchronization;
@@ -1787,6 +1791,38 @@ pub const PhysicalDevice = struct {
         return .fromRaw(acceleration_properties, pipeline_properties);
     }
 
+    pub fn shaderObjectProperties(device: *const PhysicalDevice) Error!shader_objects.Properties {
+        const get = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var output: raw.VkPhysicalDeviceShaderObjectPropertiesEXT = .{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_PROPERTIES_EXT };
+        var root: raw.VkPhysicalDeviceProperties2 = .{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &output };
+        get(device._handle, &root);
+        return .fromRaw(output);
+    }
+
+    pub fn descriptorBufferProperties(device: *const PhysicalDevice) Error!descriptor_buffers.Properties {
+        const get = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var output: raw.VkPhysicalDeviceDescriptorBufferPropertiesEXT = .{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT };
+        var root: raw.VkPhysicalDeviceProperties2 = .{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &output };
+        get(device._handle, &root);
+        return .fromRaw(output);
+    }
+
+    pub fn generatedCommandsProperties(device: *const PhysicalDevice) Error!generated_commands.Properties {
+        const get = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var output: raw.VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT = .{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_PROPERTIES_EXT };
+        var root: raw.VkPhysicalDeviceProperties2 = .{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &output };
+        get(device._handle, &root);
+        return .fromRaw(output);
+    }
+
+    pub fn executionGraphProperties(device: *const PhysicalDevice) Error!execution_graphs.Properties {
+        const get = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var output: raw.VkPhysicalDeviceShaderEnqueuePropertiesAMDX = .{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ENQUEUE_PROPERTIES_AMDX };
+        var root: raw.VkPhysicalDeviceProperties2 = .{ .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &output };
+        get(device._handle, &root);
+        return .fromRaw(output);
+    }
+
     pub fn shadingRateImagePropertiesNv(device: *const PhysicalDevice) Error!fragment_shading_rate.ImagePropertiesNv {
         const get_properties = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
         var extension_properties: raw.VkPhysicalDeviceShadingRateImagePropertiesNV = .{
@@ -3371,6 +3407,22 @@ pub const Device = struct {
                 ._write_properties_command = try device.load(command.cmd_write_micromaps_properties_ext),
             },
         };
+    }
+
+    pub fn shaderObjectContext(device: *const Device) Error!shader_objects.Context {
+        return .{ ._device = try device.dispatchHandle(), ._state = &device._state, ._allocation_callbacks = device.allocation_callbacks, ._create = try device.load(command.create_shaders_ext), ._destroy = try device.load(command.destroy_shader_ext), ._binary = try device.load(command.get_shader_binary_data_ext), ._bind = try device.load(command.cmd_bind_shaders_ext) };
+    }
+
+    pub fn descriptorBufferContext(device: *const Device, properties: descriptor_buffers.Properties) Error!descriptor_buffers.Context {
+        return .{ ._device = try device.dispatchHandle(), ._state = &device._state, .properties = properties, ._layout_size = try device.load(command.get_descriptor_set_layout_size_ext), ._binding_offset = try device.load(command.get_descriptor_set_layout_binding_offset_ext), ._get = try device.load(command.get_descriptor_ext), ._bind = try device.load(command.cmd_bind_descriptor_buffers_ext), ._set_offsets = try device.load(command.cmd_set_descriptor_buffer_offsets_ext), ._bind_samplers = try device.load(command.cmd_bind_descriptor_buffer_embedded_samplers_ext), ._capture_buffer = try device.load(command.get_buffer_opaque_capture_descriptor_data_ext), ._capture_image = try device.load(command.get_image_opaque_capture_descriptor_data_ext), ._capture_view = try device.load(command.get_image_view_opaque_capture_descriptor_data_ext), ._capture_sampler = try device.load(command.get_sampler_opaque_capture_descriptor_data_ext), ._capture_structure = try device.load(command.get_acceleration_structure_opaque_capture_descriptor_data_ext) };
+    }
+
+    pub fn generatedCommandsContext(device: *const Device, properties: generated_commands.Properties) Error!generated_commands.Context {
+        return .{ ._device = try device.dispatchHandle(), ._state = &device._state, ._allocation_callbacks = device.allocation_callbacks, .properties = properties, ._requirements = try device.load(command.get_generated_commands_memory_requirements_ext), ._preprocess = try device.load(command.cmd_preprocess_generated_commands_ext), ._execute = try device.load(command.cmd_execute_generated_commands_ext), ._create_layout = try device.load(command.create_indirect_commands_layout_ext), ._destroy_layout = try device.load(command.destroy_indirect_commands_layout_ext), ._create_set = try device.load(command.create_indirect_execution_set_ext), ._destroy_set = try device.load(command.destroy_indirect_execution_set_ext), ._update_pipelines = try device.load(command.update_indirect_execution_set_pipeline_ext), ._update_shaders = try device.load(command.update_indirect_execution_set_shader_ext) };
+    }
+
+    pub fn executionGraphContext(device: *const Device, properties: execution_graphs.Properties) Error!execution_graphs.Context {
+        return .{ ._device = try device.dispatchHandle(), ._state = &device._state, ._allocation_callbacks = device.allocation_callbacks, .properties = properties, ._create = try device.load(command.create_execution_graph_pipelines_amdx), ._destroy = device.dispatch.destroy_pipeline, ._scratch = try device.load(command.get_execution_graph_pipeline_scratch_size_amdx), ._node = try device.load(command.get_execution_graph_pipeline_node_index_amdx), ._initialize = try device.load(command.cmd_initialize_graph_scratch_memory_amdx), ._dispatch = try device.load(command.cmd_dispatch_graph_amdx), ._dispatch_indirect = try device.load(command.cmd_dispatch_graph_indirect_amdx), ._dispatch_indirect_count = try device.load(command.cmd_dispatch_graph_indirect_count_amdx) };
     }
 
     /// Loads a dynamic command name without verifying that it matches the PFN type.
