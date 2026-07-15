@@ -4,6 +4,7 @@ const types = @import("vulkan_types");
 const core = @import("core.zig");
 const debug_utils = @import("debug_utils.zig");
 const memory = @import("memory.zig");
+const device_group = @import("device_group.zig");
 
 const CommandFunction = command.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -132,6 +133,7 @@ pub const Image = struct {
     _owner: core.Owner,
     _device_handle: DeviceHandle,
     _device_state: ?core.DeviceState = null,
+    _device_group_size: u32 = 1,
     format: types.Format,
     extent: types.Extent3D,
     samples: types.SampleCountBit,
@@ -255,8 +257,19 @@ pub const Image = struct {
         allocation: *const memory.Allocation,
         offset: core.DeviceOffset,
     ) core.Error!void {
+        return image.bindMemoryForDeviceGroup(allocation, offset, .{});
+    }
+
+    pub fn bindMemoryForDeviceGroup(
+        image: *Image,
+        allocation: *const memory.Allocation,
+        offset: core.DeviceOffset,
+        options: device_group.ImageBindingOptions,
+    ) core.Error!void {
         if (image.bound_memory != null) return error.InvalidOptions;
         if (allocation._device_handle != image._device_handle) return error.InvalidHandle;
+        try device_group.validateDeviceIndices(options.device_indices, image._device_group_size);
+        try device_group.validateSplitRegions(options.split_regions, image._device_group_size);
         const requirements = try image.memoryRequirements();
         if (!requirements.supportsMemoryType(allocation.memory_type_index)) return error.InvalidOptions;
         const offset_bytes = offset.bytes();
@@ -271,14 +284,25 @@ pub const Image = struct {
         const allocation_handle = (try allocation.rawHandle()) orelse return error.InvalidHandle;
         const image_handle = try image.rawHandle();
         if (image.dispatch.bind_image_memory2) |bind2| {
+            var raw_regions: [device_group.device_count_max]raw.VkRect2D = undefined;
+            for (options.split_regions, raw_regions[0..options.split_regions.len]) |region, *destination| destination.* = region.toRaw();
+            var group_info: raw.VkBindImageMemoryDeviceGroupInfo = .{
+                .sType = raw.VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO,
+                .deviceIndexCount = @intCast(options.device_indices.len),
+                .pDeviceIndices = if (options.device_indices.len == 0) null else options.device_indices.ptr,
+                .splitInstanceBindRegionCount = @intCast(options.split_regions.len),
+                .pSplitInstanceBindRegions = if (options.split_regions.len == 0) null else raw_regions[0..options.split_regions.len].ptr,
+            };
             const info: raw.VkBindImageMemoryInfo = .{
                 .sType = raw.VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
+                .pNext = if (options.device_indices.len == 0 and options.split_regions.len == 0) null else &group_info,
                 .image = image_handle,
                 .memory = allocation_handle,
                 .memoryOffset = offset_bytes,
             };
             try core.checkSuccessOptional(if (image._device_state) |*state| state else null, bind2(image._device_handle, 1, &info));
         } else {
+            if (options.device_indices.len != 0 or options.split_regions.len != 0) return error.MissingCommand;
             try core.checkSuccessOptional(if (image._device_state) |*state| state else null, image.dispatch.bind_image_memory(
                 image._device_handle,
                 image_handle,

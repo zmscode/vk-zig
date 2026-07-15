@@ -6,6 +6,7 @@ const commands = @import("command_buffer.zig");
 const synchronization = @import("synchronization.zig");
 const presentation = @import("presentation.zig");
 const debug_utils = @import("debug_utils.zig");
+const device_group = @import("device_group.zig");
 
 const CommandFunction = command.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -34,7 +35,7 @@ pub const SemaphoreSubmit = struct {
 
 pub const CommandBufferSubmit = struct {
     command_buffer: *commands.Buffer,
-    device_mask: u32 = 1,
+    device_mask: device_group.Mask = .primary,
 };
 
 pub const Submit2Options = struct {
@@ -82,6 +83,7 @@ pub const Queue = struct {
     _handle: QueueHandle,
     _device_handle: DeviceHandle,
     _device_state: ?*core.DeviceState = null,
+    _device_group_size: u32 = 1,
     queue_submit: CommandFunction(raw.PFN_vkQueueSubmit),
     queue_submit2: ?CommandFunction(raw.PFN_vkQueueSubmit2),
     queue_wait_idle: CommandFunction(raw.PFN_vkQueueWaitIdle),
@@ -191,6 +193,7 @@ pub const Queue = struct {
                 return error.CountOverflow;
             }
             for (submit_options.waits, 0..) |wait, index| {
+                if (wait.device_index >= queue._device_group_size) return error.InvalidOptions;
                 if (wait.semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
                 if (wait.semaphore.kind == .binary and wait.value != 0) return error.InvalidOptions;
                 const handle = try wait.semaphore.rawHandle();
@@ -208,7 +211,8 @@ pub const Queue = struct {
             for (submit_options.command_buffers, 0..) |submission, index| {
                 const buffer = submission.command_buffer;
                 if (buffer._device_handle != queue._device_handle) return error.InvalidHandle;
-                if (submission.device_mask == 0 or !try buffer.canSubmit()) return error.InvalidOptions;
+                try submission.device_mask.validate(queue._device_group_size);
+                if (!try buffer.canSubmit()) return error.InvalidOptions;
                 const handle = try buffer.rawHandle();
                 for (options.submits[0..submit_index]) |previous_submit| {
                     for (previous_submit.command_buffers) |previous| {
@@ -221,10 +225,11 @@ pub const Queue = struct {
                 command_infos[submit_index][index] = .{
                     .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
                     .commandBuffer = handle,
-                    .deviceMask = submission.device_mask,
+                    .deviceMask = submission.device_mask.bits,
                 };
             }
             for (submit_options.signals, 0..) |signal, index| {
+                if (signal.device_index >= queue._device_group_size) return error.InvalidOptions;
                 if (signal.semaphore._device_handle != queue._device_handle) return error.InvalidHandle;
                 if (signal.semaphore.kind == .binary and signal.value != 0) return error.InvalidOptions;
                 if (signal.semaphore.kind == .timeline and signal.value == 0) return error.InvalidOptions;
@@ -345,9 +350,20 @@ pub const Queue = struct {
         }
         const swapchain_handle = try options.swapchain.rawHandle();
         const image_index = options.image_index.toRaw();
+        if ((options.device_mask == null) != (options.device_group_mode == null)) return error.InvalidOptions;
+        var group_info: raw.VkDeviceGroupPresentInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR,
+            .pNext = options.next,
+        };
+        if (options.device_mask) |mask| {
+            try mask.validate(queue._device_group_size);
+            group_info.swapchainCount = 1;
+            group_info.pDeviceMasks = &mask.bits;
+            group_info.mode = options.device_group_mode.?.toRaw();
+        }
         const present_info: raw.VkPresentInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .pNext = options.next,
+            .pNext = if (options.device_mask != null) &group_info else options.next,
             .waitSemaphoreCount = @intCast(options.wait_semaphores.len),
             .pWaitSemaphores = if (options.wait_semaphores.len == 0) null else wait_handles[0..options.wait_semaphores.len].ptr,
             .swapchainCount = 1,

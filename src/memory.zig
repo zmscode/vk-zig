@@ -4,6 +4,7 @@ const types = @import("vulkan_types");
 const core = @import("core.zig");
 const command = @import("vulkan_commands");
 const debug_utils = @import("debug_utils.zig");
+const device_group = @import("device_group.zig");
 
 const CommandFunction = command.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -34,6 +35,8 @@ pub const AllocationOptions = struct {
     opaque_capture_address: ?OpaqueCaptureAddress = null,
     /// EXT_memory_priority value in the inclusive 0...1 range.
     priority: ?f32 = null,
+    /// Devices that may access a subset allocation in a logical device group.
+    device_mask: ?device_group.Mask = null,
 };
 
 pub const Requirements = struct {
@@ -370,12 +373,14 @@ pub fn allocate(
     }
     var flags: raw.VkMemoryAllocateFlags = 0;
     if (options.device_address) flags |= raw.VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    if (options.device_mask != null) flags |= raw.VK_MEMORY_ALLOCATE_DEVICE_MASK_BIT;
     if (options.opaque_capture_address != null) {
         flags |= raw.VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
     }
     var flags_info: raw.VkMemoryAllocateFlagsInfo = .{
         .sType = raw.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
         .flags = flags,
+        .deviceMask = if (options.device_mask) |mask| mask.bits else 0,
     };
     var capture_info: raw.VkMemoryOpaqueCaptureAddressAllocateInfo = .{
         .sType = raw.VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO,

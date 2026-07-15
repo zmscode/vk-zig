@@ -6,6 +6,7 @@ const core = @import("core.zig");
 const sync = @import("synchronization.zig");
 const image = @import("image.zig");
 const debug_utils = @import("debug_utils.zig");
+const device_group = @import("device_group.zig");
 
 const CommandFunction = command.FunctionType;
 const InstanceHandle = core.NonNullHandle(raw.VkInstance);
@@ -98,6 +99,7 @@ pub const Options = struct {
     old_swapchain: ?*const Swapchain = null,
     flags: types.SwapchainCreateFlags = .empty,
     next: ?*const anyopaque = null,
+    device_group_modes: ?device_group.PresentModes = null,
 
     pub fn validate(
         options: Options,
@@ -165,6 +167,8 @@ pub const PresentOptions = struct {
     image_index: core.SwapchainImageIndex,
     wait_semaphores: []const *const sync.Semaphore = &.{},
     next: ?*const anyopaque = null,
+    device_mask: ?device_group.Mask = null,
+    device_group_mode: ?device_group.PresentMode = null,
 };
 
 pub const PresentStatus = enum {

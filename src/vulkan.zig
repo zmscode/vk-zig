@@ -7,6 +7,7 @@ pub const registry = @import("registry.zig");
 pub const physical_devices = @import("physical_device.zig");
 pub const feature_chains = @import("feature_chain.zig");
 pub const device_configuration = @import("device.zig");
+pub const device_groups = @import("device_group.zig");
 pub const formats = @import("format.zig");
 pub const memory = @import("memory.zig");
 pub const buffers = @import("buffer.zig");
@@ -1068,6 +1069,55 @@ pub const Instance = struct {
                 else => return err,
             };
             return gpa.realloc(devices, written.len);
+        }
+        return error.EnumerationUnstable;
+    }
+
+    pub fn physicalDeviceGroupCount(instance: *const Instance) Error!u32 {
+        const enumerate = instance.dispatch.enumerate_physical_device_groups orelse return error.MissingCommand;
+        var count: u32 = 0;
+        try checkSuccess(enumerate(try instance.rawHandle(), &count, null));
+        try validateEnumerationCount(count);
+        return count;
+    }
+
+    pub fn physicalDeviceGroupsInto(instance: *const Instance, storage: []PhysicalDeviceGroup) Error![]PhysicalDeviceGroup {
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const enumerate = instance.dispatch.enumerate_physical_device_groups orelse return error.MissingCommand;
+        var properties: [enumeration_item_count_max]raw.VkPhysicalDeviceGroupProperties = undefined;
+        for (properties[0..storage.len]) |*property| property.* = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES,
+        };
+        var count: u32 = @intCast(storage.len);
+        const result = enumerate(try instance.rawHandle(), &count, if (storage.len == 0) null else properties[0..storage.len].ptr);
+        if (result == raw.VK_INCOMPLETE or count > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        const instance_handle = try instance.rawHandle();
+        for (storage[0..count], properties[0..count]) |*destination, source| {
+            if (source.physicalDeviceCount == 0 or source.physicalDeviceCount > device_groups.device_count_max) return error.InvalidProperties;
+            destination.count = source.physicalDeviceCount;
+            destination.subset_allocation = source.subsetAllocation != raw.VK_FALSE;
+            for (source.physicalDevices[0..source.physicalDeviceCount], 0..) |handle, index| destination._members[index] = .{
+                ._handle = handle orelse return error.InvalidHandle,
+                ._instance_handle = instance_handle,
+            };
+        }
+        return storage[0..count];
+    }
+
+    pub fn physicalDeviceGroups(instance: *const Instance, gpa: std.mem.Allocator) (Error || std.mem.Allocator.Error)![]PhysicalDeviceGroup {
+        var groups = try gpa.alloc(PhysicalDeviceGroup, try instance.physicalDeviceGroupCount());
+        errdefer gpa.free(groups);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = instance.physicalDeviceGroupsInto(groups) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try instance.physicalDeviceGroupCount();
+                    groups = try gpa.realloc(groups, if (required > groups.len) required else try nextEnumerationCapacity(required, groups.len));
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(groups, written.len);
         }
         return error.EnumerationUnstable;
     }
@@ -2255,6 +2305,61 @@ pub const PhysicalDevice = struct {
         );
     }
 
+    pub fn deviceGroupPresentRectangleCount(
+        device: *const PhysicalDevice,
+        surface: *const Surface,
+    ) Error!u32 {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        const get_rectangles = device.dispatch.get_physical_device_present_rectangles_khr orelse return error.MissingCommand;
+        var count: u32 = 0;
+        try checkSuccess(get_rectangles(device._handle, try surface.rawHandle(), &count, null));
+        try validateEnumerationCount(count);
+        return count;
+    }
+
+    pub fn deviceGroupPresentRectanglesInto(
+        device: *const PhysicalDevice,
+        surface: *const Surface,
+        storage: []device_groups.PresentRectangle,
+    ) Error![]device_groups.PresentRectangle {
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        if (storage.len > enumeration_item_count_max) return error.CountOverflow;
+        const get_rectangles = device.dispatch.get_physical_device_present_rectangles_khr orelse return error.MissingCommand;
+        var raw_rectangles: [enumeration_item_count_max]raw.VkRect2D = undefined;
+        var count: u32 = @intCast(storage.len);
+        const result = get_rectangles(
+            device._handle,
+            try surface.rawHandle(),
+            &count,
+            if (storage.len == 0) null else raw_rectangles[0..storage.len].ptr,
+        );
+        if (result == raw.VK_INCOMPLETE or count > storage.len) return error.BufferTooSmall;
+        try checkSuccess(result);
+        for (storage[0..count], raw_rectangles[0..count]) |*destination, source| destination.* = .fromRaw(source);
+        return storage[0..count];
+    }
+
+    pub fn deviceGroupPresentRectangles(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+        surface: *const Surface,
+    ) (Error || std.mem.Allocator.Error)![]device_groups.PresentRectangle {
+        var rectangles = try gpa.alloc(device_groups.PresentRectangle, try device.deviceGroupPresentRectangleCount(surface));
+        errdefer gpa.free(rectangles);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = device.deviceGroupPresentRectanglesInto(surface, rectangles) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try device.deviceGroupPresentRectangleCount(surface);
+                    rectangles = try gpa.realloc(rectangles, if (required > rectangles.len) required else try nextEnumerationCapacity(required, rectangles.len));
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(rectangles, written.len);
+        }
+        return error.EnumerationUnstable;
+    }
+
     pub fn findMemoryTypeIndex(
         device: *const PhysicalDevice,
         options: MemoryTypeOptions,
@@ -2459,6 +2564,7 @@ pub const PhysicalDevice = struct {
         const limits = physical_device.properties().limits;
         device._max_push_constant_size = limits.max_push_constants_size;
         device._max_sampler_anisotropy = limits.max_sampler_anisotropy;
+        device._device_group_size = if (options.device_group.len == 0) 1 else @intCast(options.device_group.len);
         return device;
     }
 
@@ -2644,6 +2750,14 @@ pub const selectMemoryTypeIndexRaw = memory.selectTypeIndexRaw;
 
 pub const DeviceQueueOptions = device_configuration.QueueOptions;
 pub const DeviceGroupMember = device_configuration.GroupMember;
+pub const PhysicalDeviceGroup = device_groups.PhysicalGroup;
+pub const DeviceMask = device_groups.Mask;
+pub const PeerMemoryFeatures = device_groups.PeerMemoryFeatures;
+pub const DeviceGroupPresentModes = device_groups.PresentModes;
+pub const DeviceGroupPresentMode = device_groups.PresentMode;
+pub const DeviceGroupPresentCapabilities = device_groups.PresentCapabilities;
+pub const DeviceGroupBufferBindingOptions = device_groups.BufferBindingOptions;
+pub const DeviceGroupImageBindingOptions = device_groups.ImageBindingOptions;
 pub const DeviceOptions = device_configuration.Requirements;
 
 pub const Device = struct {
@@ -2657,6 +2771,7 @@ pub const Device = struct {
     enabled_capabilities: device_configuration.EnabledCapabilities = .{},
     _max_push_constant_size: u32 = 128,
     _max_sampler_anisotropy: f32 = 1,
+    _device_group_size: u32 = 1,
 
     pub fn deinit(device: *Device) void {
         if (!(device._owner.release(device) catch return)) return;
@@ -2716,6 +2831,54 @@ pub const Device = struct {
         return device.enabled_capabilities.supportsCommand(descriptor);
     }
 
+    pub fn deviceGroupSize(device: *const Device) u32 {
+        return device._device_group_size;
+    }
+
+    pub fn peerMemoryFeatures(
+        device: *const Device,
+        heap: MemoryHeapIndex,
+        local_device_index: u32,
+        remote_device_index: u32,
+    ) Error!PeerMemoryFeatures {
+        const get = device.dispatch.get_device_group_peer_memory_features orelse return error.MissingCommand;
+        if (local_device_index >= device._device_group_size or remote_device_index >= device._device_group_size or local_device_index == remote_device_index) return error.InvalidOptions;
+        var flags: raw.VkPeerMemoryFeatureFlags = 0;
+        get(try device.dispatchHandle(), heap.toRaw(), local_device_index, remote_device_index, &flags);
+        return .fromRaw(flags);
+    }
+
+    pub fn deviceGroupPresentCapabilities(device: *const Device) Error!DeviceGroupPresentCapabilities {
+        const get = device.dispatch.get_device_group_present_capabilities_khr orelse return error.MissingCommand;
+        var raw_capabilities: raw.VkDeviceGroupPresentCapabilitiesKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_CAPABILITIES_KHR,
+        };
+        try core.checkSuccessTracked(@constCast(&device._state), get(try device.dispatchHandle(), &raw_capabilities));
+        var result: DeviceGroupPresentCapabilities = .{
+            .masks = undefined,
+            .device_count = device._device_group_size,
+            .modes = .fromRaw(raw_capabilities.modes),
+        };
+        const allowed_mask = (try DeviceMask.all(device._device_group_size)).bits;
+        for (raw_capabilities.presentMask[0..device._device_group_size], 0..) |bits, index| {
+            if (bits & ~allowed_mask != 0) return error.InvalidProperties;
+            result.masks[index] = .{ .bits = bits };
+        }
+        return result;
+    }
+
+    pub fn deviceGroupSurfacePresentModes(device: *const Device, surface: *const Surface) Error!DeviceGroupPresentModes {
+        const get = device.dispatch.get_device_group_surface_present_modes_khr orelse return error.MissingCommand;
+        if (surface._instance_handle != device._instance_handle) return error.InvalidHandle;
+        var modes: raw.VkDeviceGroupPresentModeFlagsKHR = 0;
+        try core.checkSuccessTracked(@constCast(&device._state), get(
+            try device.dispatchHandle(),
+            try surface.rawHandle(),
+            &modes,
+        ));
+        return .fromRaw(modes);
+    }
+
     pub fn queue(
         device: *const Device,
         family_index: QueueFamilyIndex,
@@ -2734,6 +2897,7 @@ pub const Device = struct {
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = device_handle,
             ._device_state = @constCast(&device._state),
+            ._device_group_size = device._device_group_size,
             .queue_submit = device.dispatch.queue_submit,
             .queue_submit2 = device.dispatch.queue_submit2,
             .queue_wait_idle = device.dispatch.queue_wait_idle,
@@ -2798,7 +2962,7 @@ pub const Device = struct {
         options: buffers.Options,
     ) Error!buffers.Buffer {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(buffers.create(
+        var result = withDeviceState(buffers.create(
             device_handle,
             device.allocation_callbacks,
             .{
@@ -2815,6 +2979,8 @@ pub const Device = struct {
             },
             options,
         ) catch |err| return device.recordError(err), device._state);
+        result._device_group_size = device._device_group_size;
+        return result;
     }
 
     pub fn createBufferView(
@@ -2832,6 +2998,7 @@ pub const Device = struct {
         options: memory.AllocationOptions,
     ) Error!memory.Allocation {
         const device_handle = try device.dispatchHandle();
+        if (options.device_mask) |mask| try mask.validate(device._device_group_size);
         if (options.priority != null and !device.supportsExtension(extension.ext_memory_priority)) return error.ExtensionNotPresent;
         return withDeviceState(memory.allocate(
             device_handle,
@@ -3365,7 +3532,7 @@ pub const Device = struct {
 
     pub fn createImage(device: *const Device, options: images.Options) Error!images.Image {
         const device_handle = try device.dispatchHandle();
-        return withDeviceState(images.create(device_handle, device.allocation_callbacks, .{
+        var result = withDeviceState(images.create(device_handle, device.allocation_callbacks, .{
             .create_image = device.dispatch.create_image,
             .destroy_image = device.dispatch.destroy_image,
             .get_image_memory_requirements = device.dispatch.get_image_memory_requirements,
@@ -3380,6 +3547,8 @@ pub const Device = struct {
             .copy_image_to_image = device.dispatch.copy_image_to_image,
             .transition_layout = device.dispatch.transition_image_layout,
         }, options) catch |err| return device.recordError(err), device._state);
+        result._device_group_size = device._device_group_size;
+        return result;
     }
 
     pub fn createSemaphore(
@@ -3668,6 +3837,7 @@ pub const Device = struct {
             ._owner = try .init(&handle),
             ._device_handle = device_handle,
             ._device_state = device._state,
+            ._device_group_size = device._device_group_size,
             .buffers_can_reset = options.flags.contains(.reset_command_buffer),
             .allocation_callbacks = device.allocation_callbacks,
             .destroy_command_pool = device.dispatch.destroy_command_pool,
@@ -3745,6 +3915,7 @@ pub const Device = struct {
             .cmd_end_transform_feedback_ext = device.dispatch.cmd_end_transform_feedback_ext,
             .cmd_begin_video_coding_khr = device.dispatch.cmd_begin_video_coding_khr,
             .cmd_end_video_coding_khr = device.dispatch.cmd_end_video_coding_khr,
+            .cmd_set_device_mask = device.dispatch.cmd_set_device_mask,
         };
     }
 
@@ -3776,9 +3947,17 @@ pub const Device = struct {
         for (options.queue_family_indices, queue_family_indices_raw[0..options.queue_family_indices.len]) |family_index, *raw_index| {
             raw_index.* = family_index.toRaw();
         }
+        var group_info: raw.VkDeviceGroupSwapchainCreateInfoKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_DEVICE_GROUP_SWAPCHAIN_CREATE_INFO_KHR,
+            .pNext = options.next,
+        };
+        if (options.device_group_modes) |modes| {
+            if (device._device_group_size == 1 or modes.toRaw() == 0) return error.InvalidOptions;
+            group_info.modes = modes.toRaw();
+        }
         const create_info: raw.VkSwapchainCreateInfoKHR = .{
             .sType = raw.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-            .pNext = options.next,
+            .pNext = if (options.device_group_modes != null) &group_info else options.next,
             .flags = options.flags.toRaw(),
             .surface = try options.surface.rawHandle(),
             .minImageCount = options.min_image_count,
@@ -3911,6 +4090,7 @@ const InstanceDispatch = struct {
     get_device_proc_addr: CommandFunction(raw.PFN_vkGetDeviceProcAddr),
     destroy_instance: CommandFunction(raw.PFN_vkDestroyInstance),
     enumerate_physical_devices: CommandFunction(raw.PFN_vkEnumeratePhysicalDevices),
+    enumerate_physical_device_groups: ?CommandFunction(raw.PFN_vkEnumeratePhysicalDeviceGroups),
     get_physical_device_properties: CommandFunction(raw.PFN_vkGetPhysicalDeviceProperties),
     get_physical_device_properties2: ?CommandFunction(raw.PFN_vkGetPhysicalDeviceProperties2),
     get_physical_device_format_properties: CommandFunction(
@@ -3967,6 +4147,7 @@ const InstanceDispatch = struct {
     get_physical_device_surface_present_modes_khr: ?CommandFunction(
         raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR,
     ),
+    get_physical_device_present_rectangles_khr: ?CommandFunction(raw.PFN_vkGetPhysicalDevicePresentRectanglesKHR),
     create_device: CommandFunction(raw.PFN_vkCreateDevice),
 
     fn init(
@@ -3992,6 +4173,12 @@ const InstanceDispatch = struct {
                 handle,
                 raw.PFN_vkEnumeratePhysicalDevices,
                 "vkEnumeratePhysicalDevices",
+            ),
+            .enumerate_physical_device_groups = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.enumerate_physical_device_groups,
+                .instance,
             ),
             .get_physical_device_properties = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -4124,6 +4311,12 @@ const InstanceDispatch = struct {
                 handle,
                 raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR,
                 "vkGetPhysicalDeviceSurfacePresentModesKHR",
+            ),
+            .get_physical_device_present_rectangles_khr = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_present_rectangles_khr,
+                .instance,
             ),
             .create_device = try loadInstanceRequired(
                 get_instance_proc_addr,
@@ -4349,6 +4542,10 @@ const DeviceDispatch = struct {
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
     cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
     cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
+    get_device_group_peer_memory_features: ?CommandFunction(raw.PFN_vkGetDeviceGroupPeerMemoryFeatures),
+    cmd_set_device_mask: ?CommandFunction(raw.PFN_vkCmdSetDeviceMask),
+    get_device_group_present_capabilities_khr: ?CommandFunction(raw.PFN_vkGetDeviceGroupPresentCapabilitiesKHR),
+    get_device_group_surface_present_modes_khr: ?CommandFunction(raw.PFN_vkGetDeviceGroupSurfacePresentModesKHR),
 
     fn init(
         get_device_proc_addr: CommandFunction(raw.PFN_vkGetDeviceProcAddr),
@@ -5138,6 +5335,10 @@ const DeviceDispatch = struct {
             ),
             .cmd_begin_video_coding_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_begin_video_coding_khr),
             .cmd_end_video_coding_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_end_video_coding_khr),
+            .get_device_group_peer_memory_features = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_device_group_peer_memory_features),
+            .cmd_set_device_mask = loadDeviceDescriptor(get_device_proc_addr, handle, command.cmd_set_device_mask),
+            .get_device_group_present_capabilities_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_device_group_present_capabilities_khr),
+            .get_device_group_surface_present_modes_khr = loadDeviceDescriptor(get_device_proc_addr, handle, command.get_device_group_surface_present_modes_khr),
         };
     }
 };
@@ -6919,6 +7120,81 @@ fn testPresentModes(
     return raw.VK_SUCCESS;
 }
 
+fn testEnumeratePhysicalDeviceGroups(
+    _: raw.VkInstance,
+    count: [*c]u32,
+    groups: [*c]raw.VkPhysicalDeviceGroupProperties,
+) callconv(.c) raw.VkResult {
+    if (groups == null) {
+        count.* = 2;
+        return raw.VK_SUCCESS;
+    }
+    if (count.* < 2) {
+        count.* = 2;
+        return raw.VK_INCOMPLETE;
+    }
+    groups[0].physicalDeviceCount = 1;
+    groups[0].physicalDevices[0] = testHandle(raw.VkPhysicalDevice, 0x4100);
+    groups[0].subsetAllocation = raw.VK_FALSE;
+    groups[1].physicalDeviceCount = 2;
+    groups[1].physicalDevices[0] = testHandle(raw.VkPhysicalDevice, 0x4200);
+    groups[1].physicalDevices[1] = testHandle(raw.VkPhysicalDevice, 0x4300);
+    groups[1].subsetAllocation = raw.VK_TRUE;
+    count.* = 2;
+    return raw.VK_SUCCESS;
+}
+
+fn testDeviceGroupPeerMemoryFeatures(
+    _: raw.VkDevice,
+    _: u32,
+    _: u32,
+    _: u32,
+    features: [*c]raw.VkPeerMemoryFeatureFlags,
+) callconv(.c) void {
+    features.* = raw.VK_PEER_MEMORY_FEATURE_COPY_SRC_BIT |
+        raw.VK_PEER_MEMORY_FEATURE_GENERIC_DST_BIT;
+}
+
+fn testDeviceGroupPresentCapabilities(
+    _: raw.VkDevice,
+    output: [*c]raw.VkDeviceGroupPresentCapabilitiesKHR,
+) callconv(.c) raw.VkResult {
+    output[0].presentMask[0] = 3;
+    output[0].presentMask[1] = 3;
+    output[0].modes = raw.VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR |
+        raw.VK_DEVICE_GROUP_PRESENT_MODE_REMOTE_BIT_KHR;
+    return raw.VK_SUCCESS;
+}
+
+fn testDeviceGroupSurfacePresentModes(
+    _: raw.VkDevice,
+    _: raw.VkSurfaceKHR,
+    modes: [*c]raw.VkDeviceGroupPresentModeFlagsKHR,
+) callconv(.c) raw.VkResult {
+    modes.* = raw.VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_MULTI_DEVICE_BIT_KHR;
+    return raw.VK_SUCCESS;
+}
+
+fn testPhysicalDevicePresentRectangles(
+    _: raw.VkPhysicalDevice,
+    _: raw.VkSurfaceKHR,
+    count: [*c]u32,
+    rectangles: [*c]raw.VkRect2D,
+) callconv(.c) raw.VkResult {
+    if (rectangles == null) {
+        count.* = 2;
+        return raw.VK_SUCCESS;
+    }
+    if (count.* < 2) {
+        count.* = 2;
+        return raw.VK_INCOMPLETE;
+    }
+    rectangles[0] = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 320, .height = 480 } };
+    rectangles[1] = .{ .offset = .{ .x = 320, .y = 0 }, .extent = .{ .width = 320, .height = 480 } };
+    count.* = 2;
+    return raw.VK_SUCCESS;
+}
+
 fn testSetObjectName(
     _: raw.VkDevice,
     name_info: [*c]const raw.VkDebugUtilsObjectNameInfoEXT,
@@ -7022,6 +7298,7 @@ fn testInstance() Instance {
             .get_device_proc_addr = testFunction(raw.PFN_vkGetDeviceProcAddr),
             .destroy_instance = testDestroyInstance,
             .enumerate_physical_devices = testFunction(raw.PFN_vkEnumeratePhysicalDevices),
+            .enumerate_physical_device_groups = null,
             .get_physical_device_properties = testFunction(raw.PFN_vkGetPhysicalDeviceProperties),
             .get_physical_device_properties2 = null,
             .get_physical_device_format_properties = testGetPhysicalDeviceFormatProperties,
@@ -7054,6 +7331,7 @@ fn testInstance() Instance {
             .get_physical_device_surface_present_modes_khr = testFunction(
                 raw.PFN_vkGetPhysicalDeviceSurfacePresentModesKHR,
             ),
+            .get_physical_device_present_rectangles_khr = null,
             .create_device = testFunction(raw.PFN_vkCreateDevice),
         },
     };
@@ -7278,6 +7556,10 @@ fn testDevice() Device {
             .cmd_end_transform_feedback_ext = null,
             .cmd_begin_video_coding_khr = null,
             .cmd_end_video_coding_khr = null,
+            .get_device_group_peer_memory_features = null,
+            .cmd_set_device_mask = null,
+            .get_device_group_present_capabilities_khr = null,
+            .get_device_group_surface_present_modes_khr = null,
         },
     };
 }
@@ -8058,6 +8340,7 @@ test "submit2 assembles typed timeline and device-group submissions" {
     var queue: Queue = .{
         ._handle = testHandle(raw.VkQueue, 0x2100),
         ._device_handle = device._handle.?,
+        ._device_group_size = 2,
         .queue_submit = testQueueSubmit,
         .queue_submit2 = testQueueSubmit2,
         .queue_wait_idle = testFunction(raw.PFN_vkQueueWaitIdle),
@@ -8084,7 +8367,7 @@ test "submit2 assembles typed timeline and device-group submissions" {
             }},
             .command_buffers = &.{.{
                 .command_buffer = &command_buffer,
-                .device_mask = 3,
+                .device_mask = .{ .bits = 3 },
             }},
             .signals = &.{.{
                 .semaphore = &timeline,
@@ -8155,7 +8438,7 @@ test "submit2 rejects invalid handles, values, masks, and duplicates before disp
     try std.testing.expectError(error.InvalidOptions, queue.submit2(.{
         .submits = &.{.{ .command_buffers = &.{.{
             .command_buffer = &command_buffer,
-            .device_mask = 0,
+            .device_mask = .{ .bits = 0 },
         }} }},
     }));
     try std.testing.expectError(error.InvalidOptions, queue.submit2(.{
@@ -9769,4 +10052,53 @@ test "physical device format queries preserve support and typed capabilities" {
         error.MissingCommand,
         missing.sparseImageFormatPropertyCount(sparse_options),
     );
+}
+
+test "device groups expose typed discovery peer memory and presentation" {
+    var instance = testInstance();
+    defer instance.deinit();
+    instance.dispatch.enumerate_physical_device_groups = testEnumeratePhysicalDeviceGroups;
+    instance.dispatch.get_physical_device_present_rectangles_khr = testPhysicalDevicePresentRectangles;
+
+    const groups = try instance.physicalDeviceGroups(std.testing.allocator);
+    defer std.testing.allocator.free(groups);
+    try std.testing.expectEqual(@as(usize, 2), groups.len);
+    try std.testing.expectEqual(@as(usize, 1), groups[0].members().len);
+    try std.testing.expect(!groups[0].subset_allocation);
+    try std.testing.expectEqual(@as(usize, 2), groups[1].members().len);
+    try std.testing.expect(groups[1].subset_allocation);
+    try std.testing.expectEqual(@as(u32, 3), (try groups[1].mask()).bits);
+
+    var surface = try instance.adoptSurface(testHandle(raw.VkSurfaceKHR, 0x3000), null);
+    defer surface.deinit();
+    const physical_device: PhysicalDevice = .{
+        ._handle = testHandle(raw.VkPhysicalDevice, 0x4200),
+        ._instance_handle = testHandle(raw.VkInstance, 0x1000),
+        .dispatch = instance.dispatch,
+    };
+    const rectangles = try physical_device.deviceGroupPresentRectangles(std.testing.allocator, &surface);
+    defer std.testing.allocator.free(rectangles);
+    try std.testing.expectEqual(@as(usize, 2), rectangles.len);
+    try std.testing.expectEqual(@as(i32, 320), rectangles[1].offset.x);
+
+    var device = testDevice();
+    defer device.deinit();
+    device._device_group_size = 2;
+    device.dispatch.get_device_group_peer_memory_features = testDeviceGroupPeerMemoryFeatures;
+    device.dispatch.get_device_group_present_capabilities_khr = testDeviceGroupPresentCapabilities;
+    device.dispatch.get_device_group_surface_present_modes_khr = testDeviceGroupSurfacePresentModes;
+
+    const peer = try device.peerMemoryFeatures(.fromRaw(0), 0, 1);
+    try std.testing.expect(peer.copy_source);
+    try std.testing.expect(peer.generic_destination);
+    try std.testing.expect(!peer.copy_destination);
+    try std.testing.expectError(error.InvalidOptions, device.peerMemoryFeatures(.fromRaw(0), 0, 2));
+
+    const present_capabilities = try device.deviceGroupPresentCapabilities();
+    try std.testing.expectEqual(@as(usize, 2), present_capabilities.deviceMasks().len);
+    try std.testing.expectEqual(@as(u32, 3), present_capabilities.deviceMasks()[0].bits);
+    try std.testing.expect(present_capabilities.modes.local);
+    try std.testing.expect(present_capabilities.modes.remote);
+    const present_modes = try device.deviceGroupSurfacePresentModes(&surface);
+    try std.testing.expect(present_modes.local_multi_device);
 }

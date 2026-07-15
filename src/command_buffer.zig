@@ -14,6 +14,7 @@ const sampler = @import("sampler.zig");
 const pipeline = @import("pipeline.zig");
 const descriptor = @import("descriptor.zig");
 const video = @import("video.zig");
+const device_group = @import("device_group.zig");
 
 const CommandFunction = commands.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -37,6 +38,7 @@ pub const SecondaryInheritance = struct {
 pub const BeginOptions = struct {
     flags: types.CommandBufferUsageFlags = .empty,
     inheritance: ?SecondaryInheritance = null,
+    device_mask: ?device_group.Mask = null,
 };
 
 pub const ImageBarrierOptions = struct {
@@ -232,6 +234,7 @@ pub const Buffer = struct {
     conditional_rendering_active: bool = false,
     transform_feedback_active: bool = false,
     video_coding_active: bool = false,
+    _device_group_size: u32 = 1,
     begin_command_buffer: CommandFunction(raw.PFN_vkBeginCommandBuffer),
     end_command_buffer: CommandFunction(raw.PFN_vkEndCommandBuffer),
     reset_command_buffer: CommandFunction(raw.PFN_vkResetCommandBuffer),
@@ -303,6 +306,7 @@ pub const Buffer = struct {
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
     cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
     cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
+    cmd_set_device_mask: ?CommandFunction(raw.PFN_vkCmdSetDeviceMask),
 
     fn liveHandle(buffer: *Buffer) core.Error!CommandBufferHandle {
         try buffer._pool_owner.validate();
@@ -390,8 +394,16 @@ pub const Buffer = struct {
                 }
             } else if (options.flags.contains(.render_pass_continue)) return error.InvalidOptions;
         }
+        var device_group_info: raw.VkDeviceGroupCommandBufferBeginInfo = .{
+            .sType = raw.VK_STRUCTURE_TYPE_DEVICE_GROUP_COMMAND_BUFFER_BEGIN_INFO,
+        };
+        if (options.device_mask) |mask| {
+            try mask.validate(buffer._device_group_size);
+            device_group_info.deviceMask = mask.bits;
+        }
         const begin_info: raw.VkCommandBufferBeginInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = if (options.device_mask != null) &device_group_info else null,
             .flags = options.flags.toRaw(),
             .pInheritanceInfo = if (options.inheritance != null) &inheritance_info else null,
         };
@@ -409,6 +421,14 @@ pub const Buffer = struct {
         buffer.conditional_rendering_active = false;
         buffer.transform_feedback_active = false;
         buffer.video_coding_active = false;
+    }
+
+    pub fn setDeviceMask(buffer: *Buffer, mask: device_group.Mask) core.Error!void {
+        const handle = try buffer.liveHandle();
+        if (buffer.state != .recording) return error.InvalidOptions;
+        try mask.validate(buffer._device_group_size);
+        const set_mask = buffer.cmd_set_device_mask orelse return error.MissingCommand;
+        set_mask(handle, mask.bits);
     }
 
     pub fn end(buffer: *Buffer) core.Error!void {
@@ -1472,6 +1492,7 @@ pub const Pool = struct {
     _owner: core.Owner,
     _device_handle: DeviceHandle,
     _device_state: ?core.DeviceState = null,
+    _device_group_size: u32 = 1,
     buffers_can_reset: bool,
     generation: u64 = 0,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
@@ -1550,6 +1571,7 @@ pub const Pool = struct {
     cmd_end_transform_feedback_ext: ?CommandFunction(raw.PFN_vkCmdEndTransformFeedbackEXT),
     cmd_begin_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdBeginVideoCodingKHR),
     cmd_end_video_coding_khr: ?CommandFunction(raw.PFN_vkCmdEndVideoCodingKHR),
+    cmd_set_device_mask: ?CommandFunction(raw.PFN_vkCmdSetDeviceMask),
 
     pub fn deinit(pool: *Pool) void {
         if (!(pool._owner.release(pool) catch return)) return;
@@ -1652,6 +1674,8 @@ pub const Pool = struct {
             .cmd_end_transform_feedback_ext = pool.cmd_end_transform_feedback_ext,
             .cmd_begin_video_coding_khr = pool.cmd_begin_video_coding_khr,
             .cmd_end_video_coding_khr = pool.cmd_end_video_coding_khr,
+            .cmd_set_device_mask = pool.cmd_set_device_mask,
+            ._device_group_size = pool._device_group_size,
         };
     }
 

@@ -4,6 +4,7 @@ const types = @import("vulkan_types");
 const core = @import("core.zig");
 const debug_utils = @import("debug_utils.zig");
 const memory = @import("memory.zig");
+const device_group = @import("device_group.zig");
 
 const CommandFunction = command.FunctionType;
 const DeviceHandle = core.NonNullHandle(raw.VkDevice);
@@ -100,6 +101,7 @@ pub const Buffer = struct {
     _owner: core.Owner,
     _device_handle: DeviceHandle,
     _device_state: ?core.DeviceState = null,
+    _device_group_size: u32 = 1,
     size: Size,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: Dispatch,
@@ -182,8 +184,18 @@ pub const Buffer = struct {
         allocation: *const memory.Allocation,
         offset: Offset,
     ) core.Error!void {
+        return buffer.bindMemoryForDeviceGroup(allocation, offset, .{});
+    }
+
+    pub fn bindMemoryForDeviceGroup(
+        buffer: *Buffer,
+        allocation: *const memory.Allocation,
+        offset: Offset,
+        options: device_group.BufferBindingOptions,
+    ) core.Error!void {
         if (buffer.bound_memory != null) return error.InvalidOptions;
         if (allocation._device_handle != buffer._device_handle) return error.InvalidHandle;
+        try device_group.validateDeviceIndices(options.device_indices, buffer._device_group_size);
         const requirements = try buffer.memoryRequirements();
         if (!requirements.supportsMemoryType(allocation.memory_type_index)) {
             return error.InvalidOptions;
@@ -199,14 +211,21 @@ pub const Buffer = struct {
         const allocation_handle = (try allocation.rawHandle()) orelse return error.InvalidHandle;
         const buffer_handle = try buffer.rawHandle();
         if (buffer.dispatch.bind_buffer_memory2) |bind2| {
+            var group_info: raw.VkBindBufferMemoryDeviceGroupInfo = .{
+                .sType = raw.VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO,
+                .deviceIndexCount = @intCast(options.device_indices.len),
+                .pDeviceIndices = if (options.device_indices.len == 0) null else options.device_indices.ptr,
+            };
             const info: raw.VkBindBufferMemoryInfo = .{
                 .sType = raw.VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+                .pNext = if (options.device_indices.len == 0) null else &group_info,
                 .buffer = buffer_handle,
                 .memory = allocation_handle,
                 .memoryOffset = offset_bytes,
             };
             try core.checkSuccessOptional(if (buffer._device_state) |*state| state else null, bind2(buffer._device_handle, 1, &info));
         } else {
+            if (options.device_indices.len != 0) return error.MissingCommand;
             try core.checkSuccessOptional(if (buffer._device_state) |*state| state else null, buffer.dispatch.bind_buffer_memory(
                 buffer._device_handle,
                 buffer_handle,
