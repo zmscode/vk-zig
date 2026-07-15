@@ -420,11 +420,14 @@ pub const LabelOptions = struct {
 
 pub const Messenger = struct {
     _handle: ?MessengerHandle,
+    _owner: core.Owner,
     _instance_handle: InstanceHandle,
+    _instance_borrow: ?core.Generation.Borrow = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_messenger: CommandFunction(raw.PFN_vkDestroyDebugUtilsMessengerEXT),
 
     pub fn deinit(messenger: *Messenger) void {
+        if (!(messenger._owner.release(messenger) catch return)) return;
         const handle = messenger._handle orelse return;
         messenger.destroy_messenger(
             messenger._instance_handle,
@@ -435,6 +438,8 @@ pub const Messenger = struct {
     }
 
     pub fn rawHandle(messenger: *const Messenger) core.Error!raw.VkDebugUtilsMessengerEXT {
+        try messenger._owner.validate(messenger);
+        if (messenger._instance_borrow) |borrow| try borrow.validate();
         return messenger._handle orelse error.InactiveObject;
     }
 
@@ -466,6 +471,7 @@ pub fn createMessenger(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._instance_handle = instance_handle,
         .allocation_callbacks = allocation_callbacks,
         .destroy_messenger = dispatch.destroy,

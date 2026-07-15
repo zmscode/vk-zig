@@ -151,18 +151,21 @@ pub const ResultOptions = struct {
 };
 
 pub const Results = struct {
+    _owner: core.Owner,
     values: []u64,
     availability: ?[]bool,
     query_count: u32,
     values_per_query: u32,
 
     pub fn deinit(results: *Results, gpa: std.mem.Allocator) void {
+        if (!(results._owner.release(results) catch return)) return;
         gpa.free(results.values);
         if (results.availability) |availability| gpa.free(availability);
         results.* = undefined;
     }
 
     pub fn query(results: Results, index: u32) core.Error![]const u64 {
+        try results._owner.validate(&results);
         if (index >= results.query_count) return error.InvalidOptions;
         const start = @as(usize, index) * results.values_per_query;
         return results.values[start..][0..results.values_per_query];
@@ -209,6 +212,7 @@ pub const Dispatch = struct {
 
 pub const Pool = struct {
     _handle: ?QueryPoolHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
     _device_state: *core.DeviceState,
     kind: Kind,
@@ -218,12 +222,15 @@ pub const Pool = struct {
     dispatch: Dispatch,
 
     pub fn deinit(pool: *Pool) void {
+        if (!(pool._owner.release(pool) catch return)) return;
         const handle = pool._handle orelse return;
         pool.dispatch.destroy(pool._device_handle, handle, pool.allocation_callbacks);
         pool._handle = null;
     }
 
     pub fn rawHandle(pool: *const Pool) core.Error!raw.VkQueryPool {
+        try pool._owner.validate(pool);
+        try pool._device_state.ensureDispatchAllowed();
         return pool._handle orelse error.InactiveObject;
     }
 
@@ -246,13 +253,15 @@ pub const Pool = struct {
     ) core.Error!Scope {
         try pool.validateCommand(command_buffer, index);
         if (pool.isTimestamp()) return error.InvalidOptions;
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
         pool.dispatch.begin(
             try command_buffer.rawHandle(),
             try pool.rawHandle(),
             index,
             if (precise) raw.VK_QUERY_CONTROL_PRECISE_BIT else 0,
         );
-        return .{ .pool = pool, .command_buffer = command_buffer, .index = index };
+        return .{ ._owner = owner, .pool = pool, .command_buffer = command_buffer, .index = index };
     }
 
     pub fn resetRecorded(
@@ -329,12 +338,19 @@ pub const Pool = struct {
     ) (core.Error || std.mem.Allocator.Error)!ReadResult {
         try pool._device_state.ensureDispatchAllowed();
         try pool.validateRange(options.first, options.count);
-        if (options.count == 0) return .{ .ready = .{
-            .values = try gpa.alloc(u64, 0),
-            .availability = if (options.include_availability) try gpa.alloc(bool, 0) else null,
-            .query_count = 0,
-            .values_per_query = pool.values_per_query,
-        } };
+        if (options.count == 0) {
+            const values = try gpa.alloc(u64, 0);
+            errdefer gpa.free(values);
+            const availability = if (options.include_availability) try gpa.alloc(bool, 0) else null;
+            errdefer if (availability) |items| gpa.free(items);
+            return .{ .ready = .{
+                ._owner = try .init(&values),
+                .values = values,
+                .availability = availability,
+                .query_count = 0,
+                .values_per_query = pool.values_per_query,
+            } };
+        }
         const include_availability = options.include_availability or options.partial;
         const words_per_query = pool.values_per_query + @intFromBool(include_availability);
         const word_count = std.math.mul(usize, options.count, words_per_query) catch return error.SizeOverflow;
@@ -374,6 +390,7 @@ pub const Pool = struct {
             }
         }
         const output: Results = .{
+            ._owner = try .init(&values),
             .values = values,
             .availability = availability,
             .query_count = options.count,
@@ -413,12 +430,14 @@ pub const Pool = struct {
 };
 
 pub const Scope = struct {
+    _owner: core.Owner,
     pool: *const Pool,
     command_buffer: *commands.Buffer,
     index: u32,
     active: bool = true,
 
     pub fn end(scope: *Scope) core.Error!void {
+        if (!(try scope._owner.release(scope))) return;
         if (!scope.active) return;
         try scope.pool.validateCommand(scope.command_buffer, scope.index);
         scope.pool.dispatch.end(
@@ -453,12 +472,14 @@ pub const Calibration = struct {
 };
 
 pub const ProfilingLock = struct {
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
     _device_state: *core.DeviceState,
     release: CommandFunction(raw.PFN_vkReleaseProfilingLockKHR),
     active: bool = true,
 
     pub fn deinit(lock: *ProfilingLock) void {
+        if (!(lock._owner.release(lock) catch return)) return;
         if (!lock.active) return;
         lock.release(lock._device_handle);
         lock.active = false;
@@ -512,6 +533,7 @@ pub fn create(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         ._device_state = device_state,
         .kind = options.kind,
@@ -611,7 +633,8 @@ fn testDispatch() Dispatch {
 }
 
 test "query results keep ready not-ready and partial distinct" {
-    var state: core.DeviceState = .{};
+    var state = try core.DeviceState.init();
+    defer state.markDestroyed();
     test_result = raw.VK_SUCCESS;
     test_destroy_count = 0;
     var pool = try create(
@@ -648,7 +671,8 @@ test "query results keep ready not-ready and partial distinct" {
 }
 
 test "query creation validates kind and cleanup is idempotent" {
-    var state: core.DeviceState = .{};
+    var state = try core.DeviceState.init();
+    defer state.markDestroyed();
     try std.testing.expectError(error.InvalidOptions, create(
         testHandle(raw.VkDevice, 0x2000),
         &state,

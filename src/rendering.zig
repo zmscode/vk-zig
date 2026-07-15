@@ -156,6 +156,7 @@ test "dynamic rendering options validate clear, multiview, and suspend state" {
     const device_handle: core.NonNullHandle(raw.VkDevice) = @ptrFromInt(0x1000);
     const view: images.View = .{
         ._handle = @ptrFromInt(0x2000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = device_handle,
         .format = .r8g8b8a8_unorm,
         .samples = ._1,
@@ -172,6 +173,7 @@ test "dynamic rendering options validate clear, multiview, and suspend state" {
     };
     const resolve_view: images.View = .{
         ._handle = @ptrFromInt(0x3000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = device_handle,
         .format = .r8g8b8a8_unorm,
         .samples = ._1,

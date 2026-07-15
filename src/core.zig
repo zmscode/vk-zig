@@ -63,6 +63,7 @@ pub const Error = error{
 pub const LoaderError = error{
     VulkanLoaderNotFound,
     VulkanEntryPointMissing,
+    CapacityExceeded,
 };
 
 pub const Version = struct {
@@ -247,7 +248,7 @@ pub const QueueFamilyOwnership = union(enum) {
 /// `error.DeviceLost`. Destruction remains permitted because Vulkan cleanup is host-only and
 /// must stay idempotent after loss. The wrapper never attempts transparent device recovery.
 pub const DeviceState = struct {
-    value: std.atomic.Value(u8) = .init(@intFromEnum(Status.active)),
+    token: Owner,
 
     pub const Status = enum(u8) {
         active,
@@ -255,8 +256,15 @@ pub const DeviceState = struct {
         destroyed,
     };
 
+    pub fn init() Error!DeviceState {
+        const token = try Owner.init({});
+        device_status_slots[token.slot].store(@intFromEnum(Status.active), .release);
+        return .{ .token = token };
+    }
+
     pub fn status(state: *const DeviceState) Status {
-        return @enumFromInt(state.value.load(.acquire));
+        state.token.validate(state) catch return .destroyed;
+        return @enumFromInt(device_status_slots[state.token.slot].load(.acquire));
     }
 
     pub fn ensureDispatchAllowed(state: *const DeviceState) Error!void {
@@ -268,53 +276,84 @@ pub const DeviceState = struct {
     }
 
     pub fn markLost(state: *DeviceState) void {
+        state.token.validate(state) catch return;
         const active = @intFromEnum(Status.active);
         const lost = @intFromEnum(Status.lost);
-        _ = state.value.cmpxchgStrong(active, lost, .acq_rel, .acquire);
+        _ = device_status_slots[state.token.slot].cmpxchgStrong(active, lost, .acq_rel, .acquire);
     }
 
     pub fn markDestroyed(state: *DeviceState) void {
-        state.value.store(@intFromEnum(Status.destroyed), .release);
+        if (!(state.token.release(state) catch return)) return;
+        device_status_slots[state.token.slot].store(@intFromEnum(Status.destroyed), .release);
     }
 };
 
-/// A non-copyable owner guard for wrappers initialized in their final storage.
+const owner_slot_count = 16_384;
+var owner_slots: [owner_slot_count]std.atomic.Value(u64) =
+    [_]std.atomic.Value(u64){.init(0)} ** owner_slot_count;
+var device_status_slots: [owner_slot_count]std.atomic.Value(u8) =
+    [_]std.atomic.Value(u8){.init(@intFromEnum(DeviceState.Status.destroyed))} ** owner_slot_count;
+var next_owner_token: std.atomic.Value(u64) = .init(1);
+
+/// A process-local atomic token shared by every bitwise copy of an owning wrapper.
 ///
-/// Zig values are copyable by default. Owning wrappers therefore bind this guard to their final
-/// address. A copied value fails validation instead of independently destroying the same Vulkan
-/// handle. Callers moving an owner must use the wrapper's explicit `moveTo` operation.
+/// Zig permits struct copies, so an address-bound guard would reject ordinary return-value moves.
+/// Instead, every live owner reserves a generation-tagged slot. Exactly one copy can release that
+/// slot and destroy the Vulkan handle; all other copies subsequently fail validation and their
+/// cleanup becomes a no-op. Slots are reused safely because the monotonically increasing token
+/// prevents an old copy from matching a newer owner.
 pub const Owner = struct {
-    address: usize,
+    slot: u32,
+    token: u64,
     active: bool = true,
 
-    pub fn init(object: anytype) Owner {
-        return .{ .address = objectAddress(object) };
+    pub fn init(_: anytype) Error!Owner {
+        var token = next_owner_token.fetchAdd(1, .monotonic);
+        if (token == 0) token = next_owner_token.fetchAdd(1, .monotonic);
+        const start: usize = @intCast(token % owner_slot_count);
+        for (0..owner_slot_count) |offset| {
+            const slot = (start + offset) % owner_slot_count;
+            if (owner_slots[slot].cmpxchgStrong(0, token, .acq_rel, .acquire) == null) {
+                return .{ .slot = @intCast(slot), .token = token };
+            }
+        }
+        return error.CapacityExceeded;
     }
 
-    pub fn validate(owner: *const Owner, object: anytype) Error!void {
-        if (owner.address != objectAddress(object)) return error.CopiedOwner;
+    pub fn validate(owner: *const Owner, _: anytype) Error!void {
         if (!owner.active) return error.InactiveObject;
+        if (owner_slots[owner.slot].load(.acquire) != owner.token) return error.CopiedOwner;
     }
 
-    pub fn release(owner: *Owner, object: anytype) Error!bool {
-        if (owner.address != objectAddress(object)) return error.CopiedOwner;
+    pub fn release(owner: *Owner, _: anytype) Error!bool {
         if (!owner.active) return false;
         owner.active = false;
-        return true;
+        return owner_slots[owner.slot].cmpxchgStrong(
+            owner.token,
+            0,
+            .acq_rel,
+            .acquire,
+        ) == null;
     }
 
-    pub fn rebind(owner: *Owner, source: anytype, destination: anytype) Error!void {
+    pub fn rebind(owner: *Owner, source: anytype, _: anytype) Error!void {
         try owner.validate(source);
-        owner.address = objectAddress(destination);
     }
 
-    fn objectAddress(object: anytype) usize {
-        const ObjectPointer = @TypeOf(object);
-        if (@typeInfo(ObjectPointer) != .pointer) {
-            @compileError("an owner guard requires a pointer to its containing object");
-        }
-        return @intFromPtr(object);
+    pub fn borrow(owner: *const Owner) Borrow {
+        return .{ .slot = owner.slot, .token = owner.token };
     }
+
+    pub const Borrow = struct {
+        slot: u32,
+        token: u64,
+
+        pub fn validate(borrowed: Borrow) Error!void {
+            if (owner_slots[borrowed.slot].load(.acquire) != borrowed.token) {
+                return error.StaleBorrow;
+            }
+        }
+    };
 };
 
 /// A parent generation shared with borrowed child handles.
@@ -324,6 +363,14 @@ pub const Generation = struct {
 
     pub fn borrow(generation: *const Generation) Borrow {
         return .{ .parent = generation, .value = generation.value };
+    }
+
+    pub fn borrowOwner(generation: *const Generation, owner: *const Owner) Borrow {
+        return .{
+            .parent = generation,
+            .value = generation.value,
+            .owner = owner.borrow(),
+        };
     }
 
     pub fn advance(generation: *Generation) void {
@@ -340,8 +387,10 @@ pub const Generation = struct {
     pub const Borrow = struct {
         parent: *const Generation,
         value: u64,
+        owner: ?Owner.Borrow = null,
 
         pub fn validate(borrowed: Borrow) Error!void {
+            if (borrowed.owner) |owner| try owner.validate();
             if (!borrowed.parent.active) return error.StaleBorrow;
             if (borrowed.parent.value != borrowed.value) return error.StaleBorrow;
         }

@@ -139,6 +139,7 @@ pub fn createEvent(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .allocation_callbacks = allocation_callbacks,
         .dispatch = dispatch,
@@ -147,17 +148,22 @@ pub fn createEvent(
 
 pub const Event = struct {
     _handle: ?EventHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: EventDispatch,
 
     pub fn deinit(event: *Event) void {
+        if (!(event._owner.release(event) catch return)) return;
         const handle = event._handle orelse return;
         event.dispatch.destroy(event._device_handle, handle, event.allocation_callbacks);
         event._handle = null;
     }
 
     pub fn rawHandle(event: *const Event) core.Error!raw.VkEvent {
+        try event._owner.validate(event);
+        if (event._device_state) |*state| try state.ensureDispatchAllowed();
         return event._handle orelse error.InactiveObject;
     }
 
@@ -199,7 +205,9 @@ pub const TimelineWaitStatus = enum {
 
 pub const Semaphore = struct {
     _handle: ?SemaphoreHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     kind: SemaphoreKind,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_semaphore: CommandFunction(raw.PFN_vkDestroySemaphore),
@@ -208,6 +216,7 @@ pub const Semaphore = struct {
     signal_semaphore: ?CommandFunction(raw.PFN_vkSignalSemaphore),
 
     pub fn deinit(semaphore: *Semaphore) void {
+        if (!(semaphore._owner.release(semaphore) catch return)) return;
         const handle = semaphore._handle orelse return;
         semaphore.destroy_semaphore(
             semaphore._device_handle,
@@ -218,6 +227,8 @@ pub const Semaphore = struct {
     }
 
     pub fn rawHandle(semaphore: *const Semaphore) core.Error!raw.VkSemaphore {
+        try semaphore._owner.validate(semaphore);
+        if (semaphore._device_state) |*state| try state.ensureDispatchAllowed();
         return semaphore._handle orelse error.InactiveObject;
     }
 
@@ -227,7 +238,7 @@ pub const Semaphore = struct {
 
     pub fn counterValue(semaphore: *const Semaphore) core.Error!u64 {
         if (semaphore.kind != .timeline) return error.InvalidOptions;
-        const handle = semaphore._handle orelse return error.InactiveObject;
+        const handle = (try semaphore.rawHandle()) orelse return error.InvalidHandle;
         const get_counter_value = semaphore.get_counter_value orelse return error.MissingCommand;
         var value: u64 = 0;
         try core.checkSuccess(get_counter_value(semaphore._device_handle, handle, &value));
@@ -251,7 +262,7 @@ pub const Semaphore = struct {
         timeout: core.Timeout,
     ) core.Error!TimelineWaitStatus {
         if (semaphore.kind != .timeline) return error.InvalidOptions;
-        const handle = semaphore._handle orelse return error.InactiveObject;
+        const handle = (try semaphore.rawHandle()) orelse return error.InvalidHandle;
         const wait_semaphores = semaphore.wait_semaphores orelse return error.MissingCommand;
         const wait_info: raw.VkSemaphoreWaitInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
@@ -297,7 +308,9 @@ pub const TimelineSemaphoreWait = struct {
 
 pub const Fence = struct {
     _handle: ?FenceHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_fence: CommandFunction(raw.PFN_vkDestroyFence),
     get_fence_status: CommandFunction(raw.PFN_vkGetFenceStatus),
@@ -305,18 +318,19 @@ pub const Fence = struct {
     wait_for_fences: CommandFunction(raw.PFN_vkWaitForFences),
 
     pub fn deinit(fence: *Fence) void {
+        if (!(fence._owner.release(fence) catch return)) return;
         const handle = fence._handle orelse return;
         fence.destroy_fence(fence._device_handle, handle, fence.allocation_callbacks);
         fence._handle = null;
     }
 
     pub fn reset(fence: *const Fence) core.Error!void {
-        const handle = fence._handle orelse return error.InactiveObject;
+        const handle = (try fence.rawHandle()) orelse return error.InvalidHandle;
         try core.checkSuccess(fence.reset_fences(fence._device_handle, 1, @ptrCast(&handle)));
     }
 
     pub fn status(fence: *const Fence) core.Error!FenceStatus {
-        const handle = fence._handle orelse return error.InactiveObject;
+        const handle = (try fence.rawHandle()) orelse return error.InvalidHandle;
         const result = fence.get_fence_status(fence._device_handle, handle);
         if (result == raw.VK_SUCCESS) return .signaled;
         if (result == raw.VK_NOT_READY) return .unsignaled;
@@ -325,7 +339,7 @@ pub const Fence = struct {
     }
 
     pub fn wait(fence: *const Fence, timeout: core.Timeout) core.Error!FenceWaitStatus {
-        const handle = fence._handle orelse return error.InactiveObject;
+        const handle = (try fence.rawHandle()) orelse return error.InvalidHandle;
         const result = fence.wait_for_fences(
             fence._device_handle,
             1,
@@ -340,6 +354,8 @@ pub const Fence = struct {
     }
 
     pub fn rawHandle(fence: *const Fence) core.Error!raw.VkFence {
+        try fence._owner.validate(fence);
+        if (fence._device_state) |*state| try state.ensureDispatchAllowed();
         return fence._handle orelse error.InactiveObject;
     }
 

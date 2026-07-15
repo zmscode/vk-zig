@@ -323,6 +323,8 @@ Do not use it for enumeration, wait, acquire, or presentation commands: status v
 The library takes no hidden Vulkan locks. See the complete
 [host synchronization and GPU lifetime contract](docs/SYNCHRONIZATION.md) before sharing queues,
 pools, command buffers, memory, descriptors, or presentation objects across threads.
+Owning wrappers are also protected against accidental Zig struct copies; see the
+[ownership and borrowed-handle contract](docs/OWNERSHIP.md) for cleanup and stale-parent behavior.
 
 ## Surfaces and debug utilities
 

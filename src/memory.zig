@@ -132,7 +132,9 @@ pub const Binding = struct {
 
 pub const Allocation = struct {
     _handle: ?MemoryHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     size: core.DeviceSize,
     memory_type_index: core.MemoryTypeIndex,
     non_coherent_atom_size: core.DeviceSize,
@@ -142,6 +144,7 @@ pub const Allocation = struct {
     _mapping_generation: u64 = 0,
 
     pub fn deinit(allocation: *Allocation) void {
+        if (!(allocation._owner.release(allocation) catch return)) return;
         const handle = allocation._handle orelse return;
         if (allocation._mapped) allocation.unmapInternal(handle) catch {};
         allocation.dispatch.free(
@@ -153,7 +156,7 @@ pub const Allocation = struct {
     }
 
     pub fn map(allocation: *Allocation, options: MapOptions) core.Error!MappedRange {
-        const handle = allocation._handle orelse return error.InactiveObject;
+        const handle = (try allocation.rawHandle()) orelse return error.InvalidHandle;
         if (allocation._mapped) return error.InvalidOptions;
         const resolved = try allocation.resolveRange(options);
         var pointer: ?*anyopaque = null;
@@ -189,7 +192,7 @@ pub const Allocation = struct {
     }
 
     pub fn unmap(allocation: *Allocation) core.Error!void {
-        const handle = allocation._handle orelse return error.InactiveObject;
+        const handle = (try allocation.rawHandle()) orelse return error.InvalidHandle;
         if (!allocation._mapped) return error.InvalidOptions;
         try allocation.unmapInternal(handle);
     }
@@ -221,7 +224,7 @@ pub const Allocation = struct {
         options: MapOptions,
         operation: CommandFunction(raw.PFN_vkFlushMappedMemoryRanges),
     ) core.Error!void {
-        const handle = allocation._handle orelse return error.InactiveObject;
+        const handle = (try allocation.rawHandle()) orelse return error.InvalidHandle;
         if (!allocation._mapped) return error.InvalidOptions;
         const normalized = try allocation.normalizedCacheRange(options);
         const range: raw.VkMappedMemoryRange = .{
@@ -234,7 +237,7 @@ pub const Allocation = struct {
     }
 
     pub fn committedBytes(allocation: *const Allocation) core.Error!core.DeviceSize {
-        const handle = allocation._handle orelse return error.InactiveObject;
+        const handle = (try allocation.rawHandle()) orelse return error.InvalidHandle;
         var bytes: raw.VkDeviceSize = 0;
         allocation.dispatch.get_commitment(allocation._device_handle, handle, &bytes);
         if (bytes > allocation.size.bytes()) return error.InvalidProperties;
@@ -288,6 +291,8 @@ pub const Allocation = struct {
     }
 
     pub fn rawHandle(allocation: *const Allocation) core.Error!raw.VkDeviceMemory {
+        try allocation._owner.validate(allocation);
+        if (allocation._device_state) |*state| try state.ensureDispatchAllowed();
         return allocation._handle orelse error.InactiveObject;
     }
 
@@ -317,7 +322,7 @@ pub const MappedRange = struct {
     size: core.DeviceSize,
 
     pub fn bytes(mapped: *const MappedRange) core.Error![]u8 {
-        _ = mapped._allocation._handle orelse return error.InactiveObject;
+        _ = try mapped._allocation.rawHandle();
         if (!mapped._allocation._mapped or
             mapped._allocation._mapping_generation != mapped._generation)
         {
@@ -404,6 +409,7 @@ pub fn allocate(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .size = options.size,
         .memory_type_index = options.memory_type_index,

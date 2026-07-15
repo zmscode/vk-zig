@@ -159,7 +159,9 @@ const SubpassMetadata = struct {
 
 pub const RenderPass = struct {
     _handle: ?RenderPassHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     _attachments: [attachment_count_max]AttachmentMetadata = undefined,
     _attachment_count: usize,
     _subpasses: [subpass_count_max]SubpassMetadata = undefined,
@@ -168,12 +170,15 @@ pub const RenderPass = struct {
     dispatch: Dispatch,
 
     pub fn deinit(render_pass: *RenderPass) void {
+        if (!(render_pass._owner.release(render_pass) catch return)) return;
         const handle = render_pass._handle orelse return;
         render_pass.dispatch.destroy(render_pass._device_handle, handle, render_pass.allocation_callbacks);
         render_pass._handle = null;
     }
 
     pub fn rawHandle(render_pass: *const RenderPass) core.Error!raw.VkRenderPass {
+        try render_pass._owner.validate(render_pass);
+        if (render_pass._device_state) |*state| try state.ensureDispatchAllowed();
         return render_pass._handle orelse error.InactiveObject;
     }
 
@@ -455,6 +460,7 @@ pub fn create(
     }
     var render_pass: RenderPass = .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         ._attachment_count = options.attachments.len,
         ._subpass_count = options.subpasses.len,
@@ -498,7 +504,10 @@ pub const FramebufferDispatch = struct {
 
 pub const Framebuffer = struct {
     _handle: ?FramebufferHandle,
+    _owner: core.Owner,
+    _render_pass_owner: core.Owner.Borrow,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     _render_pass_handle: RenderPassHandle,
     width: u32,
     height: u32,
@@ -509,12 +518,16 @@ pub const Framebuffer = struct {
     destroy_framebuffer: CommandFunction(raw.PFN_vkDestroyFramebuffer),
 
     pub fn deinit(framebuffer: *Framebuffer) void {
+        if (!(framebuffer._owner.release(framebuffer) catch return)) return;
         const handle = framebuffer._handle orelse return;
         framebuffer.destroy_framebuffer(framebuffer._device_handle, handle, framebuffer.allocation_callbacks);
         framebuffer._handle = null;
     }
 
     pub fn rawHandle(framebuffer: *const Framebuffer) core.Error!raw.VkFramebuffer {
+        try framebuffer._owner.validate(framebuffer);
+        if (framebuffer._device_state) |*state| try state.ensureDispatchAllowed();
+        try framebuffer._render_pass_owner.validate();
         return framebuffer._handle orelse error.InactiveObject;
     }
 
@@ -607,6 +620,8 @@ pub fn createFramebuffer(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
+        ._render_pass_owner = options.render_pass._owner.borrow(),
         ._device_handle = device_handle,
         ._render_pass_handle = live_render_pass_handle,
         .width = options.width,
@@ -813,6 +828,7 @@ test "framebuffers validate attachment compatibility imageless chains and rollba
     defer render_pass.deinit();
     const view: image.View = .{
         ._handle = @ptrFromInt(0x4000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = device_handle,
         .format = .r8g8b8a8_unorm,
         .samples = ._1,

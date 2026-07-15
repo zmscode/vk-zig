@@ -203,6 +203,7 @@ pub const Buffer = struct {
     _handle: ?CommandBufferHandle,
     _device_handle: DeviceHandle,
     _pool: *Pool,
+    _pool_owner: core.Owner.Borrow,
     _pool_generation: u64,
     level: types.CommandBufferLevel,
     can_reset: bool,
@@ -284,6 +285,7 @@ pub const Buffer = struct {
     cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
 
     fn liveHandle(buffer: *Buffer) core.Error!CommandBufferHandle {
+        try buffer._pool_owner.validate();
         const handle = buffer._handle orelse return error.InactiveObject;
         _ = buffer._pool._handle orelse return error.InactiveObject;
         if (buffer._pool_generation != buffer._pool.generation) {
@@ -305,6 +307,10 @@ pub const Buffer = struct {
 
     pub fn deinit(buffer: *Buffer) void {
         const handle = buffer._handle orelse return;
+        buffer._pool_owner.validate() catch {
+            buffer._handle = null;
+            return;
+        };
         const pool_handle = buffer._pool._handle orelse {
             buffer._handle = null;
             return;
@@ -590,9 +596,11 @@ pub const Buffer = struct {
             .pDepthAttachment = if (options.depth_attachment != null) &depth_attachment else null,
             .pStencilAttachment = if (options.stencil_attachment != null) &stencil_attachment else null,
         };
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
         begin_rendering(handle, &info);
         buffer.rendering_active = true;
-        return .{ .buffer = buffer };
+        return .{ ._owner = owner, .buffer = buffer };
     }
 
     pub fn endRendering(buffer: *Buffer) core.Error!void {
@@ -650,6 +658,8 @@ pub const Buffer = struct {
             .clearValueCount = @intCast(options.clear_values.len),
             .pClearValues = if (options.clear_values.len == 0) null else clear_values[0..options.clear_values.len].ptr,
         };
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
         if (buffer.cmd_begin_render_pass2) |begin2| {
             const subpass_begin: raw.VkSubpassBeginInfo = .{
                 .sType = raw.VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO,
@@ -663,7 +673,7 @@ pub const Buffer = struct {
         buffer.active_subpass = 0;
         buffer.active_subpass_count = @intCast(options.render_pass.subpassCount());
         buffer.graphics_pipeline_bound = false;
-        return .{ .buffer = buffer };
+        return .{ ._owner = owner, .buffer = buffer };
     }
 
     pub fn nextSubpass(buffer: *Buffer, contents: render_passes.Contents) core.Error!void {
@@ -1175,8 +1185,10 @@ pub const Buffer = struct {
         const end_label = buffer.cmd_end_debug_utils_label_ext orelse {
             return error.MissingCommand;
         };
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
         try buffer.beginLabel(options);
-        return .{ .command_buffer = try buffer.liveHandle(), .end_label = end_label };
+        return .{ ._owner = owner, .command_buffer = try buffer.liveHandle(), .end_label = end_label };
     }
 
     pub fn endLabel(buffer: *Buffer) core.Error!void {
@@ -1208,10 +1220,12 @@ pub const Buffer = struct {
 };
 
 pub const RenderingScope = struct {
+    _owner: core.Owner,
     buffer: *Buffer,
     active: bool = true,
 
     pub fn end(scope: *RenderingScope) core.Error!void {
+        if (!(try scope._owner.release(scope))) return;
         if (!scope.active) return;
         try scope.buffer.endRendering();
         scope.active = false;
@@ -1223,15 +1237,18 @@ pub const RenderingScope = struct {
 };
 
 pub const RenderPassScope = struct {
+    _owner: core.Owner,
     buffer: *Buffer,
     active: bool = true,
 
     pub fn next(scope: *RenderPassScope, contents: render_passes.Contents) core.Error!void {
+        try scope._owner.validate(scope);
         if (!scope.active) return error.InvalidOptions;
         try scope.buffer.nextSubpass(contents);
     }
 
     pub fn end(scope: *RenderPassScope) core.Error!void {
+        if (!(try scope._owner.release(scope))) return;
         if (!scope.active) return;
         try scope.buffer.endRenderPass();
         scope.active = false;
@@ -1243,11 +1260,13 @@ pub const RenderPassScope = struct {
 };
 
 pub const LabelScope = struct {
+    _owner: core.Owner,
     command_buffer: CommandBufferHandle,
     end_label: CommandFunction(raw.PFN_vkCmdEndDebugUtilsLabelEXT),
     active: bool = true,
 
     pub fn end(scope: *LabelScope) void {
+        if (!(scope._owner.release(scope) catch return)) return;
         if (!scope.active) return;
         scope.end_label(scope.command_buffer);
         scope.active = false;
@@ -1260,7 +1279,9 @@ pub const LabelScope = struct {
 
 pub const Pool = struct {
     _handle: ?CommandPoolHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     buffers_can_reset: bool,
     generation: u64 = 0,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
@@ -1335,6 +1356,7 @@ pub const Pool = struct {
     cmd_insert_debug_utils_label_ext: ?CommandFunction(raw.PFN_vkCmdInsertDebugUtilsLabelEXT),
 
     pub fn deinit(pool: *Pool) void {
+        if (!(pool._owner.release(pool) catch return)) return;
         const handle = pool._handle orelse return;
         pool.destroy_command_pool(pool._device_handle, handle, pool.allocation_callbacks);
         pool._handle = null;
@@ -1342,7 +1364,7 @@ pub const Pool = struct {
     }
 
     pub fn allocateCommandBuffer(pool: *Pool, options: Options) core.Error!Buffer {
-        const pool_handle = pool._handle orelse return error.InactiveObject;
+        const pool_handle = (try pool.rawHandle()) orelse return error.InactiveObject;
         const allocate_info: raw.VkCommandBufferAllocateInfo = .{
             .sType = raw.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = pool_handle,
@@ -1359,6 +1381,7 @@ pub const Pool = struct {
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = pool._device_handle,
             ._pool = pool,
+            ._pool_owner = pool._owner.borrow(),
             ._pool_generation = pool.generation,
             .level = options.level,
             .can_reset = pool.buffers_can_reset,
@@ -1431,7 +1454,8 @@ pub const Pool = struct {
     }
 
     pub fn freeCommandBuffer(pool: *Pool, buffer: *Buffer) core.Error!void {
-        const pool_handle = pool._handle orelse return error.InactiveObject;
+        const pool_handle = (try pool.rawHandle()) orelse return error.InactiveObject;
+        try buffer._pool_owner.validate();
         if (buffer._pool != pool or buffer._device_handle != pool._device_handle) {
             return error.InvalidHandle;
         }
@@ -1442,7 +1466,7 @@ pub const Pool = struct {
     }
 
     pub fn reset(pool: *Pool, release_resources: bool) core.Error!void {
-        const handle = pool._handle orelse return error.InactiveObject;
+        const handle = (try pool.rawHandle()) orelse return error.InactiveObject;
         const flags: raw.VkCommandPoolResetFlags = if (release_resources)
             @intCast(raw.VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT)
         else
@@ -1452,6 +1476,8 @@ pub const Pool = struct {
     }
 
     pub fn rawHandle(pool: *const Pool) core.Error!raw.VkCommandPool {
+        try pool._owner.validate(pool);
+        if (pool._device_state) |*state| try state.ensureDispatchAllowed();
         return pool._handle orelse error.InactiveObject;
     }
 
@@ -1484,6 +1510,7 @@ fn validateSameBufferCopyRegions(regions: []const transfer.BufferCopy) core.Erro
 test "known image bounds validate compressed transfer regions" {
     const owned: image.Image = .{
         ._handle = @ptrFromInt(0x1000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = @ptrFromInt(0x2000),
         .format = .bc1_rgba_unorm_block,
         .extent = .{ .width = 64, .height = 64, .depth = 1 },

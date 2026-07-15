@@ -39,7 +39,9 @@ pub const LayoutDispatch = struct {
 
 pub const Layout = struct {
     _handle: ?LayoutHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     _push_constants: [push_constant_range_count_max]PushConstantRange = undefined,
     _push_constant_count: usize = 0,
     _set_layouts: [set_layout_count_max]raw.VkDescriptorSetLayout = undefined,
@@ -48,12 +50,15 @@ pub const Layout = struct {
     destroy_layout: CommandFunction(raw.PFN_vkDestroyPipelineLayout),
 
     pub fn deinit(layout: *Layout) void {
+        if (!(layout._owner.release(layout) catch return)) return;
         const handle = layout._handle orelse return;
         layout.destroy_layout(layout._device_handle, handle, layout.allocation_callbacks);
         layout._handle = null;
     }
 
     pub fn rawHandle(layout: *const Layout) core.Error!raw.VkPipelineLayout {
+        try layout._owner.validate(layout);
+        if (layout._device_state) |*state| try state.ensureDispatchAllowed();
         return layout._handle orelse error.InactiveObject;
     }
 
@@ -134,6 +139,7 @@ pub fn createLayout(
     }
     var layout: Layout = .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .allocation_callbacks = allocation_callbacks,
         .destroy_layout = dispatch.destroy,
@@ -394,7 +400,9 @@ pub const ComputeOptions = struct {
 
 pub const Pipeline = struct {
     _handle: ?PipelineHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     bind_point: BindPoint,
     _dynamic_rendering: bool = false,
     _render_pass_handle: raw.VkRenderPass = null,
@@ -403,12 +411,15 @@ pub const Pipeline = struct {
     destroy_pipeline: CommandFunction(raw.PFN_vkDestroyPipeline),
 
     pub fn deinit(pipeline: *Pipeline) void {
+        if (!(pipeline._owner.release(pipeline) catch return)) return;
         const handle = pipeline._handle orelse return;
         pipeline.destroy_pipeline(pipeline._device_handle, handle, pipeline.allocation_callbacks);
         pipeline._handle = null;
     }
 
     pub fn rawHandle(pipeline: *const Pipeline) core.Error!raw.VkPipeline {
+        try pipeline._owner.validate(pipeline);
+        if (pipeline._device_state) |*state| try state.ensureDispatchAllowed();
         return pipeline._handle orelse error.InactiveObject;
     }
 
@@ -500,6 +511,7 @@ fn finishCreate(
     }
     return .{ .success = .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .bind_point = bind_point,
         ._dynamic_rendering = dynamic_rendering,
@@ -872,6 +884,7 @@ test "pipeline layouts reject invalid ranges and roll back provisional handles" 
     }));
     const foreign_set_layout: descriptor.SetLayout = .{
         ._handle = @ptrFromInt(0x4000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = @ptrFromInt(0x2000),
         .allocation_callbacks = null,
         .destroy_layout = testDestroySetLayout,
@@ -918,6 +931,7 @@ test "compute pipeline batches preserve compile status and roll back earlier suc
     };
     const module: shader.Module = .{
         ._handle = @ptrFromInt(0x2000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = device_handle,
         .allocation_callbacks = null,
         .dispatch = .{
@@ -929,6 +943,7 @@ test "compute pipeline batches preserve compile status and roll back earlier suc
     };
     const layout: Layout = .{
         ._handle = @ptrFromInt(0x3000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = device_handle,
         .allocation_callbacks = null,
         .destroy_layout = testDestroyLayout,

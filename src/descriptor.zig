@@ -131,7 +131,9 @@ const LayoutStorage = struct {
 
 pub const SetLayout = struct {
     _handle: ?LayoutHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_layout: CommandFunction(raw.PFN_vkDestroyDescriptorSetLayout),
     _bindings: [binding_count_max]BindingMetadata = undefined,
@@ -139,12 +141,15 @@ pub const SetLayout = struct {
     _push_descriptor: bool = false,
 
     pub fn deinit(layout: *SetLayout) void {
+        if (!(layout._owner.release(layout) catch return)) return;
         const handle = layout._handle orelse return;
         layout.destroy_layout(layout._device_handle, handle, layout.allocation_callbacks);
         layout._handle = null;
     }
 
     pub fn rawHandle(layout: *const SetLayout) core.Error!raw.VkDescriptorSetLayout {
+        try layout._owner.validate(layout);
+        if (layout._device_state) |*state| try state.ensureDispatchAllowed();
         return layout._handle orelse error.InactiveObject;
     }
 
@@ -184,6 +189,7 @@ pub fn createLayout(
     }
     var layout: SetLayout = .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .allocation_callbacks = allocation_callbacks,
         .destroy_layout = dispatch.destroy,
@@ -238,13 +244,16 @@ pub const PoolDispatch = struct {
 
 pub const Pool = struct {
     _handle: ?PoolHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     generation: u64 = 1,
     free_individual_sets: bool,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: PoolDispatch,
 
     pub fn deinit(pool: *Pool) void {
+        if (!(pool._owner.release(pool) catch return)) return;
         const handle = pool._handle orelse return;
         pool.dispatch.destroy(pool._device_handle, handle, pool.allocation_callbacks);
         pool._handle = null;
@@ -252,7 +261,7 @@ pub const Pool = struct {
     }
 
     pub fn reset(pool: *Pool) core.Error!void {
-        const handle = pool._handle orelse return error.InactiveObject;
+        const handle = (try pool.rawHandle()) orelse return error.InactiveObject;
         try core.checkSuccess(pool.dispatch.reset(pool._device_handle, handle, 0));
         pool.generation +%= 1;
     }
@@ -262,7 +271,7 @@ pub const Pool = struct {
     }
 
     pub fn allocateOptions(pool: *Pool, options: AllocateOptions) core.Error!Set {
-        const pool_handle = pool._handle orelse return error.InactiveObject;
+        const pool_handle = (try pool.rawHandle()) orelse return error.InactiveObject;
         const layout = options.layout;
         if (layout._device_handle != pool._device_handle) return error.InvalidHandle;
         const layout_handle = try layout.rawHandle();
@@ -291,6 +300,7 @@ pub const Pool = struct {
             ._handle = handle orelse return error.InvalidHandle,
             ._device_handle = pool._device_handle,
             ._pool = pool,
+            ._pool_owner = pool._owner.borrow(),
             ._pool_generation = pool.generation,
             .layout_handle = layout_handle orelse return error.InvalidHandle,
             .layout = layout,
@@ -305,7 +315,7 @@ pub const Pool = struct {
     ) core.Error![]Set {
         if (requests.len == 0 or requests.len > set_count_max) return error.InvalidOptions;
         if (output.len < requests.len) return error.BufferTooSmall;
-        const pool_handle = pool._handle orelse return error.InactiveObject;
+        const pool_handle = (try pool.rawHandle()) orelse return error.InactiveObject;
         var layouts: [set_count_max]raw.VkDescriptorSetLayout = undefined;
         var variable_counts: [set_count_max]u32 = @splat(0);
         var handles: [set_count_max]raw.VkDescriptorSet = @splat(null);
@@ -341,6 +351,7 @@ pub const Pool = struct {
                 ._handle = handle orelse return error.InvalidHandle,
                 ._device_handle = pool._device_handle,
                 ._pool = pool,
+                ._pool_owner = pool._owner.borrow(),
                 ._pool_generation = pool.generation,
                 .layout_handle = layouts[index] orelse return error.InvalidHandle,
                 .layout = request.layout,
@@ -351,7 +362,13 @@ pub const Pool = struct {
     }
 
     pub fn debugObject(pool: *const Pool) core.Error!debug_utils.Object {
-        return .forDevice(.descriptor_pool, pool._handle orelse return error.InactiveObject, pool._device_handle);
+        return .forDevice(.descriptor_pool, try pool.rawHandle(), pool._device_handle);
+    }
+
+    pub fn rawHandle(pool: *const Pool) core.Error!raw.VkDescriptorPool {
+        try pool._owner.validate(pool);
+        if (pool._device_state) |*state| try state.ensureDispatchAllowed();
+        return pool._handle orelse error.InactiveObject;
     }
 };
 
@@ -364,18 +381,25 @@ pub const Set = struct {
     _handle: ?SetHandle,
     _device_handle: DeviceHandle,
     _pool: *Pool,
+    _pool_owner: core.Owner.Borrow,
     _pool_generation: u64,
     layout_handle: LayoutHandle,
     layout: *const SetLayout,
     variable_descriptor_count: ?u32 = null,
 
     pub fn rawHandle(set: *const Set) core.Error!raw.VkDescriptorSet {
+        try set._pool_owner.validate();
+        if (set._pool._device_state) |*state| try state.ensureDispatchAllowed();
         if (set._pool._handle == null or set._pool.generation != set._pool_generation) return error.InactiveObject;
         return set._handle orelse error.InactiveObject;
     }
 
     pub fn deinit(set: *Set) void {
         const handle = set._handle orelse return;
+        set._pool_owner.validate() catch {
+            set._handle = null;
+            return;
+        };
         const pool_handle = set._pool._handle orelse {
             set._handle = null;
             return;
@@ -631,7 +655,9 @@ pub const TemplateDispatch = struct {
 
 pub const UpdateTemplate = struct {
     _handle: ?TemplateHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     _layout_handle: LayoutHandle,
     data_size: usize,
     _entries: [write_count_max]TemplateMetadata = undefined,
@@ -640,13 +666,14 @@ pub const UpdateTemplate = struct {
     dispatch: TemplateDispatch,
 
     pub fn deinit(template: *UpdateTemplate) void {
+        if (!(template._owner.release(template) catch return)) return;
         const handle = template._handle orelse return;
         template.dispatch.destroy(template._device_handle, handle, template.allocation_callbacks);
         template._handle = null;
     }
 
     pub fn update(template: *const UpdateTemplate, set: *const Set, values: []const WriteData) core.Error!void {
-        const handle = template._handle orelse return error.InactiveObject;
+        const handle = (try template.rawHandle()) orelse return error.InactiveObject;
         if (set._device_handle != template._device_handle or set.layout_handle != template._layout_handle) return error.InvalidHandle;
         if (values.len != template._entry_count) return error.InvalidOptions;
         var data: [template_data_size_max]u8 align(16) = undefined;
@@ -703,6 +730,8 @@ pub const UpdateTemplate = struct {
     }
 
     pub fn rawHandle(template: *const UpdateTemplate) core.Error!raw.VkDescriptorUpdateTemplate {
+        try template._owner.validate(template);
+        if (template._device_state) |*state| try state.ensureDispatchAllowed();
         return template._handle orelse error.InactiveObject;
     }
 
@@ -757,6 +786,7 @@ pub fn createUpdateTemplate(
     }
     var result_template: UpdateTemplate = .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         ._layout_handle = (try options.layout.rawHandle()) orelse return error.InvalidHandle,
         .data_size = data_size,
@@ -954,6 +984,7 @@ pub fn createPool(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .free_individual_sets = options.free_individual_sets,
         .allocation_callbacks = allocation_callbacks,
@@ -1125,6 +1156,7 @@ test "descriptor layouts pools batches updates and generations remain typed" {
 
     const owned_buffer: buffer.Buffer = .{
         ._handle = @ptrFromInt(0x5000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = device_handle,
         .size = .fromBytes(256),
         .allocation_callbacks = null,
@@ -1159,6 +1191,7 @@ test "descriptor layouts pools batches updates and generations remain typed" {
 
     const foreign_buffer: buffer.Buffer = .{
         ._handle = @ptrFromInt(0x5100),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = @ptrFromInt(0x9999),
         .size = .fromBytes(256),
         .allocation_callbacks = null,
@@ -1217,7 +1250,7 @@ test "descriptor support templates and push writes hide pointer graphs" {
     });
     defer pool.deinit();
     var set = try pool.allocateOptions(.{ .layout = &layout, .variable_descriptor_count = 4 });
-    const owned_buffer: buffer.Buffer = .{ ._handle = @ptrFromInt(0x5000), ._device_handle = device_handle, .size = .fromBytes(256), .allocation_callbacks = null, .dispatch = undefined };
+    const owned_buffer: buffer.Buffer = .{ ._handle = @ptrFromInt(0x5000), ._owner = core.Owner.init({}) catch unreachable, ._device_handle = device_handle, .size = .fromBytes(256), .allocation_callbacks = null, .dispatch = undefined };
 
     test_template_update_count = 0;
     test_template_destroy_count = 0;

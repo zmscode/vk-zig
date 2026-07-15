@@ -176,6 +176,21 @@ pub const QueryScope = queries.Scope;
 pub const CalibratedTimestamp = queries.CalibratedTimestamp;
 pub const TimeDomain = queries.TimeDomain;
 pub const ProfilingLock = queries.ProfilingLock;
+
+fn withDeviceState(value: anytype, state: core.DeviceState) @TypeOf(value) {
+    var output = value;
+    output._device_state = state;
+    return output;
+}
+
+fn withPipelineDeviceState(result: pipelines.CreateResult, state: core.DeviceState) pipelines.CreateResult {
+    var output = result;
+    switch (output) {
+        .success => |*pipeline| pipeline._device_state = state,
+        .compile_required => {},
+    }
+    return output;
+}
 pub const PerformanceCounter = queries.PerformanceCounter;
 pub const PerformanceQuery = queries.Performance;
 
@@ -269,22 +284,34 @@ pub const diagnostics = configuration.diagnostics;
 pub const Loader = struct {
     library: NativeLibrary,
     active: bool = true,
+    _owner: core.Owner,
 
     pub fn init() LoaderError!Loader {
-        return .{ .library = try NativeLibrary.open() };
+        var library = try NativeLibrary.open();
+        errdefer library.close();
+        return .{ .library = library, ._owner = core.Owner.init(&library) catch |err| switch (err) {
+            error.CapacityExceeded => return error.CapacityExceeded,
+            else => unreachable,
+        } };
     }
 
     pub fn initFromPath(path: [:0]const u8) LoaderError!Loader {
-        return .{ .library = try NativeLibrary.openPath(path) };
+        var library = try NativeLibrary.openPath(path);
+        errdefer library.close();
+        return .{ .library = library, ._owner = core.Owner.init(&library) catch |err| switch (err) {
+            error.CapacityExceeded => return error.CapacityExceeded,
+            else => unreachable,
+        } };
     }
 
     pub fn deinit(loader: *Loader) void {
-        if (!loader.active) return;
+        if (!(loader._owner.release(loader) catch return)) return;
         loader.library.close();
         loader.active = false;
     }
 
     pub fn entry(loader: *Loader) LoaderError!Entry {
+        loader._owner.validate(loader) catch return error.VulkanLoaderNotFound;
         if (!loader.active) return error.VulkanLoaderNotFound;
         const get_instance_proc_addr = loader.library.lookup(
             CommandFunction(raw.PFN_vkGetInstanceProcAddr),
@@ -724,6 +751,7 @@ pub const Entry = struct {
 
         return .{
             ._handle = live_handle,
+            ._owner = try .init(&live_handle),
             ._debug_messenger = null,
             .allocation_callbacks = allocation_callbacks,
             .dispatch = dispatch,
@@ -761,6 +789,7 @@ pub const AdvancedInstanceOptions = struct {
 
 pub const Instance = struct {
     _handle: ?InstanceHandle,
+    _owner: core.Owner,
     _debug_messenger: ?debug_utils.Messenger,
     _enabled_extensions: [name_count_max][:0]const u8 = undefined,
     _enabled_extension_count: usize = 0,
@@ -770,6 +799,7 @@ pub const Instance = struct {
     dispatch: InstanceDispatch,
 
     pub fn deinit(instance: *Instance) void {
+        if (!(instance._owner.release(instance) catch return)) return;
         const handle = instance._handle orelse return;
         if (instance._debug_messenger) |*messenger| messenger.deinit();
         instance._debug_messenger = null;
@@ -813,23 +843,26 @@ pub const Instance = struct {
         config: debug_utils.Config,
         allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     ) Error!debug_utils.Messenger {
-        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const instance_handle = try instance.rawHandle();
         const create = (try instance.load(command.create_debug_utils_messenger_ext)) orelse {
             return error.MissingCommand;
         };
         const destroy = (try instance.load(command.destroy_debug_utils_messenger_ext)) orelse {
             return error.MissingCommand;
         };
-        return debug_utils.createMessenger(
+        var messenger = try debug_utils.createMessenger(
             instance_handle,
             allocation_callbacks,
             .{ .create = create, .destroy = destroy },
             config,
         );
+        messenger._instance_borrow = instance._child_generation.borrowOwner(&instance._owner);
+        return messenger;
     }
 
     /// Returns the live raw handle for explicit FFI integration.
-    pub fn rawHandle(instance: *const Instance) Error!raw.VkInstance {
+    pub fn rawHandle(instance: *const Instance) Error!InstanceHandle {
+        try instance._owner.validate(instance);
         return instance._handle orelse error.InactiveObject;
     }
 
@@ -841,7 +874,7 @@ pub const Instance = struct {
         instance: *const Instance,
         comptime descriptor: anytype,
     ) Error!?DescriptorFunction(descriptor, .instance) {
-        const handle = instance._handle orelse return error.InactiveObject;
+        const handle = try instance.rawHandle();
         return loadInstanceDescriptor(
             instance.dispatch.get_instance_proc_addr,
             handle,
@@ -863,7 +896,7 @@ pub const Instance = struct {
         comptime OptionalFunction: type,
         name: [:0]const u8,
     ) Error!?CommandFunction(OptionalFunction) {
-        const handle = instance._handle orelse return error.InactiveObject;
+        const handle = try instance.rawHandle();
         return loadInstance(
             instance.dispatch.get_instance_proc_addr,
             handle,
@@ -873,7 +906,7 @@ pub const Instance = struct {
     }
 
     pub fn physicalDeviceCount(instance: *const Instance) Error!u32 {
-        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const instance_handle = try instance.rawHandle();
         var count: u32 = 0;
         try checkSuccess(instance.dispatch.enumerate_physical_devices(
             instance_handle,
@@ -889,7 +922,7 @@ pub const Instance = struct {
         storage: []PhysicalDevice,
     ) Error![]PhysicalDevice {
         if (storage.len > enumeration_item_count_max) return error.CountOverflow;
-        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const instance_handle = try instance.rawHandle();
         const required = try instance.physicalDeviceCount();
         if (required > storage.len) return error.BufferTooSmall;
         var handles: [enumeration_item_count_max]raw.VkPhysicalDevice = undefined;
@@ -905,6 +938,7 @@ pub const Instance = struct {
             device.* = .{
                 ._handle = handle orelse return error.InvalidHandle,
                 ._instance_handle = instance_handle,
+                ._instance_borrow = instance._child_generation.borrowOwner(&instance._owner),
                 .dispatch = instance.dispatch,
             };
         }
@@ -938,15 +972,16 @@ pub const Instance = struct {
         handle: raw.VkSurfaceKHR,
         allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     ) Error!Surface {
-        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const instance_handle = try instance.rawHandle();
         const live_handle = handle orelse return error.InvalidHandle;
         const destroy_surface = (try instance.load(command.destroy_surface_khr)) orelse {
             return error.MissingCommand;
         };
         return .{
             ._handle = live_handle,
+            ._owner = try .init(&live_handle),
             ._instance_handle = instance_handle,
-            ._instance_borrow = instance._child_generation.borrow(),
+            ._instance_borrow = instance._child_generation.borrowOwner(&instance._owner),
             .allocation_callbacks = allocation_callbacks,
             .destroy_surface = destroy_surface,
         };
@@ -958,7 +993,7 @@ pub const Instance = struct {
         created: raw.VkSurfaceKHR,
         allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     ) Error!Surface {
-        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const instance_handle = try instance.rawHandle();
         const destroy_surface = (try instance.load(command.destroy_surface_khr)) orelse return error.MissingCommand;
         if (result != raw.VK_SUCCESS) {
             if (created) |provisional| destroy_surface(instance_handle, provisional, allocation_callbacks);
@@ -967,8 +1002,9 @@ pub const Instance = struct {
         }
         return .{
             ._handle = created orelse return error.InvalidHandle,
+            ._owner = try .init(&created),
             ._instance_handle = instance_handle,
-            ._instance_borrow = instance._child_generation.borrow(),
+            ._instance_borrow = instance._child_generation.borrowOwner(&instance._owner),
             .allocation_callbacks = allocation_callbacks,
             .destroy_surface = destroy_surface,
         };
@@ -976,7 +1012,7 @@ pub const Instance = struct {
 
     pub fn createMetalSurface(instance: *const Instance, options: presentation.MetalSurfaceOptions) Error!Surface {
         if (comptime platform == .metal) {
-            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_metal_surface_ext)) orelse return error.MissingCommand;
             const info: raw.VkMetalSurfaceCreateInfoEXT = .{
                 .sType = raw.VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
@@ -990,7 +1026,7 @@ pub const Instance = struct {
 
     pub fn createWin32Surface(instance: *const Instance, options: presentation.Win32SurfaceOptions) Error!Surface {
         if (comptime platform == .win32) {
-            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_win32_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkWin32SurfaceCreateInfoKHR = .{
                 .sType = raw.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
@@ -1005,7 +1041,7 @@ pub const Instance = struct {
 
     pub fn createXlibSurface(instance: *const Instance, options: presentation.XlibSurfaceOptions) Error!Surface {
         if (comptime platform == .xlib) {
-            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_xlib_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkXlibSurfaceCreateInfoKHR = .{
                 .sType = raw.VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
@@ -1020,7 +1056,7 @@ pub const Instance = struct {
 
     pub fn createXcbSurface(instance: *const Instance, options: presentation.XcbSurfaceOptions) Error!Surface {
         if (comptime platform == .xcb) {
-            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_xcb_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkXcbSurfaceCreateInfoKHR = .{
                 .sType = raw.VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
@@ -1035,7 +1071,7 @@ pub const Instance = struct {
 
     pub fn createWaylandSurface(instance: *const Instance, options: presentation.WaylandSurfaceOptions) Error!Surface {
         if (comptime platform == .wayland) {
-            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_wayland_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkWaylandSurfaceCreateInfoKHR = .{
                 .sType = raw.VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
@@ -1050,7 +1086,7 @@ pub const Instance = struct {
 
     pub fn createAndroidSurface(instance: *const Instance, options: presentation.AndroidSurfaceOptions) Error!Surface {
         if (comptime platform == .android) {
-            const instance_handle = instance._handle orelse return error.InactiveObject;
+            const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_android_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkAndroidSurfaceCreateInfoKHR = .{
                 .sType = raw.VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
@@ -1064,7 +1100,7 @@ pub const Instance = struct {
 
     pub fn createHeadlessSurface(instance: *const Instance, options: presentation.HeadlessSurfaceOptions) Error!Surface {
         _ = options;
-        const instance_handle = instance._handle orelse return error.InactiveObject;
+        const instance_handle = try instance.rawHandle();
         const create = (try instance.load(command.create_headless_surface_ext)) orelse return error.MissingCommand;
         const info: raw.VkHeadlessSurfaceCreateInfoEXT = .{
             .sType = raw.VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT,
@@ -1075,11 +1111,11 @@ pub const Instance = struct {
     }
 
     pub fn createSurfaceWithAdapter(instance: *const Instance, adapter: SurfaceAdapter) Error!Surface {
-        _ = instance._handle orelse return error.InactiveObject;
+        const instance_handle = try instance.rawHandle();
         var surface = try adapter.create(adapter.context, instance);
         errdefer surface.deinit();
-        if (surface._instance_handle != instance._handle.?) return error.InvalidHandle;
-        surface._instance_borrow = instance._child_generation.borrow();
+        if (surface._instance_handle != instance_handle) return error.InvalidHandle;
+        surface._instance_borrow = instance._child_generation.borrowOwner(&instance._owner);
         return surface;
     }
 };
@@ -1208,10 +1244,12 @@ pub const drm_format_modifier_property_count_max = format_support.drm_modifier_p
 pub const PhysicalDevice = struct {
     _handle: PhysicalDeviceHandle,
     _instance_handle: InstanceHandle,
+    _instance_borrow: ?core.Generation.Borrow = null,
     dispatch: InstanceDispatch,
 
     /// Returns the non-owning raw physical-device handle for FFI integration.
-    pub fn rawHandle(device: *const PhysicalDevice) raw.VkPhysicalDevice {
+    pub fn rawHandle(device: *const PhysicalDevice) Error!raw.VkPhysicalDevice {
+        if (device._instance_borrow) |borrow| try borrow.validate();
         return device._handle;
     }
 
@@ -2291,6 +2329,7 @@ pub const PhysicalDevice = struct {
         create_info: *const raw.VkDeviceCreateInfo,
         allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     ) Error!Device {
+        if (physical_device._instance_borrow) |borrow| try borrow.validate();
         var handle: raw.VkDevice = null;
         try checkSuccess(physical_device.dispatch.create_device(
             physical_device._handle,
@@ -2314,9 +2353,21 @@ pub const PhysicalDevice = struct {
             }
             return load_error;
         };
+        var owner = core.Owner.init(&live_handle) catch |err| {
+            dispatch.destroy_device(live_handle, allocation_callbacks);
+            return err;
+        };
+        const state = core.DeviceState.init() catch |err| {
+            _ = owner.release(&live_handle) catch {};
+            dispatch.destroy_device(live_handle, allocation_callbacks);
+            return err;
+        };
         return .{
             ._handle = live_handle,
+            ._owner = owner,
             ._instance_handle = physical_device._instance_handle,
+            ._instance_borrow = physical_device._instance_borrow,
+            ._state = state,
             .allocation_callbacks = allocation_callbacks,
             .dispatch = dispatch,
             .enabled_capabilities = .{},
@@ -2434,8 +2485,10 @@ pub const DeviceOptions = device_configuration.Requirements;
 
 pub const Device = struct {
     _handle: ?DeviceHandle,
+    _owner: core.Owner,
     _instance_handle: InstanceHandle,
-    _state: core.DeviceState = .{},
+    _instance_borrow: ?core.Generation.Borrow = null,
+    _state: core.DeviceState,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: DeviceDispatch,
     enabled_capabilities: device_configuration.EnabledCapabilities = .{},
@@ -2443,6 +2496,7 @@ pub const Device = struct {
     _max_sampler_anisotropy: f32 = 1,
 
     pub fn deinit(device: *Device) void {
+        if (!(device._owner.release(device) catch return)) return;
         const handle = device._handle orelse return;
         device.dispatch.destroy_device(handle, device.allocation_callbacks);
         device._handle = null;
@@ -2451,6 +2505,8 @@ pub const Device = struct {
 
     /// Returns the live raw handle for explicit FFI integration.
     pub fn rawHandle(device: *const Device) Error!raw.VkDevice {
+        try device._owner.validate(device);
+        if (device._instance_borrow) |borrow| try borrow.validate();
         return device._handle orelse error.InactiveObject;
     }
 
@@ -2465,6 +2521,8 @@ pub const Device = struct {
     }
 
     fn dispatchHandle(device: *const Device) Error!DeviceHandle {
+        try device._owner.validate(device);
+        if (device._instance_borrow) |borrow| try borrow.validate();
         try device._state.ensureDispatchAllowed();
         return device._handle orelse error.InactiveObject;
     }
@@ -2577,7 +2635,7 @@ pub const Device = struct {
         options: buffers.Options,
     ) Error!buffers.Buffer {
         const device_handle = try device.dispatchHandle();
-        return buffers.create(
+        return withDeviceState(buffers.create(
             device_handle,
             device.allocation_callbacks,
             .{
@@ -2593,7 +2651,7 @@ pub const Device = struct {
                 .bind_buffer_memory2 = device.dispatch.bind_buffer_memory2,
             },
             options,
-        ) catch |err| return device.recordError(err);
+        ) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createBufferView(
@@ -2603,7 +2661,7 @@ pub const Device = struct {
     ) Error!buffers.View {
         const device_handle = try device.dispatchHandle();
         if (buffer._device_handle != device_handle) return error.InvalidHandle;
-        return buffers.createView(buffer, options);
+        return withDeviceState(try buffers.createView(buffer, options), device._state);
     }
 
     pub fn allocateMemory(
@@ -2612,7 +2670,7 @@ pub const Device = struct {
     ) Error!memory.Allocation {
         const device_handle = try device.dispatchHandle();
         if (options.priority != null and !device.supportsExtension(extension.ext_memory_priority)) return error.ExtensionNotPresent;
-        return memory.allocate(
+        return withDeviceState(memory.allocate(
             device_handle,
             device.allocation_callbacks,
             .{
@@ -2628,7 +2686,7 @@ pub const Device = struct {
                 .get_opaque_capture_address = device.dispatch.get_device_memory_opaque_capture_address,
             },
             options,
-        ) catch |err| return device.recordError(err);
+        ) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createSampler(device: *const Device, options: samplers.Options) Error!samplers.Sampler {
@@ -2646,10 +2704,10 @@ pub const Device = struct {
         }
         if ((options.address_u == .mirror_clamp_to_edge or options.address_v == .mirror_clamp_to_edge or options.address_w == .mirror_clamp_to_edge) and
             !device.supportsExtension(extension.khr_sampler_mirror_clamp_to_edge)) return error.ExtensionNotPresent;
-        return samplers.create(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try samplers.create(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_sampler,
             .destroy = device.dispatch.destroy_sampler,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn createSamplerYcbcrConversion(
@@ -2660,10 +2718,10 @@ pub const Device = struct {
         if (!device.supportsFeature(.sampler_ycbcr_conversion)) return error.FeatureNotPresent;
         const create_conversion = device.dispatch.create_sampler_ycbcr_conversion orelse return error.MissingCommand;
         const destroy_conversion = device.dispatch.destroy_sampler_ycbcr_conversion orelse return error.MissingCommand;
-        return samplers.createYcbcrConversion(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try samplers.createYcbcrConversion(device_handle, device.allocation_callbacks, .{
             .create = create_conversion,
             .destroy = destroy_conversion,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn createShaderModule(
@@ -2671,12 +2729,12 @@ pub const Device = struct {
         words: []const u32,
     ) Error!shaders.Module {
         const device_handle = try device.dispatchHandle();
-        return shaders.createWords(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try shaders.createWords(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_shader_module,
             .destroy = device.dispatch.destroy_shader_module,
             .get_identifier = device.dispatch.get_shader_module_identifier_ext,
             .get_create_info_identifier = device.dispatch.get_shader_module_create_info_identifier_ext,
-        }, words);
+        }, words), device._state);
     }
 
     pub fn createShaderModuleBytes(
@@ -2684,12 +2742,12 @@ pub const Device = struct {
         bytes: []align(4) const u8,
     ) Error!shaders.Module {
         const device_handle = try device.dispatchHandle();
-        return shaders.createBytes(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try shaders.createBytes(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_shader_module,
             .destroy = device.dispatch.destroy_shader_module,
             .get_identifier = device.dispatch.get_shader_module_identifier_ext,
             .get_create_info_identifier = device.dispatch.get_shader_module_create_info_identifier_ext,
-        }, bytes);
+        }, bytes), device._state);
     }
 
     pub fn shaderModuleIdentifier(device: *const Device, words: []const u32) Error!shaders.Identifier {
@@ -2727,10 +2785,10 @@ pub const Device = struct {
                 if (!device.supportsFeature(feature)) return error.FeatureNotPresent;
             }
         }
-        return descriptors.createLayout(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try descriptors.createLayout(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_descriptor_set_layout,
             .destroy = device.dispatch.destroy_descriptor_set_layout,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn descriptorSetLayoutSupport(
@@ -2747,13 +2805,13 @@ pub const Device = struct {
         options: descriptors.PoolOptions,
     ) Error!descriptors.Pool {
         const device_handle = try device.dispatchHandle();
-        return descriptors.createPool(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try descriptors.createPool(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_descriptor_pool,
             .destroy = device.dispatch.destroy_descriptor_pool,
             .reset = device.dispatch.reset_descriptor_pool,
             .allocate = device.dispatch.allocate_descriptor_sets,
             .free = device.dispatch.free_descriptor_sets,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn updateDescriptorSets(
@@ -2770,11 +2828,11 @@ pub const Device = struct {
         options: descriptors.TemplateOptions,
     ) Error!descriptors.UpdateTemplate {
         const device_handle = try device.dispatchHandle();
-        return descriptors.createUpdateTemplate(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try descriptors.createUpdateTemplate(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_descriptor_update_template orelse return error.MissingCommand,
             .destroy = device.dispatch.destroy_descriptor_update_template orelse return error.MissingCommand,
             .update = device.dispatch.update_descriptor_set_with_template orelse return error.MissingCommand,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn createPipelineLayout(
@@ -2782,10 +2840,10 @@ pub const Device = struct {
         options: pipelines.LayoutOptions,
     ) Error!pipelines.Layout {
         const device_handle = try device.dispatchHandle();
-        return pipelines.createLayout(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try pipelines.createLayout(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_pipeline_layout,
             .destroy = device.dispatch.destroy_pipeline_layout,
-        }, device._max_push_constant_size, options);
+        }, device._max_push_constant_size, options), device._state);
     }
 
     pub fn createGraphicsPipeline(
@@ -2793,11 +2851,11 @@ pub const Device = struct {
         options: pipelines.GraphicsOptions,
     ) Error!pipelines.CreateResult {
         const device_handle = try device.dispatchHandle();
-        return pipelines.createGraphics(device_handle, device.allocation_callbacks, .{
+        return withPipelineDeviceState(try pipelines.createGraphics(device_handle, device.allocation_callbacks, .{
             .create_graphics = device.dispatch.create_graphics_pipelines,
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn createComputePipeline(
@@ -2805,11 +2863,11 @@ pub const Device = struct {
         options: pipelines.ComputeOptions,
     ) Error!pipelines.CreateResult {
         const device_handle = try device.dispatchHandle();
-        return pipelines.createCompute(device_handle, device.allocation_callbacks, .{
+        return withPipelineDeviceState(try pipelines.createCompute(device_handle, device.allocation_callbacks, .{
             .create_graphics = device.dispatch.create_graphics_pipelines,
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn createComputePipelines(
@@ -2818,11 +2876,16 @@ pub const Device = struct {
         output: []pipelines.CreateResult,
     ) Error![]pipelines.CreateResult {
         const device_handle = try device.dispatchHandle();
-        return pipelines.createComputeBatch(device_handle, device.allocation_callbacks, .{
+        const results = try pipelines.createComputeBatch(device_handle, device.allocation_callbacks, .{
             .create_graphics = device.dispatch.create_graphics_pipelines,
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
         }, options, output);
+        for (results) |*result| switch (result.*) {
+            .success => |*pipeline| pipeline._device_state = device._state,
+            .compile_required => {},
+        };
+        return results;
     }
 
     pub fn createGraphicsPipelines(
@@ -2831,11 +2894,16 @@ pub const Device = struct {
         output: []pipelines.CreateResult,
     ) Error![]pipelines.CreateResult {
         const device_handle = try device.dispatchHandle();
-        return pipelines.createGraphicsBatch(device_handle, device.allocation_callbacks, .{
+        const results = try pipelines.createGraphicsBatch(device_handle, device.allocation_callbacks, .{
             .create_graphics = device.dispatch.create_graphics_pipelines,
             .create_compute = device.dispatch.create_compute_pipelines,
             .destroy = device.dispatch.destroy_pipeline,
         }, options, output);
+        for (results) |*result| switch (result.*) {
+            .success => |*pipeline| pipeline._device_state = device._state,
+            .compile_required => {},
+        };
+        return results;
     }
 
     pub fn createRenderPass(
@@ -2849,12 +2917,12 @@ pub const Device = struct {
             if (dependency.view_offset != 0) break true;
         } else false;
         if (uses_multiview and !device.supportsFeature(.multiview)) return error.FeatureNotPresent;
-        return render_passes.create(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try render_passes.create(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_render_pass,
             .create2 = device.dispatch.create_render_pass2,
             .destroy = device.dispatch.destroy_render_pass,
             .get_granularity = device.dispatch.get_render_area_granularity,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn createFramebuffer(
@@ -2863,10 +2931,10 @@ pub const Device = struct {
     ) Error!render_passes.Framebuffer {
         const device_handle = try device.dispatchHandle();
         if (options.attachments == .imageless and !device.supportsFeature(.imageless_framebuffer)) return error.FeatureNotPresent;
-        return render_passes.createFramebuffer(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try render_passes.createFramebuffer(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_framebuffer,
             .destroy = device.dispatch.destroy_framebuffer,
-        }, options);
+        }, options), device._state);
     }
 
     pub fn createAllocatedBuffer(
@@ -2915,18 +2983,18 @@ pub const Device = struct {
         options: ImageViewOptions,
     ) Error!ImageView {
         const device_handle = try device.dispatchHandle();
-        return images.createView(
+        return withDeviceState(try images.createView(
             device_handle,
             device.allocation_callbacks,
             device.dispatch.create_image_view,
             device.dispatch.destroy_image_view,
             options,
-        );
+        ), device._state);
     }
 
     pub fn createImage(device: *const Device, options: images.Options) Error!images.Image {
         const device_handle = try device.dispatchHandle();
-        return images.create(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(images.create(device_handle, device.allocation_callbacks, .{
             .create_image = device.dispatch.create_image,
             .destroy_image = device.dispatch.destroy_image,
             .get_image_memory_requirements = device.dispatch.get_image_memory_requirements,
@@ -2940,7 +3008,7 @@ pub const Device = struct {
             .copy_image_to_memory = device.dispatch.copy_image_to_memory,
             .copy_image_to_image = device.dispatch.copy_image_to_image,
             .transition_layout = device.dispatch.transition_image_layout,
-        }, options) catch |err| return device.recordError(err);
+        }, options) catch |err| return device.recordError(err), device._state);
     }
 
     pub fn createSemaphore(
@@ -2983,7 +3051,9 @@ pub const Device = struct {
         }
         return .{
             ._handle = handle orelse return error.InvalidHandle,
+            ._owner = try .init(&handle),
             ._device_handle = device_handle,
+            ._device_state = device._state,
             .kind = options.kind,
             .allocation_callbacks = device.allocation_callbacks,
             .destroy_semaphore = device.dispatch.destroy_semaphore,
@@ -3023,7 +3093,9 @@ pub const Device = struct {
         }
         return .{
             ._handle = handle orelse return error.InvalidHandle,
+            ._owner = try .init(&handle),
             ._device_handle = device_handle,
+            ._device_state = device._state,
             .allocation_callbacks = device.allocation_callbacks,
             .destroy_fence = device.dispatch.destroy_fence,
             .get_fence_status = device.dispatch.get_fence_status,
@@ -3034,13 +3106,13 @@ pub const Device = struct {
 
     pub fn createEvent(device: *const Device) Error!sync.Event {
         const device_handle = try device.dispatchHandle();
-        return sync.createEvent(device_handle, device.allocation_callbacks, .{
+        return withDeviceState(try sync.createEvent(device_handle, device.allocation_callbacks, .{
             .create = device.dispatch.create_event,
             .destroy = device.dispatch.destroy_event,
             .status = device.dispatch.get_event_status,
             .set = device.dispatch.set_event,
             .reset = device.dispatch.reset_event,
-        });
+        }), device._state);
     }
 
     pub fn createQueryPool(device: *const Device, options: QueryPoolOptions) Error!QueryPool {
@@ -3106,8 +3178,11 @@ pub const Device = struct {
             .sType = raw.VK_STRUCTURE_TYPE_ACQUIRE_PROFILING_LOCK_INFO_KHR,
             .timeout = timeout.toRaw(),
         };
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
         try core.checkSuccessTracked(@constCast(&device._state), acquire(device_handle, &info));
         return .{
+            ._owner = owner,
             ._device_handle = device_handle,
             ._device_state = @constCast(&device._state),
             .release = release,
@@ -3221,7 +3296,9 @@ pub const Device = struct {
         }
         return .{
             ._handle = handle orelse return error.InvalidHandle,
+            ._owner = try .init(&handle),
             ._device_handle = device_handle,
+            ._device_state = device._state,
             .buffers_can_reset = options.flags.contains(.reset_command_buffer),
             .allocation_callbacks = device.allocation_callbacks,
             .destroy_command_pool = device.dispatch.destroy_command_pool,
@@ -3381,6 +3458,7 @@ pub const Device = struct {
         }
         return .{
             ._handle = live_handle,
+            ._owner = try .init(&live_handle),
             ._device_handle = device_handle,
             ._device_state = @constCast(&device._state),
             .allocation_callbacks = options.allocation_callbacks,
@@ -5121,6 +5199,7 @@ var test_create_image_view_count: usize = 0;
 var test_create_image_view_fail_at: ?usize = null;
 var test_profiling_result: raw.VkResult = raw.VK_SUCCESS;
 var test_release_profiling_count: usize = 0;
+var test_destroy_swapchain_count: usize = 0;
 var test_destroy_buffer_count: usize = 0;
 var test_destroy_buffer_view_count: usize = 0;
 var test_free_memory_count: usize = 0;
@@ -5249,6 +5328,10 @@ fn testEnumerateDeviceExtensions(
 
 fn testHandle(comptime OptionalHandle: type, address: usize) NonNullHandle(OptionalHandle) {
     return @ptrFromInt(address);
+}
+
+fn testOwner() core.Owner {
+    return core.Owner.init({}) catch unreachable;
 }
 
 fn testUnused() callconv(.c) void {}
@@ -6045,7 +6128,9 @@ fn testDestroySwapchain(
     _: raw.VkDevice,
     _: raw.VkSwapchainKHR,
     _: [*c]const raw.VkAllocationCallbacks,
-) callconv(.c) void {}
+) callconv(.c) void {
+    test_destroy_swapchain_count += 1;
+}
 
 fn testGetSwapchainImages(
     _: raw.VkDevice,
@@ -6358,6 +6443,7 @@ fn testSwapchainMetadata() SwapchainMetadata {
 fn testInstance() Instance {
     return .{
         ._handle = testHandle(raw.VkInstance, 0x1000),
+        ._owner = testOwner(),
         ._debug_messenger = null,
         .allocation_callbacks = null,
         .dispatch = .{
@@ -6404,7 +6490,9 @@ fn testInstance() Instance {
 fn testDevice() Device {
     return .{
         ._handle = testHandle(raw.VkDevice, 0x2000),
+        ._owner = testOwner(),
         ._instance_handle = testHandle(raw.VkInstance, 0x1000),
+        ._state = core.DeviceState.init() catch unreachable,
         .allocation_callbacks = null,
         .dispatch = .{
             .get_device_proc_addr = testGetDeviceProcAddr,
@@ -6651,6 +6739,55 @@ test "owned handles reject inactive use and deinit is idempotent" {
         error.InactiveObject,
         device.load(command.set_debug_utils_object_name_ext),
     );
+}
+
+test "copied top-level owners destroy once and invalidate borrowed children" {
+    test_destroy_instance_count = 0;
+    var instance = testInstance();
+    var copied_instance = instance;
+    copied_instance.deinit();
+    try std.testing.expectError(error.CopiedOwner, instance.rawHandle());
+    instance.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_instance_count);
+
+    test_destroy_device_count = 0;
+    test_destroy_buffer_count = 0;
+    test_resource_result = raw.VK_SUCCESS;
+    var device = testDevice();
+    var child_buffer = try device.createBuffer(.{
+        .size = .fromBytes(32),
+        .usage = .init(&.{.transfer_src}),
+    });
+    var copied_device = device;
+    copied_device.deinit();
+    try std.testing.expectError(error.CopiedOwner, device.rawHandle());
+    try std.testing.expectError(error.InactiveObject, child_buffer.rawHandle());
+    child_buffer.deinit();
+    child_buffer.deinit();
+    device.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_device_count);
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_buffer_count);
+
+    test_destroy_swapchain_count = 0;
+    var swapchain: Swapchain = .{
+        ._handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        ._owner = testOwner(),
+        ._device_handle = testHandle(raw.VkDevice, 0x2000),
+        .allocation_callbacks = null,
+        .destroy_swapchain = testDestroySwapchain,
+        .get_swapchain_images = testGetSwapchainImages,
+        .acquire_next_image = testAcquireNextImage,
+        .create_image_view = testCreateImageView,
+        .destroy_image_view = testDestroyImageView,
+        .metadata_value = testSwapchainMetadata(),
+    };
+    var storage: [2]SwapchainImage = undefined;
+    const borrowed = try swapchain.imagesInto(&storage);
+    var copied_swapchain = swapchain;
+    copied_swapchain.deinit();
+    swapchain.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_swapchain_count);
+    try std.testing.expectError(error.StaleBorrow, borrowed[0].rawHandle());
 }
 
 test "device loss is monotonic and short-circuits later dispatch" {
@@ -7041,6 +7178,7 @@ test "events support host operations and legacy command-buffer barriers" {
     try command_buffer.begin(.{});
     const compute_pipeline: Pipeline = .{
         ._handle = testHandle(raw.VkPipeline, 0x5360),
+        ._owner = testOwner(),
         ._device_handle = device._handle.?,
         .bind_point = .compute,
         .allocation_callbacks = null,
@@ -7538,6 +7676,7 @@ test "dynamic rendering scopes record typed attachments and end once" {
 
     const view: ImageView = .{
         ._handle = testHandle(raw.VkImageView, 0x5100),
+        ._owner = testOwner(),
         ._device_handle = device._handle.?,
         .format = .b8g8r8a8_srgb,
         .samples = ._1,
@@ -7580,6 +7719,7 @@ test "dynamic rendering scopes record typed attachments and end once" {
     });
     const graphics_pipeline: Pipeline = .{
         ._handle = testHandle(raw.VkPipeline, 0x5200),
+        ._owner = testOwner(),
         ._device_handle = device._handle.?,
         .bind_point = .graphics,
         ._dynamic_rendering = true,
@@ -7595,6 +7735,7 @@ test "dynamic rendering scopes record typed attachments and end once" {
     }, 1, 0);
     const indirect: Buffer = .{
         ._handle = testHandle(raw.VkBuffer, 0x5250),
+        ._owner = testOwner(),
         ._device_handle = device._handle.?,
         .size = .fromBytes(64),
         .allocation_callbacks = null,
@@ -7699,6 +7840,7 @@ test "legacy render-pass scopes validate compatibility subpasses imageless views
     defer framebuffer.deinit();
     const view: ImageView = .{
         ._handle = testHandle(raw.VkImageView, 0x5800),
+        ._owner = testOwner(),
         ._device_handle = device._handle.?,
         .format = .r8g8b8a8_unorm,
         .samples = ._1,
@@ -7722,6 +7864,7 @@ test "legacy render-pass scopes validate compatibility subpasses imageless views
     const render_pass_handle = try render_pass.rawHandle();
     const pipeline0: Pipeline = .{
         ._handle = testHandle(raw.VkPipeline, 0x5900),
+        ._owner = testOwner(),
         ._device_handle = device._handle.?,
         .bind_point = .graphics,
         ._render_pass_handle = render_pass_handle,
@@ -7731,6 +7874,7 @@ test "legacy render-pass scopes validate compatibility subpasses imageless views
     };
     const pipeline1: Pipeline = .{
         ._handle = testHandle(raw.VkPipeline, 0x5910),
+        ._owner = testOwner(),
         ._device_handle = device._handle.?,
         .bind_point = .graphics,
         ._render_pass_handle = render_pass_handle,
@@ -7825,7 +7969,7 @@ test "destroyed command pools invalidate their borrowed command buffers" {
     var pool = try device.createCommandPool(.{ .family_index = .fromRaw(0) });
     var command_buffer = try pool.allocateCommandBuffer(.{});
     pool.deinit();
-    try std.testing.expectError(error.InactiveObject, command_buffer.begin(.{}));
+    try std.testing.expectError(error.StaleBorrow, command_buffer.begin(.{}));
     command_buffer.deinit();
     command_buffer.deinit();
 }
@@ -7833,11 +7977,15 @@ test "destroyed command pools invalidate their borrowed command buffers" {
 test "debug label scopes end once" {
     test_end_command_label_count = 0;
     var scope: CommandBufferLabelScope = .{
+        ._owner = testOwner(),
         .command_buffer = testHandle(raw.VkCommandBuffer, 0x5500),
         .end_label = testCmdEndLabel,
     };
+    var copied_scope = scope;
+    copied_scope.end();
     scope.end();
     scope.deinit();
+    copied_scope.deinit();
     try std.testing.expectEqual(@as(usize, 1), test_end_command_label_count);
 }
 
@@ -7850,6 +7998,7 @@ test "swapchain acquisition and presentation preserve operation statuses" {
     defer semaphore.deinit();
     var swapchain: Swapchain = .{
         ._handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        ._owner = testOwner(),
         ._device_handle = device._handle.?,
         ._device_state = &device._state,
         .allocation_callbacks = null,
@@ -7895,6 +8044,11 @@ test "swapchain acquisition and presentation preserve operation statuses" {
         swapchain.acquireNextImage(.{ .semaphore = &semaphore }),
     );
 
+    // Exercise presentation statuses with a fresh fake device generation after the loss checks.
+    var presentation_state = try core.DeviceState.init();
+    defer presentation_state.markDestroyed();
+    semaphore._device_state = presentation_state;
+    swapchain._device_state = &presentation_state;
     const queue: Queue = .{
         ._handle = testHandle(raw.VkQueue, 0x2100),
         ._device_handle = device._handle.?,
@@ -7926,6 +8080,7 @@ test "swapchain acquisition and presentation preserve operation statuses" {
 test "swapchain destruction invalidates borrowed images" {
     var swapchain: Swapchain = .{
         ._handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        ._owner = testOwner(),
         ._device_handle = testHandle(raw.VkDevice, 0x2000),
         .allocation_callbacks = null,
         .destroy_swapchain = testDestroySwapchain,
@@ -7950,6 +8105,7 @@ test "swapchain retains metadata and batch views roll back or become stale" {
     test_destroy_image_view_count = 0;
     var swapchain: Swapchain = .{
         ._handle = testHandle(raw.VkSwapchainKHR, 0x4000),
+        ._owner = testOwner(),
         ._device_handle = testHandle(raw.VkDevice, 0x2000),
         .allocation_callbacks = null,
         .destroy_swapchain = testDestroySwapchain,
@@ -8390,6 +8546,25 @@ test "buffer wrappers cover creation views addresses sharing and checked binding
 
     buffer.deinit();
     buffer.deinit();
+    try std.testing.expectEqual(@as(usize, 1), test_destroy_buffer_count);
+}
+
+test "copied resource owners destroy once and reject the losing copy" {
+    test_resource_result = raw.VK_SUCCESS;
+    test_resource_null_handle = false;
+    test_destroy_buffer_count = 0;
+    var device = testDevice();
+    defer device.deinit();
+
+    var buffer = try device.createBuffer(.{
+        .size = .fromBytes(64),
+        .usage = .init(&.{.transfer_src}),
+    });
+    var copied_buffer = buffer;
+    copied_buffer.deinit();
+    try std.testing.expectError(error.CopiedOwner, buffer.rawHandle());
+    buffer.deinit();
+    copied_buffer.deinit();
     try std.testing.expectEqual(@as(usize, 1), test_destroy_buffer_count);
 }
 

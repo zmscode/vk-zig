@@ -166,6 +166,7 @@ pub const Session = struct {
 
     pub fn rawHandle(session: *const Session) core.Error!raw.VkOpticalFlowSessionNV {
         try session._owner.validate(session);
+        try session._device_state.ensureDispatchAllowed();
         return session._handle orelse error.InactiveObject;
     }
 
@@ -267,7 +268,7 @@ pub fn create(
         .allocation_callbacks = allocation_callbacks,
         .dispatch = dispatch,
     };
-    output._owner = .init(output);
+    output._owner = try .init(output);
 }
 
 pub fn formatsInto(

@@ -129,7 +129,9 @@ pub const Dispatch = struct {
 
 pub const Image = struct {
     _handle: ?ImageHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     format: types.Format,
     extent: types.Extent3D,
     samples: types.SampleCountBit,
@@ -140,12 +142,15 @@ pub const Image = struct {
     bound_memory: ?memory.Binding = null,
 
     pub fn deinit(image: *Image) void {
+        if (!(image._owner.release(image) catch return)) return;
         const handle = image._handle orelse return;
         image.dispatch.destroy_image(image._device_handle, handle, image.allocation_callbacks);
         image._handle = null;
     }
 
     pub fn rawHandle(image: *const Image) core.Error!raw.VkImage {
+        try image._owner.validate(image);
+        if (image._device_state) |*state| try state.ensureDispatchAllowed();
         return image._handle orelse error.InactiveObject;
     }
 
@@ -263,7 +268,7 @@ pub const Image = struct {
         {
             return error.InvalidOptions;
         }
-        const allocation_handle = allocation._handle orelse return error.InactiveObject;
+        const allocation_handle = (try allocation.rawHandle()) orelse return error.InvalidHandle;
         const image_handle = try image.rawHandle();
         if (image.dispatch.bind_image_memory2) |bind2| {
             const info: raw.VkBindImageMemoryInfo = .{
@@ -295,7 +300,7 @@ pub const Reference = union(enum) {
 
     pub fn handle(reference: Reference) core.Error!ImageHandle {
         return switch (reference) {
-            .owned => |image| image._handle orelse error.InactiveObject,
+            .owned => |image| (try image.rawHandle()) orelse error.InvalidHandle,
             .swapchain => |image| try image.rawHandle(),
         };
     }
@@ -404,6 +409,7 @@ pub fn create(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .format = options.format,
         .extent = options.extent,
@@ -417,23 +423,30 @@ pub fn create(
 
 pub const View = struct {
     _handle: ?ImageViewHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     format: types.Format,
     samples: ?types.SampleCountBit,
     extent: ?types.Extent3D,
     layer_count: ?u32,
     _image_borrow: ?core.Generation.Borrow = null,
+    _image_owner: ?core.Owner.Borrow = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_image_view: CommandFunction(raw.PFN_vkDestroyImageView),
 
     pub fn deinit(view: *View) void {
+        if (!(view._owner.release(view) catch return)) return;
         const handle = view._handle orelse return;
         view.destroy_image_view(view._device_handle, handle, view.allocation_callbacks);
         view._handle = null;
     }
 
     pub fn rawHandle(view: *const View) core.Error!raw.VkImageView {
+        try view._owner.validate(view);
+        if (view._device_state) |*state| try state.ensureDispatchAllowed();
         if (view._image_borrow) |borrow| try borrow.validate();
+        if (view._image_owner) |owner| try owner.validate();
         return view._handle orelse error.InactiveObject;
     }
 
@@ -474,6 +487,7 @@ pub fn createView(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .format = options.format,
         .samples = switch (options.image) {
@@ -491,6 +505,10 @@ pub fn createView(
         ._image_borrow = switch (options.image) {
             .owned => null,
             .swapchain => |value| value._swapchain_borrow,
+        },
+        ._image_owner = switch (options.image) {
+            .owned => |value| value._owner.borrow(),
+            .swapchain => null,
         },
         .allocation_callbacks = allocation_callbacks,
         .destroy_image_view = destroy_image_view,
@@ -517,6 +535,7 @@ fn testSparseRequirements(_: raw.VkDevice, _: raw.VkImage, count: [*c]u32, outpu
 test "owned images expose typed layouts, sparse requirements, and host-copy availability" {
     var value: Image = .{
         ._handle = @ptrFromInt(0x1000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = @ptrFromInt(0x2000),
         .format = .r8g8b8a8_unorm,
         .extent = .{ .width = 16, .height = 16, .depth = 1 },

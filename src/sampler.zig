@@ -163,17 +163,22 @@ pub const Dispatch = struct {
 
 pub const Sampler = struct {
     _handle: ?SamplerHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_sampler: CommandFunction(raw.PFN_vkDestroySampler),
 
     pub fn deinit(sampler: *Sampler) void {
+        if (!(sampler._owner.release(sampler) catch return)) return;
         const handle = sampler._handle orelse return;
         sampler.destroy_sampler(sampler._device_handle, handle, sampler.allocation_callbacks);
         sampler._handle = null;
     }
 
     pub fn rawHandle(sampler: *const Sampler) core.Error!raw.VkSampler {
+        try sampler._owner.validate(sampler);
+        if (sampler._device_state) |*state| try state.ensureDispatchAllowed();
         return sampler._handle orelse error.InactiveObject;
     }
 
@@ -257,6 +262,7 @@ pub fn create(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .allocation_callbacks = allocation_callbacks,
         .destroy_sampler = dispatch.destroy,
@@ -323,17 +329,22 @@ pub const YcbcrDispatch = struct {
 
 pub const YcbcrConversion = struct {
     _handle: ?ConversionHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_conversion: CommandFunction(raw.PFN_vkDestroySamplerYcbcrConversion),
 
     pub fn deinit(conversion: *YcbcrConversion) void {
+        if (!(conversion._owner.release(conversion) catch return)) return;
         const handle = conversion._handle orelse return;
         conversion.destroy_conversion(conversion._device_handle, handle, conversion.allocation_callbacks);
         conversion._handle = null;
     }
 
     pub fn rawHandle(conversion: *const YcbcrConversion) core.Error!raw.VkSamplerYcbcrConversion {
+        try conversion._owner.validate(conversion);
+        if (conversion._device_state) |*state| try state.ensureDispatchAllowed();
         return conversion._handle orelse error.InactiveObject;
     }
 
@@ -369,6 +380,7 @@ pub fn createYcbcrConversion(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .allocation_callbacks = allocation_callbacks,
         .destroy_conversion = dispatch.destroy,
@@ -429,6 +441,7 @@ test "sampler validation, extension chains, and rollback are deterministic" {
     const device_handle: DeviceHandle = @ptrFromInt(0x1000);
     const conversion: YcbcrConversion = .{
         ._handle = @ptrFromInt(0x3000),
+        ._owner = core.Owner.init({}) catch unreachable,
         ._device_handle = device_handle,
         .allocation_callbacks = null,
         .destroy_conversion = testDestroyConversion,

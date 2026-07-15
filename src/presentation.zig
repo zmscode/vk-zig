@@ -48,12 +48,14 @@ pub const HeadlessSurfaceOptions = struct {};
 
 pub const Surface = struct {
     _handle: ?SurfaceHandle,
+    _owner: core.Owner,
     _instance_handle: InstanceHandle,
     _instance_borrow: ?core.Generation.Borrow = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_surface: CommandFunction(raw.PFN_vkDestroySurfaceKHR),
 
     pub fn deinit(surface: *Surface) void {
+        if (!(surface._owner.release(surface) catch return)) return;
         const handle = surface._handle orelse return;
         if (surface._instance_borrow) |borrow| {
             borrow.validate() catch {
@@ -70,6 +72,7 @@ pub const Surface = struct {
     }
 
     pub fn rawHandle(surface: *const Surface) core.Error!raw.VkSurfaceKHR {
+        try surface._owner.validate(surface);
         if (surface._instance_borrow) |borrow| try borrow.validate();
         return surface._handle orelse error.InactiveObject;
     }
@@ -173,6 +176,7 @@ pub const PresentStatus = enum {
 
 pub const Swapchain = struct {
     _handle: ?SwapchainHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
     _device_state: ?*core.DeviceState = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
@@ -185,6 +189,7 @@ pub const Swapchain = struct {
     _image_generation: core.Generation = .{},
 
     pub fn deinit(swapchain: *Swapchain) void {
+        if (!(swapchain._owner.release(swapchain) catch return)) return;
         const handle = swapchain._handle orelse return;
         swapchain.destroy_swapchain(
             swapchain._device_handle,
@@ -196,6 +201,8 @@ pub const Swapchain = struct {
     }
 
     pub fn rawHandle(swapchain: *const Swapchain) core.Error!raw.VkSwapchainKHR {
+        try swapchain._owner.validate(swapchain);
+        if (swapchain._device_state) |state| try state.ensureDispatchAllowed();
         return swapchain._handle orelse error.InactiveObject;
     }
 
@@ -271,7 +278,7 @@ pub const Swapchain = struct {
                 ._handle = raw_image orelse return error.InvalidHandle,
                 ._device_handle = swapchain._device_handle,
                 ._swapchain_handle = live_handle,
-                ._swapchain_borrow = swapchain._image_generation.borrow(),
+                ._swapchain_borrow = swapchain._image_generation.borrowOwner(&swapchain._owner),
                 .index = .fromRaw(@intCast(index)),
             };
         }

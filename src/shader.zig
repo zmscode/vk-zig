@@ -127,17 +127,22 @@ pub const Dispatch = struct {
 
 pub const Module = struct {
     _handle: ?ShaderModuleHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: Dispatch,
 
     pub fn deinit(module: *Module) void {
+        if (!(module._owner.release(module) catch return)) return;
         const handle = module._handle orelse return;
         module.dispatch.destroy(module._device_handle, handle, module.allocation_callbacks);
         module._handle = null;
     }
 
     pub fn rawHandle(module: *const Module) core.Error!raw.VkShaderModule {
+        try module._owner.validate(module);
+        if (module._device_state) |*state| try state.ensureDispatchAllowed();
         return module._handle orelse error.InactiveObject;
     }
 
@@ -179,6 +184,7 @@ pub fn createWords(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .allocation_callbacks = allocation_callbacks,
         .dispatch = dispatch,

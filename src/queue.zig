@@ -61,11 +61,13 @@ pub const Dispatch = struct {
 };
 
 pub const LabelScope = struct {
+    _owner: core.Owner,
     queue: QueueHandle,
     end_label: CommandFunction(raw.PFN_vkQueueEndDebugUtilsLabelEXT),
     active: bool = true,
 
     pub fn end(scope: *LabelScope) void {
+        if (!(scope._owner.release(scope) catch return)) return;
         if (!scope.active) return;
         scope.end_label(scope.queue);
         scope.active = false;
@@ -310,8 +312,10 @@ pub const Queue = struct {
         options: debug_utils.LabelOptions,
     ) core.Error!LabelScope {
         const end_label = queue.queue_end_debug_utils_label_ext orelse return error.MissingCommand;
+        var owner = try core.Owner.init({});
+        errdefer _ = owner.release({}) catch {};
         try queue.beginLabel(options);
-        return .{ .queue = queue._handle, .end_label = end_label };
+        return .{ ._owner = owner, .queue = queue._handle, .end_label = end_label };
     }
 
     pub fn endLabel(queue: *const Queue) core.Error!void {

@@ -97,13 +97,16 @@ pub const Dispatch = struct {
 
 pub const Buffer = struct {
     _handle: ?BufferHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     size: Size,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     dispatch: Dispatch,
     bound_memory: ?memory.Binding = null,
 
     pub fn deinit(buffer: *Buffer) void {
+        if (!(buffer._owner.release(buffer) catch return)) return;
         const handle = buffer._handle orelse return;
         buffer.dispatch.destroy_buffer(
             buffer._device_handle,
@@ -114,6 +117,8 @@ pub const Buffer = struct {
     }
 
     pub fn rawHandle(buffer: *const Buffer) core.Error!raw.VkBuffer {
+        try buffer._owner.validate(buffer);
+        if (buffer._device_state) |*state| try state.ensureDispatchAllowed();
         return buffer._handle orelse error.InactiveObject;
     }
 
@@ -191,7 +196,7 @@ pub const Buffer = struct {
         {
             return error.InvalidOptions;
         }
-        const allocation_handle = allocation._handle orelse return error.InactiveObject;
+        const allocation_handle = (try allocation.rawHandle()) orelse return error.InvalidHandle;
         const buffer_handle = try buffer.rawHandle();
         if (buffer.dispatch.bind_buffer_memory2) |bind2| {
             const info: raw.VkBindBufferMemoryInfo = .{
@@ -215,18 +220,23 @@ pub const Buffer = struct {
 
 pub const View = struct {
     _handle: ?BufferViewHandle,
+    _owner: core.Owner,
     _device_handle: DeviceHandle,
+    _device_state: ?core.DeviceState = null,
     _buffer_handle: BufferHandle,
     allocation_callbacks: ?*const raw.VkAllocationCallbacks,
     destroy_buffer_view: CommandFunction(raw.PFN_vkDestroyBufferView),
 
     pub fn deinit(view: *View) void {
+        if (!(view._owner.release(view) catch return)) return;
         const handle = view._handle orelse return;
         view.destroy_buffer_view(view._device_handle, handle, view.allocation_callbacks);
         view._handle = null;
     }
 
     pub fn rawHandle(view: *const View) core.Error!raw.VkBufferView {
+        try view._owner.validate(view);
+        if (view._device_state) |*state| try state.ensureDispatchAllowed();
         return view._handle orelse error.InactiveObject;
     }
 
@@ -307,6 +317,7 @@ pub fn create(
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = device_handle,
         .size = options.size,
         .allocation_callbacks = allocation_callbacks,
@@ -315,7 +326,7 @@ pub fn create(
 }
 
 pub fn createView(buffer: *const Buffer, options: ViewOptions) core.Error!View {
-    const buffer_handle = buffer._handle orelse return error.InactiveObject;
+    const buffer_handle = (try buffer.rawHandle()) orelse return error.InvalidHandle;
     const offset = options.offset.bytes();
     if (offset >= buffer.size.bytes()) return error.InvalidOptions;
     switch (options.range) {
@@ -354,6 +365,7 @@ pub fn createView(buffer: *const Buffer, options: ViewOptions) core.Error!View {
     }
     return .{
         ._handle = handle orelse return error.InvalidHandle,
+        ._owner = try .init(&handle),
         ._device_handle = buffer._device_handle,
         ._buffer_handle = buffer_handle,
         .allocation_callbacks = buffer.allocation_callbacks,
