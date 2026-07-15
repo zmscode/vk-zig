@@ -21,6 +21,8 @@ modules so changes do not accumulate in one file:
 - `workflows.zig`: optional bounded uploads, one-time submissions, retirement, and cache helpers.
 - `presentation.zig`: surfaces, swapchains, image acquisition, and presentation data.
 - `query.zig`: query pools, typed readback, timestamps, calibration, and performance queries.
+- `mesh_shader.zig`: EXT/NV mesh-task limits and direct/indirect recording.
+- `fragment_shading_rate.zig`: KHR/NV rates, images, palettes, combiners, and recording.
 - `debug_utils.zig`: typed validation messages, callbacks, labels, and messengers.
 
 Generated raw declarations and typed Vulkan vocabulary remain separate build

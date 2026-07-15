@@ -190,6 +190,10 @@ test "wrapper exposes typed Vulkan lifecycle objects" {
     try std.testing.expect(@hasDecl(vk.external.Context, "exportMemoryFd"));
     try std.testing.expect(@hasDecl(vk.external.Context, "importSemaphoreFd"));
     try std.testing.expect(@hasDecl(vk.external.Context, "importFenceFd"));
+    try std.testing.expect(@hasDecl(vk, "mesh_shader"));
+    try std.testing.expect(@hasDecl(vk.mesh_shader, "Recorder"));
+    try std.testing.expect(@hasDecl(vk, "fragment_shading_rate"));
+    try std.testing.expect(@hasDecl(vk.fragment_shading_rate, "Controller"));
 }
 
 test "generated commands bind scope, name, and function type" {

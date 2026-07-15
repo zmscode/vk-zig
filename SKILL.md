@@ -101,6 +101,16 @@ consumes imported fds/Zircon handles only on success. Win32 imports retain calle
 Treat `error.UnsupportedOperation` as target-inapplicable and `error.MissingCommand` as an enabled
 target/extension whose runtime entry point is unavailable.
 
+For mesh/task pipelines, use `vk.mesh_shader.FeaturesExt` or `FeaturesNv` in an
+`ExtensionFeatureChain`, query the matching `PhysicalDevice.meshShaderProperties*` method, then
+record with `device.meshShaderRecorder()`. Choose `.ext` or `.nv` explicitly for indirect draws;
+do not translate their different indirect command layouts yourself. For variable-rate shading,
+use `vk.fragment_shading_rate.Features`, query `fragmentShadingRateProperties` and
+`fragmentShadingRates`, set `GraphicsPipelineOptions.fragment_shading_rate`, and use the typed
+dynamic-rendering rate attachment. Dynamic KHR rates and NV image/palette operations belong on
+`device.fragmentShadingRateController()`. Treat `error.MissingCommand` as an unsupported selected
+variant rather than falling across vendor APIs.
+
 Deinitialize children before parents: swapchains, then devices, surfaces, instances, and finally
 the loader. An instance configured with a typed debug messenger owns and destroys that messenger
 before destroying itself. Queues and swapchain images are non-owning and need no deinit.

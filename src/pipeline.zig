@@ -373,6 +373,25 @@ pub const GraphicsCompatibility = union(enum) {
     render_pass: LegacyRenderPassCompatibility,
 };
 
+pub const FragmentShadingRateCombiner = enum(raw.VkFragmentShadingRateCombinerOpKHR) {
+    keep = raw.VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
+    replace = raw.VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR,
+    minimum = raw.VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_KHR,
+    maximum = raw.VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR,
+    multiply = raw.VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MUL_KHR,
+    _,
+
+    pub fn toRaw(value: FragmentShadingRateCombiner) raw.VkFragmentShadingRateCombinerOpKHR {
+        return @intFromEnum(value);
+    }
+};
+
+pub const FragmentShadingRateState = struct {
+    fragment_size: types.Extent2D,
+    pipeline_with_primitive: FragmentShadingRateCombiner = .keep,
+    result_with_attachment: FragmentShadingRateCombiner = .keep,
+};
+
 pub const GraphicsOptions = struct {
     stages: []const shader.StageOptions,
     layout: *const Layout,
@@ -389,6 +408,7 @@ pub const GraphicsOptions = struct {
     color_blend_attachments: []const ColorBlendAttachment = &.{},
     blend_constants: [4]f32 = .{ 0, 0, 0, 0 },
     dynamic_states: []const DynamicState = &.{ .viewport, .scissor },
+    fragment_shading_rate: ?FragmentShadingRateState = null,
     compatibility: GraphicsCompatibility = .{ .dynamic_rendering = .{} },
     cache: ?*const pipeline_tools.Cache = null,
     fail_on_compile_required: bool = false,
@@ -690,7 +710,7 @@ pub fn createGraphics(
     };
     var color_formats: [16]raw.VkFormat = undefined;
     for (dynamic_formats.color, 0..) |format, index| color_formats[index] = format.toRaw();
-    const dynamic_rendering: raw.VkPipelineRenderingCreateInfo = .{
+    var dynamic_rendering: raw.VkPipelineRenderingCreateInfo = .{
         .sType = raw.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .viewMask = dynamic_formats.view_mask,
         .colorAttachmentCount = @intCast(dynamic_formats.color.len),
@@ -698,9 +718,26 @@ pub fn createGraphics(
         .depthAttachmentFormat = if (dynamic_formats.depth) |format| format.toRaw() else raw.VK_FORMAT_UNDEFINED,
         .stencilAttachmentFormat = if (dynamic_formats.stencil) |format| format.toRaw() else raw.VK_FORMAT_UNDEFINED,
     };
+    var fragment_shading_rate: raw.VkPipelineFragmentShadingRateStateCreateInfoKHR = .{
+        .sType = raw.VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR,
+    };
+    if (options.fragment_shading_rate) |value| {
+        if (value.fragment_size.width == 0 or value.fragment_size.height == 0) return error.InvalidOptions;
+        fragment_shading_rate.fragmentSize = value.fragment_size.toRaw();
+        fragment_shading_rate.combinerOps = .{
+            value.pipeline_with_primitive.toRaw(),
+            value.result_with_attachment.toRaw(),
+        };
+        if (options.compatibility == .dynamic_rendering) fragment_shading_rate.pNext = &dynamic_rendering;
+    }
     const info: raw.VkGraphicsPipelineCreateInfo = .{
         .sType = raw.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = if (options.compatibility == .dynamic_rendering) &dynamic_rendering else null,
+        .pNext = if (options.fragment_shading_rate != null)
+            &fragment_shading_rate
+        else if (options.compatibility == .dynamic_rendering)
+            &dynamic_rendering
+        else
+            null,
         .flags = creationFlags(options.fail_on_compile_required),
         .stageCount = @intCast(stages.len),
         .pStages = stages.ptr,
@@ -795,6 +832,7 @@ var test_layout_destroy_count: usize = 0;
 var test_pipeline_result: raw.VkResult = raw.VK_SUCCESS;
 var test_pipeline_destroy_count: usize = 0;
 var test_graphics_has_rendering = false;
+var test_graphics_has_fragment_shading_rate = false;
 var test_graphics_render_pass: raw.VkRenderPass = null;
 var test_graphics_subpass: u32 = 0;
 
@@ -846,7 +884,17 @@ fn testCreateGraphicsPipeline(
     output: [*c]raw.VkPipeline,
 ) callconv(.c) raw.VkResult {
     for (0..count) |index| output[index] = @ptrFromInt(0x6000 + index);
-    test_graphics_has_rendering = infos[0].pNext != null;
+    test_graphics_has_rendering = false;
+    test_graphics_has_fragment_shading_rate = false;
+    var next: [*c]const raw.VkBaseInStructure = @ptrCast(@alignCast(infos[0].pNext));
+    while (next != null) : (next = next.*.pNext) {
+        if (next.*.sType == raw.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO) {
+            test_graphics_has_rendering = true;
+        }
+        if (next.*.sType == raw.VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR) {
+            test_graphics_has_fragment_shading_rate = true;
+        }
+    }
     test_graphics_render_pass = infos[0].renderPass;
     test_graphics_subpass = infos[0].subpass;
     return test_pipeline_result;
@@ -967,10 +1015,16 @@ test "compute pipeline batches preserve compile status and roll back earlier suc
         .stages = &.{.{ .stage = .vertex, .module = &module }},
         .layout = &layout,
         .color_blend_attachments = &.{.{}},
+        .fragment_shading_rate = .{
+            .fragment_size = .{ .width = 2, .height = 2 },
+            .pipeline_with_primitive = .replace,
+            .result_with_attachment = .multiply,
+        },
         .compatibility = .{ .dynamic_rendering = .{ .color = &.{.b8g8r8a8_srgb} } },
     });
     try std.testing.expect(graphics_result == .success);
     try std.testing.expect(test_graphics_has_rendering);
+    try std.testing.expect(test_graphics_has_fragment_shading_rate);
     switch (graphics_result) {
         .success => |*value| value.deinit(),
         .compile_required => unreachable,

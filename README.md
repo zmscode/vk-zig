@@ -461,6 +461,16 @@ for an inapplicable target return `error.UnsupportedOperation`; an enabled exten
 is unavailable returns `error.MissingCommand`. DMA-BUF uses `.dma_buf_ext` with the fd methods,
 while DRM modifier compatibility remains in the typed format/image queries.
 
+Mesh/task shading keeps EXT and NV semantics explicit. Query limits from
+`meshShaderPropertiesExt` or `meshShaderPropertiesNv`, request the generated feature node through
+an `ExtensionFeatureChain`, and record through `device.meshShaderRecorder()`. The recorder offers
+typed EXT work groups, NV task ranges, and variant-tagged indirect/count draws. Fragment shading
+rate follows the same pattern: enumerate supported rates with `fragmentShadingRates`, add
+`fragment_shading_rate` to graphics pipeline options, attach a rate image through dynamic
+rendering, and use `device.fragmentShadingRateController()` for dynamic KHR rates or NV images and
+palettes. Unsupported vendor commands return `error.MissingCommand`; there is no silent fallback
+between EXT, KHR, and NV behavior.
+
 `deviceExtensions` enumerates per-device support. Once `VK_KHR_swapchain` is enabled on the
 logical device, create and own a swapchain without manually loading its commands:
 

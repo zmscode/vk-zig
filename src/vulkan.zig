@@ -32,6 +32,8 @@ pub const tooling = @import("diagnostics.zig");
 pub const workflows = @import("workflows.zig");
 pub const optical_flow = @import("optical_flow.zig");
 pub const video = @import("video.zig");
+pub const mesh_shader = @import("mesh_shader.zig");
+pub const fragment_shading_rate = @import("fragment_shading_rate.zig");
 
 /// Deprecated short name retained while applications migrate to `synchronization`.
 pub const sync = synchronization;
@@ -1644,6 +1646,107 @@ pub const PhysicalDevice = struct {
         return .fromRaw(output);
     }
 
+    pub fn meshShaderPropertiesExt(device: *const PhysicalDevice) Error!mesh_shader.ExtProperties {
+        const get_properties = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var extension_properties: raw.VkPhysicalDeviceMeshShaderPropertiesEXT = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT,
+        };
+        var root: raw.VkPhysicalDeviceProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &extension_properties,
+        };
+        get_properties(device._handle, &root);
+        return .fromRaw(extension_properties);
+    }
+
+    pub fn meshShaderPropertiesNv(device: *const PhysicalDevice) Error!mesh_shader.NvProperties {
+        const get_properties = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var extension_properties: raw.VkPhysicalDeviceMeshShaderPropertiesNV = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_NV,
+        };
+        var root: raw.VkPhysicalDeviceProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &extension_properties,
+        };
+        get_properties(device._handle, &root);
+        return .fromRaw(extension_properties);
+    }
+
+    pub fn fragmentShadingRateProperties(device: *const PhysicalDevice) Error!fragment_shading_rate.Properties {
+        const get_properties = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var extension_properties: raw.VkPhysicalDeviceFragmentShadingRatePropertiesKHR = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR,
+        };
+        var root: raw.VkPhysicalDeviceProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &extension_properties,
+        };
+        get_properties(device._handle, &root);
+        return .fromRaw(extension_properties);
+    }
+
+    pub fn shadingRateImagePropertiesNv(device: *const PhysicalDevice) Error!fragment_shading_rate.ImagePropertiesNv {
+        const get_properties = device.dispatch.get_physical_device_properties2 orelse return error.MissingCommand;
+        var extension_properties: raw.VkPhysicalDeviceShadingRateImagePropertiesNV = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADING_RATE_IMAGE_PROPERTIES_NV,
+        };
+        var root: raw.VkPhysicalDeviceProperties2 = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &extension_properties,
+        };
+        get_properties(device._handle, &root);
+        return .fromRaw(extension_properties);
+    }
+
+    pub fn fragmentShadingRateCount(device: *const PhysicalDevice) Error!u32 {
+        const enumerate = device.dispatch.get_physical_device_fragment_shading_rates orelse return error.MissingCommand;
+        var count: u32 = 0;
+        const result = enumerate(device._handle, &count, null);
+        try core.checkSuccess(result);
+        if (count > 256) return error.CountOverflow;
+        return count;
+    }
+
+    pub fn fragmentShadingRatesInto(
+        device: *const PhysicalDevice,
+        storage: []fragment_shading_rate.Rate,
+    ) Error![]fragment_shading_rate.Rate {
+        if (storage.len > 256) return error.CountOverflow;
+        const enumerate = device.dispatch.get_physical_device_fragment_shading_rates orelse return error.MissingCommand;
+        var raw_rates: [256]raw.VkPhysicalDeviceFragmentShadingRateKHR = undefined;
+        for (raw_rates[0..storage.len]) |*rate| rate.* = .{
+            .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR,
+        };
+        var count: u32 = @intCast(storage.len);
+        const result = enumerate(device._handle, &count, if (storage.len == 0) null else raw_rates[0..storage.len].ptr);
+        if (result == raw.VK_INCOMPLETE or count > storage.len) return error.BufferTooSmall;
+        try core.checkSuccess(result);
+        for (storage[0..count], raw_rates[0..count]) |*rate, raw_rate| rate.* = .fromRaw(raw_rate);
+        return storage[0..count];
+    }
+
+    pub fn fragmentShadingRates(
+        device: *const PhysicalDevice,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]fragment_shading_rate.Rate {
+        var output = try gpa.alloc(fragment_shading_rate.Rate, try device.fragmentShadingRateCount());
+        errdefer gpa.free(output);
+        for (0..enumeration_attempt_count_max) |_| {
+            const written = device.fragmentShadingRatesInto(output) catch |err| switch (err) {
+                error.BufferTooSmall => {
+                    const required = try device.fragmentShadingRateCount();
+                    const next = if (required > output.len) required else @min(output.len * 2, 256);
+                    if (next <= output.len) return error.EnumerationUnstable;
+                    output = try gpa.realloc(output, next);
+                    continue;
+                },
+                else => return err,
+            };
+            return gpa.realloc(output, written.len);
+        }
+        return error.EnumerationUnstable;
+    }
+
     /// Uses the Vulkan 1.1/KHR promoted query. Unsupported combinations return null.
     pub fn imageFormatProperties2(
         device: *const PhysicalDevice,
@@ -2979,6 +3082,29 @@ pub const Device = struct {
         };
     }
 
+    /// Loads EXT and NV mesh-shader recording commands independently. Calling
+    /// a method for an unavailable variant returns `error.MissingCommand`.
+    pub fn meshShaderRecorder(device: *const Device) Error!mesh_shader.Recorder {
+        return .{
+            ._draw_ext = try device.load(command.cmd_draw_mesh_tasks_ext),
+            ._draw_indirect_ext = try device.load(command.cmd_draw_mesh_tasks_indirect_ext),
+            ._draw_indirect_count_ext = try device.load(command.cmd_draw_mesh_tasks_indirect_count_ext),
+            ._draw_nv = try device.load(command.cmd_draw_mesh_tasks_nv),
+            ._draw_indirect_nv = try device.load(command.cmd_draw_mesh_tasks_indirect_nv),
+            ._draw_indirect_count_nv = try device.load(command.cmd_draw_mesh_tasks_indirect_count_nv),
+        };
+    }
+
+    /// Loads KHR and NV fragment-shading-rate recording commands.
+    pub fn fragmentShadingRateController(device: *const Device) Error!fragment_shading_rate.Controller {
+        return .{
+            ._set_rate = try device.load(command.cmd_set_fragment_shading_rate_khr),
+            ._set_enum_nv = try device.load(command.cmd_set_fragment_shading_rate_enum_nv),
+            ._bind_image_nv = try device.load(command.cmd_bind_shading_rate_image_nv),
+            ._set_palettes_nv = try device.load(command.cmd_set_viewport_shading_rate_palette_nv),
+        };
+    }
+
     /// Loads a dynamic command name without verifying that it matches the PFN type.
     pub fn loadUnchecked(
         device: *const Device,
@@ -4194,6 +4320,9 @@ const InstanceDispatch = struct {
     get_physical_device_external_fence_properties: ?CommandFunction(
         raw.PFN_vkGetPhysicalDeviceExternalFenceProperties,
     ),
+    get_physical_device_fragment_shading_rates: ?CommandFunction(
+        raw.PFN_vkGetPhysicalDeviceFragmentShadingRatesKHR,
+    ),
     get_physical_device_queue_family_properties: CommandFunction(
         raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
     ),
@@ -4355,6 +4484,12 @@ const InstanceDispatch = struct {
                 get_instance_proc_addr,
                 handle,
                 command.get_physical_device_external_fence_properties,
+                .instance,
+            ),
+            .get_physical_device_fragment_shading_rates = loadInstanceDescriptor(
+                get_instance_proc_addr,
+                handle,
+                command.get_physical_device_fragment_shading_rates_khr,
                 .instance,
             ),
             .get_physical_device_queue_family_properties = try loadInstanceRequired(
@@ -6041,6 +6176,12 @@ var test_rendering_has_stencil = false;
 var test_rendering_has_shading_rate = false;
 var test_rendering_has_density_map = false;
 var test_draw_count: usize = 0;
+var test_mesh_groups: [3]u32 = .{ 0, 0, 0 };
+var test_mesh_indirect_count: u32 = 0;
+var test_fragment_size: raw.VkExtent2D = .{};
+var test_fragment_combiners: [2]raw.VkFragmentShadingRateCombinerOpKHR = .{ 0, 0 };
+var test_shading_rate_image: raw.VkImageView = null;
+var test_shading_rate_palette_count: u32 = 0;
 var test_multi_draw_count: u32 = 0;
 var test_stencil_reference: u32 = 0;
 var test_event_status_result: raw.VkResult = raw.VK_EVENT_RESET;
@@ -6214,6 +6355,12 @@ fn testGetDeviceProcAddr(
     if (testNameEquals(name, "vkGetMemoryHostPointerPropertiesEXT")) return @ptrCast(&testGetMemoryHostPointerProperties);
     if (testNameEquals(name, "vkGetMemoryMetalHandleEXT")) return @ptrCast(&testGetMemoryMetalHandle);
     if (testNameEquals(name, "vkGetMemoryMetalHandlePropertiesEXT")) return @ptrCast(&testGetMemoryMetalHandleProperties);
+    if (testNameEquals(name, "vkCmdDrawMeshTasksEXT")) return @ptrCast(&testCmdDrawMeshTasksExt);
+    if (testNameEquals(name, "vkCmdDrawMeshTasksIndirectEXT")) return @ptrCast(&testCmdDrawMeshTasksIndirectExt);
+    if (testNameEquals(name, "vkCmdDrawMeshTasksIndirectCountEXT")) return @ptrCast(&testCmdDrawMeshTasksIndirectCountExt);
+    if (testNameEquals(name, "vkCmdSetFragmentShadingRateKHR")) return @ptrCast(&testCmdSetFragmentShadingRate);
+    if (testNameEquals(name, "vkCmdBindShadingRateImageNV")) return @ptrCast(&testCmdBindShadingRateImageNv);
+    if (testNameEquals(name, "vkCmdSetViewportShadingRatePaletteNV")) return @ptrCast(&testCmdSetViewportShadingRatePaletteNv);
     if (!testNameEquals(name, "vkSetDebugUtilsObjectNameEXT")) return null;
     if (test_missing_command == .set_object_name) return null;
     return @ptrCast(&testSetObjectName);
@@ -6332,6 +6479,64 @@ fn testGetPhysicalDeviceMemoryProperties2(
         budget.heapBudget[1] = 2048;
         budget.heapUsage[1] = 512;
     }
+}
+
+fn testGetPhysicalDeviceProperties2(
+    _: raw.VkPhysicalDevice,
+    properties: [*c]raw.VkPhysicalDeviceProperties2,
+) callconv(.c) void {
+    if (properties.*.pNext) |next| {
+        const base: *raw.VkBaseOutStructure = @ptrCast(@alignCast(next));
+        switch (base.sType) {
+            raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT => {
+                const value: *raw.VkPhysicalDeviceMeshShaderPropertiesEXT = @ptrCast(@alignCast(next));
+                value.maxMeshWorkGroupInvocations = 128;
+                value.maxMeshOutputVertices = 256;
+            },
+            raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_NV => {
+                const value: *raw.VkPhysicalDeviceMeshShaderPropertiesNV = @ptrCast(@alignCast(next));
+                value.maxDrawMeshTasksCount = 65_535;
+                value.maxMeshOutputVertices = 256;
+            },
+            raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR => {
+                const value: *raw.VkPhysicalDeviceFragmentShadingRatePropertiesKHR = @ptrCast(@alignCast(next));
+                value.minFragmentShadingRateAttachmentTexelSize = .{ .width = 1, .height = 1 };
+                value.maxFragmentShadingRateAttachmentTexelSize = .{ .width = 4, .height = 4 };
+                value.maxFragmentShadingRateRasterizationSamples = raw.VK_SAMPLE_COUNT_4_BIT;
+                value.fragmentShadingRateNonTrivialCombinerOps = raw.VK_TRUE;
+            },
+            raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADING_RATE_IMAGE_PROPERTIES_NV => {
+                const value: *raw.VkPhysicalDeviceShadingRateImagePropertiesNV = @ptrCast(@alignCast(next));
+                value.shadingRateTexelSize = .{ .width = 16, .height = 16 };
+                value.shadingRatePaletteSize = 12;
+            },
+            else => {},
+        }
+    }
+}
+
+fn testGetPhysicalDeviceFragmentShadingRates(
+    _: raw.VkPhysicalDevice,
+    count: [*c]u32,
+    rates: [*c]raw.VkPhysicalDeviceFragmentShadingRateKHR,
+) callconv(.c) raw.VkResult {
+    if (rates == null) {
+        count.* = 2;
+        return raw.VK_SUCCESS;
+    }
+    const written = @min(count.*, 2);
+    if (written > 0) rates[0] = .{
+        .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR,
+        .sampleCounts = raw.VK_SAMPLE_COUNT_1_BIT,
+        .fragmentSize = .{ .width = 1, .height = 1 },
+    };
+    if (written > 1) rates[1] = .{
+        .sType = raw.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR,
+        .sampleCounts = raw.VK_SAMPLE_COUNT_1_BIT | raw.VK_SAMPLE_COUNT_4_BIT,
+        .fragmentSize = .{ .width = 2, .height = 2 },
+    };
+    count.* = written;
+    return if (written < 2) raw.VK_INCOMPLETE else raw.VK_SUCCESS;
 }
 
 fn testExternalBufferProperties(
@@ -7087,6 +7292,63 @@ fn testCmdDraw(
     test_draw_count += 1;
 }
 
+fn testCmdDrawMeshTasksExt(
+    _: raw.VkCommandBuffer,
+    x: u32,
+    y: u32,
+    z: u32,
+) callconv(.c) void {
+    test_mesh_groups = .{ x, y, z };
+}
+
+fn testCmdDrawMeshTasksIndirectExt(
+    _: raw.VkCommandBuffer,
+    _: raw.VkBuffer,
+    _: raw.VkDeviceSize,
+    count: u32,
+    _: u32,
+) callconv(.c) void {
+    test_mesh_indirect_count = count;
+}
+
+fn testCmdDrawMeshTasksIndirectCountExt(
+    _: raw.VkCommandBuffer,
+    _: raw.VkBuffer,
+    _: raw.VkDeviceSize,
+    _: raw.VkBuffer,
+    _: raw.VkDeviceSize,
+    count: u32,
+    _: u32,
+) callconv(.c) void {
+    test_mesh_indirect_count = count;
+}
+
+fn testCmdSetFragmentShadingRate(
+    _: raw.VkCommandBuffer,
+    size: [*c]const raw.VkExtent2D,
+    combiners: [*c]const raw.VkFragmentShadingRateCombinerOpKHR,
+) callconv(.c) void {
+    test_fragment_size = size.*;
+    test_fragment_combiners = .{ combiners[0], combiners[1] };
+}
+
+fn testCmdBindShadingRateImageNv(
+    _: raw.VkCommandBuffer,
+    view: raw.VkImageView,
+    _: raw.VkImageLayout,
+) callconv(.c) void {
+    test_shading_rate_image = view;
+}
+
+fn testCmdSetViewportShadingRatePaletteNv(
+    _: raw.VkCommandBuffer,
+    _: u32,
+    count: u32,
+    _: [*c]const raw.VkShadingRatePaletteNV,
+) callconv(.c) void {
+    test_shading_rate_palette_count = count;
+}
+
 fn testCmdDrawMulti(
     _: raw.VkCommandBuffer,
     count: u32,
@@ -7641,6 +7903,7 @@ fn testInstance() Instance {
             .get_physical_device_external_buffer_properties = null,
             .get_physical_device_external_semaphore_properties = null,
             .get_physical_device_external_fence_properties = null,
+            .get_physical_device_fragment_shading_rates = null,
             .get_physical_device_queue_family_properties = testFunction(
                 raw.PFN_vkGetPhysicalDeviceQueueFamilyProperties,
             ),
@@ -8931,6 +9194,11 @@ test "dynamic rendering scopes record typed attachments and end once" {
     test_multi_draw_count = 0;
     test_stencil_reference = 0;
     test_indirect_draw_count = 0;
+    test_mesh_groups = .{ 0, 0, 0 };
+    test_mesh_indirect_count = 0;
+    test_fragment_size = .{};
+    test_shading_rate_image = null;
+    test_shading_rate_palette_count = 0;
 
     var device = testDevice();
     defer device.deinit();
@@ -8999,6 +9267,22 @@ test "dynamic rendering scopes record typed attachments and end once" {
         .destroy_pipeline = testFunction(raw.PFN_vkDestroyPipeline),
     };
     try command_buffer.bindPipeline(&graphics_pipeline);
+    const mesh = try device.meshShaderRecorder();
+    try mesh.drawExt(&command_buffer, .{ .x = 4, .y = 2 });
+    const shading_rate = try device.fragmentShadingRateController();
+    try shading_rate.setRate(&command_buffer, .{ .width = 2, .height = 1 }, .{
+        .pipeline_with_primitive = .replace,
+        .result_with_attachment = .multiply,
+    });
+    try shading_rate.bindImageNv(
+        &command_buffer,
+        &view,
+        .fragment_shading_rate_attachment_optimal_khr,
+    );
+    try shading_rate.setPalettesNv(&command_buffer, 0, &.{&.{
+        .invocation_1_per_pixel,
+        .invocation_1_per_2x2,
+    }});
     try command_buffer.setStencilReference(.{ .front = true, .back = true }, 7);
     try command_buffer.draw(.{ .vertex_count = 3 });
     try command_buffer.drawMulti(&.{
@@ -9021,6 +9305,8 @@ test "dynamic rendering scopes record typed attachments and end once" {
     try std.testing.expectError(error.InvalidOptions, command_buffer.bindIndexBuffer(&indirect, .fromBytes(1), .uint32));
     try std.testing.expectError(error.InvalidOptions, command_buffer.drawIndirect(&indirect, .zero, 2, 12));
     try command_buffer.drawIndirect(&indirect, .zero, 2, @sizeOf(DrawIndirectCommand));
+    try mesh.drawIndirect(.ext, &command_buffer, &indirect, .zero, 2, @sizeOf(raw.VkDrawMeshTasksIndirectCommandEXT));
+    try mesh.drawIndirectCount(.ext, &command_buffer, &indirect, .zero, &indirect, .fromBytes(48), 1, @sizeOf(raw.VkDrawMeshTasksIndirectCommandEXT));
     try std.testing.expectError(error.InvalidOptions, command_buffer.end());
     try scope.end();
     try scope.end();
@@ -9039,6 +9325,12 @@ test "dynamic rendering scopes record typed attachments and end once" {
     try std.testing.expectEqual(@as(u32, 2), test_multi_draw_count);
     try std.testing.expectEqual(@as(u32, 7), test_stencil_reference);
     try std.testing.expectEqual(@as(u32, 2), test_indirect_draw_count);
+    try std.testing.expectEqual([3]u32{ 4, 2, 1 }, test_mesh_groups);
+    try std.testing.expectEqual(@as(u32, 1), test_mesh_indirect_count);
+    try std.testing.expectEqual(@as(u32, 2), test_fragment_size.width);
+    try std.testing.expectEqual(@as(raw.VkFragmentShadingRateCombinerOpKHR, @intCast(raw.VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR)), test_fragment_combiners[0]);
+    try std.testing.expectEqual(try view.rawHandle(), test_shading_rate_image);
+    try std.testing.expectEqual(@as(u32, 1), test_shading_rate_palette_count);
 }
 
 test "legacy render-pass scopes validate compatibility subpasses imageless views and inheritance" {
@@ -9892,6 +10184,41 @@ test "memory budgets and external buffer capabilities are typed and command chec
     }));
     try std.testing.expectError(error.MissingCommand, physical_device.externalSemaphoreProperties(.opaque_fd));
     try std.testing.expectError(error.MissingCommand, physical_device.externalFenceProperties(.opaque_fd));
+}
+
+test "mesh and fragment shading rate capabilities are typed and bounded" {
+    var instance = testInstance();
+    defer instance.deinit();
+    instance.dispatch.get_physical_device_properties2 = testGetPhysicalDeviceProperties2;
+    instance.dispatch.get_physical_device_fragment_shading_rates = testGetPhysicalDeviceFragmentShadingRates;
+    var physical_device: PhysicalDevice = .{
+        ._handle = testHandle(raw.VkPhysicalDevice, 0x1100),
+        ._instance_handle = testHandle(raw.VkInstance, 0x1000),
+        .dispatch = instance.dispatch,
+    };
+
+    const mesh_ext = try physical_device.meshShaderPropertiesExt();
+    try std.testing.expectEqual(@as(u32, 128), mesh_ext.max_mesh_work_group_invocations);
+    const mesh_nv = try physical_device.meshShaderPropertiesNv();
+    try std.testing.expectEqual(@as(u32, 65_535), mesh_nv.max_draw_mesh_tasks_count);
+    const rate_properties = try physical_device.fragmentShadingRateProperties();
+    try std.testing.expect(rate_properties.non_trivial_combiner_operations);
+    try std.testing.expectEqual(@as(u32, 4), rate_properties.attachment_texel_size_max.width);
+    const image_properties = try physical_device.shadingRateImagePropertiesNv();
+    try std.testing.expectEqual(@as(u32, 12), image_properties.palette_size);
+
+    try std.testing.expectEqual(@as(u32, 2), try physical_device.fragmentShadingRateCount());
+    var storage: [2]fragment_shading_rate.Rate = undefined;
+    const rates = try physical_device.fragmentShadingRatesInto(&storage);
+    try std.testing.expectEqual(@as(usize, 2), rates.len);
+    try std.testing.expectEqual(@as(u32, 2), rates[1].fragment_size.width);
+    var short: [1]fragment_shading_rate.Rate = undefined;
+    try std.testing.expectError(error.BufferTooSmall, physical_device.fragmentShadingRatesInto(&short));
+
+    physical_device.dispatch.get_physical_device_properties2 = null;
+    physical_device.dispatch.get_physical_device_fragment_shading_rates = null;
+    try std.testing.expectError(error.MissingCommand, physical_device.meshShaderPropertiesExt());
+    try std.testing.expectError(error.MissingCommand, physical_device.fragmentShadingRateCount());
 }
 
 test "buffer wrappers cover creation views addresses sharing and checked binding" {
