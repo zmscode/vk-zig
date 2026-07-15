@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     }};
     var device = try physical_device.createDevice(.{
         .queues = &queues,
-        .enable_portability_subset = vk.platform == .metal,
+        .enable_portability_subset = vk.platform_support.metal,
     });
     defer device.deinit();
 

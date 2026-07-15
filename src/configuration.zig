@@ -7,6 +7,22 @@ const core = @import("core.zig");
 const registry = @import("registry.zig");
 
 pub const platform = build_options.platform;
+pub const PlatformSupport = struct {
+    metal: bool,
+    win32: bool,
+    xlib: bool,
+    xcb: bool,
+    wayland: bool,
+    android: bool,
+};
+pub const platform_support: PlatformSupport = .{
+    .metal = build_options.platform_metal,
+    .win32 = build_options.platform_win32,
+    .xlib = build_options.platform_xlib,
+    .xcb = build_options.platform_xcb,
+    .wayland = build_options.platform_wayland,
+    .android = build_options.platform_android,
+};
 pub const registry_commit = build_options.registry_commit;
 
 pub const Layer = struct {
@@ -26,15 +42,15 @@ const portability_device_extensions = [_]command.DeviceExtension{
 
 pub const Portability = struct {
     pub fn instanceExtensions() []const command.InstanceExtension {
-        return if (platform == .metal) &portability_instance_extensions else &.{};
+        return if (platform_support.metal) &portability_instance_extensions else &.{};
     }
 
     pub fn deviceExtensions() []const command.DeviceExtension {
-        return if (platform == .metal) &portability_device_extensions else &.{};
+        return if (platform_support.metal) &portability_device_extensions else &.{};
     }
 
     pub fn instanceFlags() types.InstanceCreateFlags {
-        return if (platform == .metal)
+        return if (platform_support.metal)
             .init(&.{.enumerate_portability_khr})
         else
             .empty;
@@ -46,21 +62,27 @@ const win32_surface_extensions = [_]command.InstanceExtension{ command.extension
 const xlib_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_xlib_surface };
 const xcb_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_xcb_surface };
 const wayland_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_wayland_surface };
+const xlib_xcb_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_xlib_surface, command.extension.khr_xcb_surface };
+const xlib_wayland_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_xlib_surface, command.extension.khr_wayland_surface };
+const xcb_wayland_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_xcb_surface, command.extension.khr_wayland_surface };
+const linux_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_xlib_surface, command.extension.khr_xcb_surface, command.extension.khr_wayland_surface };
 const android_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.khr_android_surface };
 const headless_surface_extensions = [_]command.InstanceExtension{ command.extension.khr_surface, command.extension.ext_headless_surface };
 
 /// Instance extensions needed by the surface constructor selected at build time.
 pub const SurfaceConfiguration = struct {
     pub fn instanceExtensions() []const command.InstanceExtension {
-        return switch (platform) {
-            .metal => &metal_surface_extensions,
-            .win32 => &win32_surface_extensions,
-            .xlib => &xlib_surface_extensions,
-            .xcb => &xcb_surface_extensions,
-            .wayland => &wayland_surface_extensions,
-            .android => &android_surface_extensions,
-            .none => &.{},
-        };
+        if (platform_support.metal) return &metal_surface_extensions;
+        if (platform_support.win32) return &win32_surface_extensions;
+        if (platform_support.android) return &android_surface_extensions;
+        if (platform_support.xlib and platform_support.xcb and platform_support.wayland) return &linux_surface_extensions;
+        if (platform_support.xlib and platform_support.xcb) return &xlib_xcb_surface_extensions;
+        if (platform_support.xlib and platform_support.wayland) return &xlib_wayland_surface_extensions;
+        if (platform_support.xcb and platform_support.wayland) return &xcb_wayland_surface_extensions;
+        if (platform_support.xlib) return &xlib_surface_extensions;
+        if (platform_support.xcb) return &xcb_surface_extensions;
+        if (platform_support.wayland) return &wayland_surface_extensions;
+        return &.{};
     }
 
     pub fn headlessInstanceExtensions() []const command.InstanceExtension {

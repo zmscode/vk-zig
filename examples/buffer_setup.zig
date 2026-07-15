@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     const priorities = [_]f32{1.0};
     var device = try physical_device.createDevice(.{
         .queues = &.{.{ .family_index = family.index, .priorities = &priorities }},
-        .enable_portability_subset = vk.platform == .metal,
+        .enable_portability_subset = vk.platform_support.metal,
     });
     defer device.deinit();
 

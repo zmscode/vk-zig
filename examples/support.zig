@@ -5,7 +5,7 @@ pub fn createInstance(entry: *const vk.Entry) !vk.Instance {
         .application_name = "vk-zig-example",
         .engine_name = "vk-zig",
         .api_version = .{ .major = 1, .minor = 1, .patch = 0 },
-        .enumerate_portability = vk.platform == .metal,
+        .enumerate_portability = vk.platform_support.metal,
     });
 }
 

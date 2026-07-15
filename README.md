@@ -45,19 +45,25 @@ exe.root_module.addImport("vulkan", vulkan_dependency.module("vulkan"));
 
 Metal declarations are enabled by default for Apple targets and Win32 declarations for Windows.
 Linux and BSD default to the platform-independent API so consuming projects do not unexpectedly
-need X11, XCB, or Wayland development headers. Select one explicitly when needed:
+need window-system headers. Enable any compatible declaration groups your application supports:
 
 ```zig
 const vulkan_dependency = b.dependency("vulkan", .{
     .target = target,
     .optimize = optimize,
-    .platform = .xcb,
+    .platform_xlib = true,
+    .platform_xcb = true,
+    .platform_wayland = true,
 });
 ```
 
-Valid values are `.none`, `.metal`, `.win32`, `.xlib`, `.xcb`, and `.wayland`.
-The X11, XCB, and Wayland choices require their corresponding development headers to be visible to
-Zig (use `--search-prefix` when they are installed outside the default include paths).
+The switches are `.platform_metal`, `.platform_win32`, `.platform_xlib`, `.platform_xcb`,
+`.platform_wayland`, and `.platform_android`. Xlib/XCB/Wayland may be combined on Linux and BSD;
+the other families are target-specific and mutually exclusive. The old single `.platform = .xcb`
+form remains supported for compatibility. At runtime-independent compile time, inspect
+`vk.platform_support.xlib`, `.xcb`, `.wayland`, and the other fields to see which constructors and
+raw declarations are available. Platform headers are represented by stable forward declarations;
+your windowing library still owns the concrete native objects passed to a surface constructor.
 
 ## Use the idiomatic layer
 
@@ -79,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
         .application_name = "my-zig-app",
         .engine_name = "my-engine",
         .api_version = .{ .major = 1, .minor = 3, .patch = 0 },
-        .enumerate_portability = vk.platform == .metal,
+        .enumerate_portability = vk.platform_support.metal,
     });
     defer instance.deinit();
 
@@ -106,7 +112,7 @@ var device = try physical_device.createDevice(.{
     .extensions = &.{vk.extension.khr_swapchain},
     .features = .init(&.{ .synchronization2, .dynamic_rendering }),
     .enabled_instance_extensions = &.{vk.extension.khr_surface.name},
-    .enable_portability_subset = vk.platform == .metal,
+    .enable_portability_subset = vk.platform_support.metal,
 });
 defer device.deinit();
 
@@ -146,7 +152,7 @@ try extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
 
 var instance = try entry.createInstance(.{
     .extensions = extensions.slice(),
-    .enumerate_portability = vk.platform == .metal,
+    .enumerate_portability = vk.platform_support.metal,
 });
 ```
 
@@ -615,7 +621,7 @@ var instance = try entry.createInstance(.{
         .values = .{ .bools = &.{true} },
     }},
     .debug_messenger = debug_messenger,
-    .enumerate_portability = vk.platform == .metal,
+    .enumerate_portability = vk.platform_support.metal,
 });
 defer instance.deinit(); // Destroys the messenger before the instance.
 
@@ -693,6 +699,7 @@ zig build bindings
 
 # Compile and run unit tests.
 zig build test
+zig build test-platforms # Cross-target Xlib + XCB + Wayland declaration check.
 
 # Build the loader/version example, or every example.
 zig build example
@@ -705,7 +712,8 @@ zig build run-logical-device
 
 # Generate another target/platform combination.
 zig build bindings -Dtarget=x86_64-windows-gnu
-zig build bindings -Dplatform=xcb
+zig build bindings -Dtarget=x86_64-linux-gnu \
+  -Dplatform_xlib=true -Dplatform_xcb=true -Dplatform_wayland=true
 
 # Pull Vulkan-Headers main, verify it translates, and update vendored docs/headers.
 zig build update

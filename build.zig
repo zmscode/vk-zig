@@ -5,13 +5,12 @@ const upstream_url = "https://github.com/KhronosGroup/Vulkan-Headers.git";
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const platform = b.option(
+    const legacy_platform = b.option(
         Platform,
         "platform",
-        "Platform surface declarations (none, metal, win32, xlib, xcb, wayland, android)",
-    ) orelse Platform.default(target.result.os.tag);
-
-    platform.validate(target.result.os.tag);
+        "Legacy single platform declaration group (prefer -Dplatform_xcb=true, etc.)",
+    );
+    const platform_support = PlatformSupport.resolve(b, target.result, legacy_platform);
 
     const cleaner = addBindingCleaner(b);
     const command_generator = addCommandGenerator(b);
@@ -21,7 +20,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         b.path("vendor/include"),
-        platform,
+        platform_support,
     );
     const bindings = cleanBindings(b, cleaner, translate_c.getOutput(), "vulkan_raw.zig");
 
@@ -59,7 +58,13 @@ pub fn build(b: *std.Build) void {
     });
 
     const build_options = b.addOptions();
-    build_options.addOption(Platform, "platform", platform);
+    build_options.addOption(Platform, "platform", platform_support.primary());
+    build_options.addOption(bool, "platform_metal", platform_support.metal);
+    build_options.addOption(bool, "platform_win32", platform_support.win32);
+    build_options.addOption(bool, "platform_xlib", platform_support.xlib);
+    build_options.addOption(bool, "platform_xcb", platform_support.xcb);
+    build_options.addOption(bool, "platform_wayland", platform_support.wayland);
+    build_options.addOption(bool, "platform_android", platform_support.android);
     build_options.addOption([]const u8, "registry_commit", registryCommit());
 
     const vulkan = b.addModule("vulkan", .{
@@ -77,6 +82,7 @@ pub fn build(b: *std.Build) void {
     configureLoaderLibraries(vulkan, target.result.os.tag);
 
     addBindingsStep(b, bindings, commands, types);
+    addPlatformDeclarationTestStep(b, optimize);
     addTestStep(b, target, optimize, vulkan);
     addExampleSteps(b, target, optimize, vulkan);
     addUpdateStep(
@@ -86,7 +92,7 @@ pub fn build(b: *std.Build) void {
         type_generator,
         target,
         optimize,
-        platform,
+        platform_support,
     );
 }
 
@@ -106,20 +112,75 @@ const Platform = enum {
             else => .none,
         };
     }
+};
 
-    fn validate(platform: Platform, os_tag: std.Target.Os.Tag) void {
-        switch (platform) {
-            .metal => switch (os_tag) {
-                .macos, .ios, .tvos, .visionos => {},
-                else => @panic("the metal Vulkan platform requires an Apple target"),
-            },
-            .win32 => if (os_tag != .windows) {
-                @panic("the win32 Vulkan platform requires a Windows target");
-            },
-            .android => if (os_tag != .linux) {
-                @panic("the Android Vulkan platform requires an Android target");
-            },
-            else => {},
+const PlatformSupport = struct {
+    metal: bool = false,
+    win32: bool = false,
+    xlib: bool = false,
+    xcb: bool = false,
+    wayland: bool = false,
+    android: bool = false,
+
+    fn resolve(b: *std.Build, target: std.Target, legacy: ?Platform) PlatformSupport {
+        const names = [_][]const u8{ "metal", "win32", "xlib", "xcb", "wayland", "android" };
+        var explicit: [names.len]?bool = undefined;
+        var has_explicit = false;
+        inline for (names, 0..) |name, index| {
+            explicit[index] = b.option(bool, "platform_" ++ name, "Enable the " ++ name ++ " Vulkan declaration group");
+            has_explicit = has_explicit or explicit[index] != null;
+        }
+        var support: PlatformSupport = if (legacy) |platform| .fromPlatform(platform) else if (has_explicit) .{} else .fromPlatform(.default(target.os.tag));
+        inline for (names, 0..) |name, index| {
+            if (explicit[index]) |enabled| @field(support, name) = enabled;
+        }
+        support.validate(target);
+        return support;
+    }
+
+    fn fromPlatform(platform: Platform) PlatformSupport {
+        return switch (platform) {
+            .none => .{},
+            .metal => .{ .metal = true },
+            .win32 => .{ .win32 = true },
+            .xlib => .{ .xlib = true },
+            .xcb => .{ .xcb = true },
+            .wayland => .{ .wayland = true },
+            .android => .{ .android = true },
+        };
+    }
+
+    fn primary(support: PlatformSupport) Platform {
+        var result: Platform = .none;
+        var count: usize = 0;
+        inline for (std.meta.fields(PlatformSupport)) |field| {
+            if (@field(support, field.name)) {
+                result = std.meta.stringToEnum(Platform, field.name).?;
+                count += 1;
+            }
+        }
+        return if (count == 1) result else .none;
+    }
+
+    fn validate(support: PlatformSupport, target: std.Target) void {
+        const apple = switch (target.os.tag) {
+            .macos, .ios, .tvos, .visionos => true,
+            else => false,
+        };
+        const unix_windowing = switch (target.os.tag) {
+            .linux, .freebsd, .openbsd, .netbsd, .dragonfly => true,
+            else => false,
+        };
+        if (support.metal and !apple) @panic("-Dplatform_metal=true requires an Apple target");
+        if (support.win32 and target.os.tag != .windows) @panic("-Dplatform_win32=true requires a Windows target");
+        if (support.android and target.abi != .android) @panic("-Dplatform_android=true requires an Android target ABI");
+        if ((support.xlib or support.xcb or support.wayland) and !unix_windowing) {
+            @panic("Xlib, XCB, and Wayland declarations require a Linux or BSD target");
+        }
+        const exclusive_count = @as(u8, @intFromBool(support.metal)) + @intFromBool(support.win32) + @intFromBool(support.android);
+        const unix_count = @as(u8, @intFromBool(support.xlib)) + @intFromBool(support.xcb) + @intFromBool(support.wayland);
+        if (exclusive_count > 1 or (exclusive_count != 0 and unix_count != 0)) {
+            @panic("Metal, Win32, Android, and Unix window-system declaration families cannot be combined");
         }
     }
 };
@@ -137,7 +198,7 @@ fn addTranslateC(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     include_path: std.Build.LazyPath,
-    platform: Platform,
+    platform_support: PlatformSupport,
 ) *std.Build.Step.TranslateC {
     const translate_c = b.addTranslateC(.{
         .root_source_file = b.path("src/vulkan_translate.h"),
@@ -146,15 +207,12 @@ fn addTranslateC(
         .link_libc = true,
     });
     translate_c.addIncludePath(include_path);
-    switch (platform) {
-        .none => {},
-        .metal => translate_c.defineCMacro("VK_ZIG_PLATFORM_METAL", null),
-        .win32 => translate_c.defineCMacro("VK_ZIG_PLATFORM_WIN32", null),
-        .xlib => translate_c.defineCMacro("VK_ZIG_PLATFORM_XLIB", null),
-        .xcb => translate_c.defineCMacro("VK_ZIG_PLATFORM_XCB", null),
-        .wayland => translate_c.defineCMacro("VK_ZIG_PLATFORM_WAYLAND", null),
-        .android => translate_c.defineCMacro("VK_ZIG_PLATFORM_ANDROID", null),
-    }
+    if (platform_support.metal) translate_c.defineCMacro("VK_ZIG_PLATFORM_METAL", null);
+    if (platform_support.win32) translate_c.defineCMacro("VK_ZIG_PLATFORM_WIN32", null);
+    if (platform_support.xlib) translate_c.defineCMacro("VK_ZIG_PLATFORM_XLIB", null);
+    if (platform_support.xcb) translate_c.defineCMacro("VK_ZIG_PLATFORM_XCB", null);
+    if (platform_support.wayland) translate_c.defineCMacro("VK_ZIG_PLATFORM_WAYLAND", null);
+    if (platform_support.android) translate_c.defineCMacro("VK_ZIG_PLATFORM_ANDROID", null);
     return translate_c;
 }
 
@@ -167,6 +225,33 @@ fn addBindingCleaner(b: *std.Build) *std.Build.Step.Compile {
             .optimize = .ReleaseSafe,
         }),
     });
+}
+
+fn addPlatformDeclarationTestStep(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const linux = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .linux,
+        .abi = .gnu,
+    });
+    const translate = addTranslateC(
+        b,
+        linux,
+        optimize,
+        b.path("vendor/include"),
+        .{ .xlib = true, .xcb = true, .wayland = true },
+    );
+    const check = b.addCheckFile(translate.getOutput(), .{
+        .expected_matches = &.{
+            "pub const VkXlibSurfaceCreateInfoKHR =",
+            "pub const VkXcbSurfaceCreateInfoKHR =",
+            "pub const VkWaylandSurfaceCreateInfoKHR =",
+        },
+    });
+    const step = b.step("test-platforms", "Cross-target composable platform declaration test");
+    step.dependOn(&check.step);
 }
 
 fn addCommandGenerator(b: *std.Build) *std.Build.Step.Compile {
@@ -433,7 +518,7 @@ fn addUpdateStep(
     type_generator: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    platform: Platform,
+    platform_support: PlatformSupport,
 ) void {
     const upstream_ref = b.option(
         []const u8,
@@ -463,7 +548,7 @@ fn addUpdateStep(
         target,
         optimize,
         checkout.path(b, "include"),
-        platform,
+        platform_support,
     );
     const verified_bindings = cleanBindings(
         b,

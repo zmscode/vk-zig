@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
     var instance = try entry.createInstance(.{
         .application_name = "vk-zig-debug-utils",
         .debug_messenger = messenger_config,
-        .enumerate_portability = vk.platform == .metal,
+        .enumerate_portability = vk.platform_support.metal,
     });
     defer instance.deinit();
 

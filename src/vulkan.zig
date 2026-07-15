@@ -216,6 +216,7 @@ pub const chooseImageUsage = capabilities.chooseImageUsage;
 pub const Layer = configuration.Layer;
 pub const layer = configuration.layer;
 pub const platform = configuration.platform;
+pub const platform_support = configuration.platform_support;
 pub const registry_commit = configuration.registry_commit;
 
 const enumeration_attempt_count_max = 4;
@@ -675,7 +676,7 @@ pub const Entry = struct {
         }
         var flags = advanced.flags;
         if (options.enumerate_portability) {
-            if (platform != .metal) return error.PortabilityNotSupported;
+            if (!platform_support.metal) return error.PortabilityNotSupported;
             const portability_extension = Portability.instanceExtensions()[0];
             if (!containsInstanceExtension(options, portability_extension.name)) {
                 if (extension_count == extension_pointers.len) return error.CountOverflow;
@@ -1022,7 +1023,7 @@ pub const Instance = struct {
     }
 
     pub fn createMetalSurface(instance: *const Instance, options: presentation.MetalSurfaceOptions) Error!Surface {
-        if (comptime platform == .metal) {
+        if (comptime platform_support.metal) {
             const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_metal_surface_ext)) orelse return error.MissingCommand;
             const info: raw.VkMetalSurfaceCreateInfoEXT = .{
@@ -1036,7 +1037,7 @@ pub const Instance = struct {
     }
 
     pub fn createWin32Surface(instance: *const Instance, options: presentation.Win32SurfaceOptions) Error!Surface {
-        if (comptime platform == .win32) {
+        if (comptime platform_support.win32) {
             const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_win32_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkWin32SurfaceCreateInfoKHR = .{
@@ -1051,7 +1052,7 @@ pub const Instance = struct {
     }
 
     pub fn createXlibSurface(instance: *const Instance, options: presentation.XlibSurfaceOptions) Error!Surface {
-        if (comptime platform == .xlib) {
+        if (comptime platform_support.xlib) {
             const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_xlib_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkXlibSurfaceCreateInfoKHR = .{
@@ -1066,7 +1067,7 @@ pub const Instance = struct {
     }
 
     pub fn createXcbSurface(instance: *const Instance, options: presentation.XcbSurfaceOptions) Error!Surface {
-        if (comptime platform == .xcb) {
+        if (comptime platform_support.xcb) {
             const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_xcb_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkXcbSurfaceCreateInfoKHR = .{
@@ -1081,7 +1082,7 @@ pub const Instance = struct {
     }
 
     pub fn createWaylandSurface(instance: *const Instance, options: presentation.WaylandSurfaceOptions) Error!Surface {
-        if (comptime platform == .wayland) {
+        if (comptime platform_support.wayland) {
             const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_wayland_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkWaylandSurfaceCreateInfoKHR = .{
@@ -1096,7 +1097,7 @@ pub const Instance = struct {
     }
 
     pub fn createAndroidSurface(instance: *const Instance, options: presentation.AndroidSurfaceOptions) Error!Surface {
-        if (comptime platform == .android) {
+        if (comptime platform_support.android) {
             const instance_handle = try instance.rawHandle();
             const create = (try instance.load(command.create_android_surface_khr)) orelse return error.MissingCommand;
             const info: raw.VkAndroidSurfaceCreateInfoKHR = .{
@@ -2258,7 +2259,7 @@ pub const PhysicalDevice = struct {
         options: DeviceOptions,
         extension_feature_tail: ?*anyopaque,
     ) Error!Device {
-        if (options.enable_portability_subset and platform != .metal) {
+        if (options.enable_portability_subset and !platform_support.metal) {
             return error.PortabilityNotSupported;
         }
         const evaluation = try physical_device.evaluateDeviceRequirements(options);

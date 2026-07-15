@@ -46,12 +46,12 @@ nullable raw handle.
 ## Create Vulkan objects
 
 Create an instance with `Entry.createInstance(InstanceOptions)`. On Apple/MoltenVK set
-`.enumerate_portability = vk.platform == .metal`; this adds the matching extension and typed flag
+`.enumerate_portability = vk.platform_support.metal`; this adds the matching extension and typed flag
 together.
 
 Create a logical device with `PhysicalDevice.createDevice(DeviceOptions)`. Supply one or more
 `DeviceQueueOptions`, each with a non-empty priority slice. On Apple/MoltenVK set
-`.enable_portability_subset = vk.platform == .metal`. Query the exact platform additions with
+`.enable_portability_subset = vk.platform_support.metal`. Query the exact platform additions with
 `vk.Portability.instanceExtensions()`, `deviceExtensions()`, and `instanceFlags()`.
 
 Use `createInstanceRaw` or `createDeviceRaw` for uncommon create-info chains. Keep every `pNext`

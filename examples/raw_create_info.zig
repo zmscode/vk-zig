@@ -27,13 +27,13 @@ pub fn main() !void {
     };
     const create_info: vk.raw.VkInstanceCreateInfo = .{
         .sType = vk.raw.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .flags = if (vk.platform == .metal)
+        .flags = if (vk.platform_support.metal)
             @intCast(vk.raw.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR)
         else
             0,
         .pApplicationInfo = &application_info,
-        .enabledExtensionCount = if (vk.platform == .metal) 1 else 0,
-        .ppEnabledExtensionNames = if (vk.platform == .metal)
+        .enabledExtensionCount = if (vk.platform_support.metal) 1 else 0,
+        .ppEnabledExtensionNames = if (vk.platform_support.metal)
             @ptrCast(&portability_extensions)
         else
             null,
