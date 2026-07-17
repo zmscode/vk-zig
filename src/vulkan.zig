@@ -6415,7 +6415,7 @@ const WindowsLibrary = struct {
     handle: std.os.windows.HMODULE,
 
     fn openWithDiagnostics(diagnostics_value: *LoaderDiagnostics) LoaderError!NativeOpenResult {
-        const path = loader_names[0];
+        const path = windows_loader_name;
         const library = openPath(path) catch |err| {
             diagnostics_value.record(path, .open_failed);
             return err;
@@ -6454,8 +6454,10 @@ const WindowsLibrary = struct {
     ) callconv(.winapi) ?*const anyopaque;
 };
 
+const windows_loader_name: [:0]const u8 = "vulkan-1.dll";
+
 const loader_names = switch (builtin.os.tag) {
-    .windows => [_][]const u8{"vulkan-1.dll"},
+    .windows => [_][]const u8{windows_loader_name},
     .macos => [_][]const u8{
         "libvulkan.1.dylib",
         "libvulkan.dylib",
