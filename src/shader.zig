@@ -47,7 +47,7 @@ pub const Stage = enum {
 };
 
 pub const StageSet = struct {
-    bits: std.EnumSet(Stage) = .initEmpty(),
+    bits: std.EnumSet(Stage) = .empty,
 
     pub const empty: StageSet = .{};
 

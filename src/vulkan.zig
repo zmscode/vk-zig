@@ -8589,7 +8589,7 @@ test "loader diagnostics preserve candidate order failures and selected identity
     try std.testing.expectEqualStrings(attempts[attempts.len - 1].path(), try loader.selectedPath());
 
     var explicit_diagnostics: LoaderDiagnostics = .{};
-    const selected_path = try std.testing.allocator.dupeZ(u8, try loader.selectedPath());
+    const selected_path = try std.testing.allocator.dupeSentinel(u8, try loader.selectedPath(), 0);
     defer std.testing.allocator.free(selected_path);
     var explicit = try Loader.initFromPathWithDiagnostics(selected_path, &explicit_diagnostics);
     defer explicit.deinit();

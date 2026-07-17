@@ -1,7 +1,7 @@
 # vk-zig
 
-Zig 0.16 bindings for Vulkan, generated from the official Khronos registry and headers. The
-package provides:
+Zig 0.17 development bindings for Vulkan, generated from the official Khronos registry and
+headers. This branch is tested with Zig `0.17.0-dev.1415+64dfaa568`. The package provides:
 
 - a complete target-specific raw ABI at `vulkan.raw` and through the `vulkan-raw` module;
 - a typed runtime loader with entry, instance, physical-device, device, queue, surface, and
@@ -19,10 +19,10 @@ The normal build does not use the network. The vendored C headers are generated 
 
 ## Add the package
 
-Add the package to your application's `build.zig.zon` with Zig 0.16:
+Add this development branch to your application's `build.zig.zon` with Zig 0.17-dev:
 
 ```sh
-zig fetch --save=vulkan git+https://github.com/zmscode/vk-zig.git
+zig fetch --save=vulkan git+https://github.com/zmscode/vk-zig.git#codex/zig-0.17-dev
 ```
 
 For local development, use the equivalent path dependency:

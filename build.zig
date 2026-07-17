@@ -153,9 +153,9 @@ const PlatformSupport = struct {
     fn primary(support: PlatformSupport) Platform {
         var result: Platform = .none;
         var count: usize = 0;
-        inline for (std.meta.fields(PlatformSupport)) |field| {
-            if (@field(support, field.name)) {
-                result = std.meta.stringToEnum(Platform, field.name).?;
+        inline for (comptime std.meta.fieldNames(PlatformSupport)) |field_name| {
+            if (@field(support, field_name)) {
+                result = std.meta.stringToEnum(Platform, field_name).?;
                 count += 1;
             }
         }

@@ -87,7 +87,7 @@ pub const BuildFlag = enum {
 };
 
 pub const BuildFlags = struct {
-    bits: std.EnumSet(BuildFlag) = .initEmpty(),
+    bits: std.EnumSet(BuildFlag) = .empty,
 
     pub const empty: BuildFlags = .{};
 
@@ -123,7 +123,7 @@ pub const BuildFlags = struct {
 
 pub const GeometryFlag = enum { @"opaque", no_duplicate_any_hit };
 pub const GeometryFlags = struct {
-    bits: std.EnumSet(GeometryFlag) = .initEmpty(),
+    bits: std.EnumSet(GeometryFlag) = .empty,
     pub const empty: GeometryFlags = .{};
 
     pub fn init(values: []const GeometryFlag) GeometryFlags {

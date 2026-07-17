@@ -352,7 +352,7 @@ test "typed instance chains reject duplicates, empty values, and excessive count
         .name = "empty",
         .values = .{ .f32s = &.{} },
     }}, null));
-    const too_many = [_]ValidationFeature{.best_practices} ** (validation_feature_count_max + 1);
+    const too_many: [validation_feature_count_max + 1]ValidationFeature = @splat(.best_practices);
     try std.testing.expectError(error.CountOverflow, storage.link(.{ .enabled = &too_many }, &.{}, null));
 }
 

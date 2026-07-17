@@ -835,7 +835,7 @@ fn testBinaryData(
     data: ?*anyopaque,
 ) callconv(.c) raw.VkResult {
     key.*.keySize = 2;
-    key.*.key = [_]u8{ 7, 8 } ++ [_]u8{0} ** 30;
+    key.*.key = [_]u8{ 7, 8 } ++ @as([30]u8, @splat(0));
     if (data == null) {
         size.* = 3;
         return raw.VK_SUCCESS;

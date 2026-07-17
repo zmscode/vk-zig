@@ -353,12 +353,12 @@ pub const Config = struct {
             .pointer => |pointer| pointer,
             else => @compileError("debug messenger context must be a pointer"),
         };
-        if (pointer_info.size != .one or pointer_info.is_allowzero) {
+        if (pointer_info.size != .one or pointer_info.attrs.@"allowzero") {
             @compileError("debug messenger context must be a non-allowzero single-item pointer");
         }
         validateHandler(@TypeOf(handler), ContextPointer);
         const Adapter = ContextHandlerAdapter(ContextPointer, handler);
-        const user_data: *anyopaque = if (pointer_info.is_const)
+        const user_data: *anyopaque = if (pointer_info.attrs.@"const")
             @ptrCast(@constCast(context))
         else
             @ptrCast(context);
@@ -494,11 +494,11 @@ fn validateHandler(comptime Handler: type, comptime ContextPointer: ?type) void 
         else => @compileError("debug message handler must be a function"),
     };
     const parameter_count: usize = if (ContextPointer == null) 1 else 2;
-    if (function_info.params.len != parameter_count) {
+    if (function_info.param_types.len != parameter_count) {
         @compileError("debug message handler has the wrong parameter count");
     }
     if (ContextPointer) |ExpectedContext| {
-        const actual_context = function_info.params[0].type orelse {
+        const actual_context = function_info.param_types[0] orelse {
             @compileError("debug message handler context type must be explicit");
         };
         if (actual_context != ExpectedContext) {
@@ -506,7 +506,7 @@ fn validateHandler(comptime Handler: type, comptime ContextPointer: ?type) void 
         }
     }
     const message_index: usize = if (ContextPointer == null) 0 else 1;
-    const actual_message = function_info.params[message_index].type orelse {
+    const actual_message = function_info.param_types[message_index] orelse {
         @compileError("debug message handler message type must be explicit");
     };
     if (actual_message != Message) {

@@ -51,7 +51,7 @@ pub const CreateFlag = enum {
 };
 
 pub const CreateFlags = struct {
-    bits: std.EnumSet(CreateFlag) = .initEmpty(),
+    bits: std.EnumSet(CreateFlag) = .empty,
     pub const empty: CreateFlags = .{};
 
     pub fn init(values: []const CreateFlag) CreateFlags {

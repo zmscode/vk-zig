@@ -1,6 +1,6 @@
 ---
 name: use-vk-zig
-description: Use vk-zig to generate target-specific Vulkan 1.4 bindings and build or debug Zig 0.16 Vulkan applications. Trigger when an agent is adding vk-zig to build.zig/build.zig.zon, regenerating Vulkan bindings from Khronos inputs, loading commands, selecting queues or memory, creating instances/devices/surfaces/swapchains, using VK_EXT_debug_utils, handling MoltenVK portability, or diagnosing Vulkan loader discovery.
+description: Use vk-zig to generate target-specific Vulkan 1.4 bindings and build or debug Zig 0.17-dev Vulkan applications. Trigger when an agent is adding vk-zig to build.zig/build.zig.zon, regenerating Vulkan bindings from Khronos inputs, loading commands, selecting queues or memory, creating instances/devices/surfaces/swapchains, using VK_EXT_debug_utils, handling MoltenVK portability, or diagnosing Vulkan loader discovery.
 ---
 
 # Use vk-zig
@@ -11,8 +11,8 @@ exact ABI is required. Preserve explicit Vulkan ownership and destruction order.
 ## Start here
 
 1. Read `README.md`, then inspect the closest file in `examples/`.
-2. Confirm the project uses Zig 0.16 or newer.
-3. Add the package with `zig fetch --save=vulkan git+https://github.com/zmscode/vk-zig.git`.
+2. Confirm the project uses Zig `0.17.0-dev.1415+64dfaa568` or a compatible newer development build.
+3. Add the package with `zig fetch --save=vulkan git+https://github.com/zmscode/vk-zig.git#codex/zig-0.17-dev`.
 4. Pass the consumer's target and optimization mode to the dependency and import its `vulkan`
    module.
 5. Run `zig build test` and `zig build examples` after API or generation changes.
