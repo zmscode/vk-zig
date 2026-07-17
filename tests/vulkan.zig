@@ -298,11 +298,24 @@ test "generated extension names compose without duplicates" {
         vk.extension.ext_debug_utils,
         vk.extension.khr_xcb_surface,
     });
+    try extensions.appendName("VK_EXT_debug_utils");
     try std.testing.expectEqual(@as(usize, 3), extensions.slice().len);
     try std.testing.expect(extensions.contains("VK_EXT_debug_utils"));
     try std.testing.expect(!extensions.contains("VK_EXT_missing"));
     try extensions.append(vk.extension.ext_headless_surface);
     try std.testing.expectError(error.CountOverflow, extensions.append(vk.extension.ext_metal_surface));
+
+    var borrowed_names: vk.InstanceExtensionSet(2) = .{};
+    const pointers = [_][*:0]const u8{
+        "VK_KHR_surface",
+        "VK_EXT_debug_utils",
+    };
+    try borrowed_names.appendPointerNames(&pointers);
+    try std.testing.expect(borrowed_names.contains("VK_KHR_surface"));
+    try std.testing.expectError(
+        error.ExtensionNotPresent,
+        borrowed_names.appendName("VK_VENDOR_missing"),
+    );
 }
 
 test "generated extension metadata conforms to registry scope and relationships" {

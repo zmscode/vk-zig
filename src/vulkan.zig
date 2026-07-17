@@ -282,6 +282,25 @@ fn TypedExtensionSet(comptime ExtensionType: type, comptime capacity: usize) typ
             for (items) |item| try set.append(item);
         }
 
+        pub fn appendName(set: *Set, name: []const u8) Error!void {
+            const item = if (comptime ExtensionType == InstanceExtension)
+                command.findInstanceExtension(name)
+            else if (comptime ExtensionType == DeviceExtension)
+                command.findDeviceExtension(name)
+            else
+                unreachable;
+            try set.append(item orelse return error.ExtensionNotPresent);
+        }
+
+        pub fn appendNames(set: *Set, names: []const [:0]const u8) Error!void {
+            for (names) |name| try set.appendName(name);
+        }
+
+        /// Accepts borrowed C name arrays exposed by window-system libraries.
+        pub fn appendPointerNames(set: *Set, names: []const [*:0]const u8) Error!void {
+            for (names) |name| try set.appendName(std.mem.span(name));
+        }
+
         pub fn contains(set: *const Set, name: []const u8) bool {
             for (set.slice()) |item| {
                 if (std.mem.eql(u8, item.name, name)) return true;

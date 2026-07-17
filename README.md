@@ -173,6 +173,10 @@ var instance = try entry.createInstance(.{
 });
 ```
 
+Window libraries that expose borrowed `[*:0]const u8` extension names can pass them directly to
+`InstanceExtensionSet.appendPointerNames`; vk-zig resolves them to generated, scope-checked
+descriptors and reports `error.ExtensionNotPresent` for an unknown name.
+
 Instance and device discovery return typed properties. Names and descriptions are bounded views
 into each returned record, and caller-storage/count forms are available when allocation is not
 appropriate:
