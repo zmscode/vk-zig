@@ -1,7 +1,7 @@
 # vk-zig
 
-Zig 0.16 bindings for Vulkan, generated from the official Khronos registry and headers. The
-package provides:
+Zig 0.17 development bindings for Vulkan, generated from the official Khronos registry and
+headers. This branch is tested with Zig `0.17.0-dev.1415+64dfaa568`. The package provides:
 
 - a complete target-specific raw ABI at `vulkan.raw` and through the `vulkan-raw` module;
 - a typed runtime loader with entry, instance, physical-device, device, queue, surface, and
@@ -19,11 +19,15 @@ The normal build does not use the network. The vendored C headers are generated 
 
 ## Add the package
 
-Add the package to your application's `build.zig.zon` with Zig 0.16:
+Add this development branch to your application's `build.zig.zon` with Zig 0.17-dev:
 
 ```sh
-zig fetch --save=vulkan git+https://github.com/zmscode/vk-zig.git
+zig fetch --save=vulkan "git+https://github.com/zmscode/vk-zig.git#zig-0.17-dev"
 ```
+
+The stable Zig 0.16 implementation remains on the repository's `main` branch. Zig 0.17 is still
+under active development, so this branch pins its minimum known-good compiler revision and will
+move forward as the language and standard library evolve.
 
 For local development, use the equivalent path dependency:
 
@@ -914,7 +918,7 @@ See `examples/README.md` for the complete example matrix and named run commands.
 ### Linux GCC 16 `.sframe` linker failure
 
 Some current Linux hosts use GCC 16 startup objects containing `.sframe` relocations that Zig
-0.16's linker cannot consume. If a native `zig build test` or `zig build examples` fails in
+toolchain builds may not consume. If a native `zig build test` or `zig build examples` fails in
 `crt1.o:.sframe` with `unhandled relocation type R_X86_64_PC64`, select an explicit target so Zig
 uses its target runtime instead of the incompatible host startup object:
 

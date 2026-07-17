@@ -813,7 +813,7 @@ fn writeHeader(writer: *std.Io.Writer) !void {
         \\        .pointer => |value| value,
         \\        else => @compileError("expected an optional Vulkan PFN function-pointer type"),
         \\    };
-        \\    if (pointer.size != .one or !pointer.is_const) {
+        \\    if (pointer.size != .one or !pointer.attrs.@"const") {
         \\        @compileError("expected an optional Vulkan PFN function-pointer type");
         \\    }
         \\    switch (@typeInfo(pointer.child)) {

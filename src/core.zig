@@ -290,9 +290,9 @@ pub const DeviceState = struct {
 
 const owner_slot_count = 16_384;
 var owner_slots: [owner_slot_count]std.atomic.Value(u64) =
-    [_]std.atomic.Value(u64){.init(0)} ** owner_slot_count;
+    @splat(.init(0));
 var device_status_slots: [owner_slot_count]std.atomic.Value(u8) =
-    [_]std.atomic.Value(u8){.init(@intFromEnum(DeviceState.Status.destroyed))} ** owner_slot_count;
+    @splat(.init(@intFromEnum(DeviceState.Status.destroyed)));
 var next_owner_token: std.atomic.Value(u64) = .init(1);
 
 /// A process-local atomic token shared by every bitwise copy of an owning wrapper.

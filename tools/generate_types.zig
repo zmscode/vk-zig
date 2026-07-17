@@ -430,7 +430,7 @@ fn writeFeatures(gpa: std.mem.Allocator, writer: *std.Io.Writer, bindings: []con
         \\};
         \\
         \\pub const FeatureSet = struct {
-        \\    bits: std.EnumSet(Feature) = .initEmpty(),
+        \\    bits: std.EnumSet(Feature) = .empty,
         \\
         \\    pub const empty: FeatureSet = .{};
         \\

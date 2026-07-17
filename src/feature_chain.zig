@@ -63,9 +63,9 @@ pub fn ExtensionChain(comptime NodeTypes: []const type) type {
 
         pub fn supportedBy(requested: *const Chain, supported: *const Chain) bool {
             inline for (NodeTypes, 0..) |Node, index| {
-                inline for (std.meta.fields(Node)) |field| {
-                    if (@field(requested.values[index], field.name) and
-                        !@field(supported.values[index], field.name)) return false;
+                inline for (comptime std.meta.fieldNames(Node)) |field_name| {
+                    if (@field(requested.values[index], field_name) and
+                        !@field(supported.values[index], field_name)) return false;
                 }
             }
             return true;

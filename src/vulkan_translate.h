@@ -10,7 +10,18 @@
 #include <vulkan/vulkan_metal.h>
 #endif
 #if defined(VK_ZIG_PLATFORM_WIN32)
-#include <windows.h>
+/*
+ * Vulkan's Win32 declarations only depend on these handle and scalar types.
+ * Keep the translation unit independent of windows.h so cross-target binding
+ * generation does not pull the host compiler's complete platform SDK surface.
+ */
+typedef void *HANDLE;
+typedef struct HINSTANCE__ *HINSTANCE;
+typedef struct HWND__ *HWND;
+typedef struct HMONITOR__ *HMONITOR;
+typedef const uint16_t *LPCWSTR;
+typedef uint32_t DWORD;
+typedef struct _SECURITY_ATTRIBUTES SECURITY_ATTRIBUTES;
 #include <vulkan/vulkan_win32.h>
 #endif
 #if defined(VK_ZIG_PLATFORM_XLIB)

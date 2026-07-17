@@ -196,7 +196,7 @@ pub const QueryContext = struct {
         var profile_storage: ProfileStorage = .{};
         var value: raw.VkVideoCapabilitiesKHR = .{ .sType = raw.VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR };
         try core.checkSuccess(get(context._physical_device, profile_storage.link(profile), &value));
-        var name: [256:0]u8 = [_:0]u8{0} ** 256;
+        var name: [256:0]u8 = @splat(0);
         @memcpy(name[0..256], value.stdHeaderVersion.extensionName[0..256]);
         return .{
             .min_bitstream_offset_alignment = .fromBytes(value.minBitstreamBufferOffsetAlignment),

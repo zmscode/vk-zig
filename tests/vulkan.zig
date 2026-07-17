@@ -930,7 +930,7 @@ test "typed device options reject invalid input before dispatch" {
             .priorities = &.{},
         }} }).validate(),
     );
-    const too_many = [_]vk.DeviceQueueOptions{queue} ** 65;
+    const too_many: [65]vk.DeviceQueueOptions = @splat(queue);
     try std.testing.expectError(
         error.CountOverflow,
         (vk.DeviceOptions{ .queues = &too_many }).validate(),
